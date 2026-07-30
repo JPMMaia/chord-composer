@@ -1,4 +1,4 @@
-import { NoteName, ScaleType, TimeSignature } from '@/types/music';
+import type { NoteName, ScaleType, TimeSignature } from '@/types/music';
 
 /** All 12 note names in chromatic order */
 export const NOTE_NAMES: NoteName[] = [

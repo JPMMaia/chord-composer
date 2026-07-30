@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { Project, Track } from '@/types/music';
+import type { Project, Track } from '@/types/music';
 
 export interface AutoSaveData {
   project: Project;
@@ -31,7 +31,7 @@ function scheduleSave(data: AutoSaveData): void {
   }, debounceDelay);
 }
 
-export const autoSaveStore = create<AutoSaveState>((set, get) => ({
+export const autoSaveStore = create<AutoSaveState>(() => ({
   save: (data: AutoSaveData) => {
     scheduleSave(data);
   },

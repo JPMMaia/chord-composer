@@ -1,6 +1,5 @@
-import { NoteName, Scale, ScaleType, ChordQuality } from '@/types/music';
-import { getScaleIntervals, getScalePitches } from './scales';
-import { NOTE_NAMES } from '@/utils/constants';
+import type { NoteName, Scale, ChordQuality } from '@/types/music';
+import { getScalePitches } from './scales';
 
 /** Internal representation of a chord with intervals. */
 export interface ChordData {
@@ -74,12 +73,6 @@ function romanForQuality(quality: ChordQuality, base: string): string {
   }
 }
 
-/** Quality suffixes for roman numerals. */
-const QUALITY_SUFFIX: Record<ChordQuality, string> = {
-  major: '', minor: '', diminished: '°', augmented: '+',
-  sus2: '', sus4: '', dominant7: '7', maj7: 'maj7', min7: 'm7', dim7: '°7',
-};
-
 /**
  * Returns the diatonic chords for the given scale.
  * @param scale - The scale to derive chords from.
@@ -137,7 +130,7 @@ export function getRomanNumeral(
     }
     const isMinor =
       scale.type === 'naturalMinor' || scale.type === 'harmonicMinor' || scale.type === 'melodicMinor';
-    const romanNumerals = isMinor ? ROMAN_NUMERALS_MINOR : ROMAN_NUMERALS_MAJOR;
+    const romanNumerals = isMinor ? ROMAN_NUMERAL_BASES_MINOR : ROMAN_NUMERAL_BASES_MAJOR;
     return romanNumerals[pitchIndex];
   }
 

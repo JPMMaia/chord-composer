@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { Project, Bar, NoteName, ScaleType, TimeSignature, Track } from '@/types/music';
+import type { Project, Bar, NoteName, ScaleType, TimeSignature } from '@/types/music';
 import { generateId } from '@/utils/id';
 import {
   DEFAULT_BPM,

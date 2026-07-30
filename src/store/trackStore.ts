@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { Track } from '@/types/music';
+import type { Track } from '@/types/music';
 import { generateId } from '@/utils/id';
 
 interface TrackState {

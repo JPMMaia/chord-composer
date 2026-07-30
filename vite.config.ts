@@ -15,4 +15,4 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: './tests/setup.ts',
   },
-})
+} as import('vite').UserConfig & { test?: Record<string, unknown> })

@@ -1,5 +1,4 @@
-import { NoteName, ScaleType, Scale } from '@/types/music';
-import { NOTE_NAMES } from '@/utils/constants';
+import type { NoteName, ScaleType, Scale } from '@/types/music';
 
 /**
  * Interval patterns (in semitones) for each scale type relative to the root.

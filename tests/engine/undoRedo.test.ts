@@ -1,0 +1,130 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { createUndoRedoMiddleware } from '@/engine/undoRedo';
+
+describe('undoRedo', () => {
+  const initialState = { value: 0 };
+  let undoRedo: ReturnType<typeof createUndoRedoMiddleware<{ value: number }>>;
+
+  beforeEach(() => {
+    undoRedo = createUndoRedoMiddleware(initialState, 10);
+  });
+
+  describe('pushState', () => {
+    it('pushes the initial state', () => {
+      expect(() => undoRedo.pushState({ value: 1 })).not.toThrow();
+    });
+
+    it('records state changes', () => {
+      undoRedo.pushState({ value: 1 });
+      undoRedo.pushState({ value: 2 });
+      undoRedo.pushState({ value: 3 });
+      expect(undoRedo.current()).toEqual({ value: 3 });
+    });
+
+    it('clears redo stack when new state is pushed after undo', () => {
+      undoRedo.pushState({ value: 1 });
+      undoRedo.pushState({ value: 2 });
+      undoRedo.undo();
+      undoRedo.pushState({ value: 99 });
+      expect(undoRedo.current()).toEqual({ value: 99 });
+      // Redo should be empty after new push
+      expect(() => undoRedo.redo()).toThrow();
+    });
+  });
+
+  describe('undo', () => {
+    it('returns to previous state', () => {
+      undoRedo.pushState({ value: 1 });
+      undoRedo.pushState({ value: 2 });
+      const result = undoRedo.undo();
+      expect(result).toEqual({ value: 1 });
+      expect(undoRedo.current()).toEqual({ value: 1 });
+    });
+
+    it('throws when there is nothing to undo', () => {
+      expect(() => undoRedo.undo()).toThrow('Nothing to undo');
+    });
+
+    it('can undo multiple levels', () => {
+      undoRedo.pushState({ value: 1 });
+      undoRedo.pushState({ value: 2 });
+      undoRedo.pushState({ value: 3 });
+      undoRedo.undo();
+      undoRedo.undo();
+      expect(undoRedo.current()).toEqual({ value: 1 });
+    });
+  });
+
+  describe('redo', () => {
+    it('returns to undone state', () => {
+      undoRedo.pushState({ value: 1 });
+      undoRedo.pushState({ value: 2 });
+      undoRedo.undo();
+      const result = undoRedo.redo();
+      expect(result).toEqual({ value: 2 });
+      expect(undoRedo.current()).toEqual({ value: 2 });
+    });
+
+    it('throws when there is nothing to redo', () => {
+      expect(() => undoRedo.redo()).toThrow('Nothing to redo');
+    });
+
+    it('can redo multiple levels', () => {
+      undoRedo.pushState({ value: 1 });
+      undoRedo.pushState({ value: 2 });
+      undoRedo.pushState({ value: 3 });
+      undoRedo.undo();
+      undoRedo.undo();
+      undoRedo.redo();
+      undoRedo.redo();
+      expect(undoRedo.current()).toEqual({ value: 3 });
+    });
+  });
+
+  describe('clearHistory', () => {
+    it('clears undo and redo stacks', () => {
+      undoRedo.pushState({ value: 1 });
+      undoRedo.pushState({ value: 2 });
+      undoRedo.clearHistory();
+      expect(() => undoRedo.undo()).toThrow();
+      expect(() => undoRedo.redo()).toThrow();
+    });
+
+    it('preserves current state after clear', () => {
+      undoRedo.pushState({ value: 42 });
+      undoRedo.clearHistory();
+      expect(undoRedo.current()).toEqual({ value: 42 });
+    });
+  });
+
+  describe('maxHistorySize', () => {
+    it('trims oldest entries when history exceeds max', () => {
+      const small = createUndoRedoMiddleware({ value: 0 }, 3);
+      small.pushState({ value: 1 });
+      small.pushState({ value: 2 });
+      small.pushState({ value: 3 });
+      small.pushState({ value: 4 });
+      // Should have trimmed the oldest, so undo goes to 3, not 1
+      small.undo();
+      expect(small.current()).toEqual({ value: 3 });
+    });
+
+    it('respects maxHistorySize of 1 (only current state)', () => {
+      const tiny = createUndoRedoMiddleware({ value: 0 }, 1);
+      tiny.pushState({ value: 1 });
+      tiny.pushState({ value: 2 });
+      expect(() => tiny.undo()).toThrow();
+    });
+  });
+
+  describe('current', () => {
+    it('returns the current state', () => {
+      undoRedo.pushState({ value: 42 });
+      expect(undoRedo.current()).toEqual({ value: 42 });
+    });
+
+    it('returns initial state before any push', () => {
+      expect(undoRedo.current()).toEqual(initialState);
+    });
+  });
+});

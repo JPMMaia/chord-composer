@@ -1,4 +1,5 @@
 import type { ChordQuality, NoteName, Project, ScaleType } from '@/types/music';
+import { isValidTimeSignature } from '@/engine/timeline';
 
 /**
  * Current schema version for forward/backward compatibility.
@@ -203,14 +204,11 @@ export function validateProject(project: Project): ValidationResult {
 
   if (!project.timeSignature) {
     errors.push('Time signature is required.');
-  } else {
+  } else if (!isValidTimeSignature(project.timeSignature)) {
     const { beatsPerMeasure, beatUnit } = project.timeSignature;
-    if (typeof beatsPerMeasure !== 'number' || beatsPerMeasure < 1) {
-      errors.push('Time signature beatsPerMeasure must be >= 1.');
-    }
-    if (![2, 4, 8].includes(beatUnit)) {
-      errors.push(`Time signature beatUnit must be 2, 4, or 8. Got: ${beatUnit}.`);
-    }
+    errors.push(
+      `Invalid time signature ${beatsPerMeasure}/${beatUnit}: beatsPerMeasure must be >= 2 and beatUnit one of 2, 4, 8, 16.`
+    );
   }
 
   if (!VALID_NOTES.includes(project.key)) {

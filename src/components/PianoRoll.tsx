@@ -16,8 +16,9 @@ export interface PianoRollProps {
   pixelsPerBeat: number;
   pixelsPerOctave: number;
   gridSize: number;
-  onNoteClick: (barId: string, pitch: number, beat: number) => void;
-  onNoteDrag: (noteId: string, durationDelta: number) => void;
+  /** Optional: the roll is a read-only view of the derived notes unless supplied. */
+  onNoteClick?: (barId: string, pitch: number, beat: number) => void;
+  onNoteDrag?: (noteId: string, durationDelta: number) => void;
 }
 
 interface DragState {
@@ -277,7 +278,7 @@ export function PianoRoll({
       }
 
       if (selectedBarId) {
-        onNoteClick(selectedBarId, pitch, snappedBeat);
+        onNoteClick?.(selectedBarId, pitch, snappedBeat);
       }
     },
     [pixelsPerBeat, pixelsPerOctave, gridSize, scale, selectedBarId, selectedBarNotes, onNoteClick]
@@ -346,7 +347,7 @@ export function PianoRoll({
       if (!dragState.isDragging) return;
 
       dragState.isDragging = false;
-      onNoteDrag(dragState.noteId || '', 0);
+      onNoteDrag?.(dragState.noteId || '', 0);
     },
     [onNoteDrag]
   );

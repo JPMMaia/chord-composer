@@ -2,23 +2,35 @@ import { describe, it, expect } from "vitest";
 import {
   splitBarIntoChords,
   reorderChords,
-  autoFillNotesFromChords,
+  generateNotesFromSegments,
   mergeAdjacentChords,
   getChordDuration,
+  retuneSegmentsToScale,
 } from "@/engine/chordOperations";
-import { Bar, Scale, ChordSegment, Note } from "@/types/music";
+import { Bar, Scale, ChordSegment, Note, TimeSignature } from "@/types/music";
 import { generateId } from "@/utils/id";
 
+const TS_4_4: TimeSignature = { beatsPerMeasure: 4, beatUnit: 4 };
+const TS_3_4: TimeSignature = { beatsPerMeasure: 3, beatUnit: 4 };
+
+/** A bar carrying exactly the given segments. */
+const barWith = (chords: ChordSegment[], timeSignature?: TimeSignature): Bar => ({
+  id: generateId(),
+  barIndex: 0,
+  timeSignature,
+  scale: { root: "C", type: "major" },
+  chords,
+  notes: [],
+});
+
+// Bar length now comes from the bar's time signature rather than from however
+// many placeholder chords happen to be sitting in it.
 const makeBar = (barIndex: number, beatsPerMeasure: number): Bar => ({
   id: generateId(),
   barIndex,
+  timeSignature: { beatsPerMeasure, beatUnit: 4 },
   scale: { root: "C", type: "major" },
-  // Pre-populate with placeholder chords to set bar length
-  chords: Array.from({ length: beatsPerMeasure }, () => ({
-    id: generateId(),
-    romanNumeral: "I",
-    duration: 1,
-  })),
+  chords: [],
   notes: [],
 });
 
@@ -169,73 +181,89 @@ describe("chordOperations", () => {
     });
   });
 
-  describe("autoFillNotesFromChords", () => {
-    it("fills notes for a single chord spanning the bar", () => {
-      const bar = makeBar(0, 4);
-      const chords = [makeChord("I", 4)];
-      const result = autoFillNotesFromChords(bar, chords, 4);
-      expect(result.length).toBeGreaterThan(0);
+  describe("generateNotesFromSegments", () => {
+    it("generates a triad for a chord spanning the bar", () => {
+      const bar = barWith([makeChord("I", 4)]);
+      const result = generateNotesFromSegments(bar, TS_4_4, 4);
       // C major triad in octave 4: C4, E4, G4 = MIDI 60, 64, 67
-      expect(result.some((n) => n.pitch === 60)).toBe(true);
-      expect(result.some((n) => n.pitch === 64)).toBe(true);
-      expect(result.some((n) => n.pitch === 67)).toBe(true);
+      expect(result.map((n) => n.pitch).sort((a, b) => a - b)).toEqual([60, 64, 67]);
     });
 
-    it("fills notes for multiple chords with correct timing", () => {
-      const bar = makeBar(0, 4);
-      const chords = [makeChord("I", 2), makeChord("V", 2)];
-      const result = autoFillNotesFromChords(bar, chords, 4);
-      // First chord (I = C major) should start at beat 0
-      // Second chord (V = G major) should start at beat 2
-      const firstChordNotes = result.filter((n) => n.startBeat < 2);
-      const secondChordNotes = result.filter((n) => n.startBeat >= 2);
-      expect(firstChordNotes.length).toBeGreaterThan(0);
-      expect(secondChordNotes.length).toBeGreaterThan(0);
+    it("lays consecutive chords out at the right start beats", () => {
+      const bar = barWith([makeChord("I", 2), makeChord("V", 2)]);
+      const result = generateNotesFromSegments(bar, TS_4_4, 4);
+      expect(result.filter((n) => n.startBeat === 0)).toHaveLength(3);
+      expect(result.filter((n) => n.startBeat === 2)).toHaveLength(3);
     });
 
-    it("notes have correct duration matching chord duration", () => {
-      const bar = makeBar(0, 4);
-      const chords = [makeChord("I", 2)];
-      const result = autoFillNotesFromChords(bar, chords, 4);
-      result.forEach((note) => {
+    it("gives notes the duration of their chord", () => {
+      const bar = barWith([makeChord("I", 2)]);
+      generateNotesFromSegments(bar, TS_4_4, 4).forEach((note) => {
         expect(note.duration).toBe(2);
       });
     });
 
-    it("throws for empty chords array", () => {
-      const bar = makeBar(0, 4);
-      expect(() => autoFillNotesFromChords(bar, [], 4)).toThrow();
+    it("returns an empty array for a bar with no segments", () => {
+      expect(generateNotesFromSegments(barWith([]), TS_4_4, 4)).toEqual([]);
     });
 
-    it("throws if total chord duration exceeds bar length", () => {
-      const bar = makeBar(0, 4);
-      const chords = [makeChord("I", 3), makeChord("V", 3)];
-      expect(() => autoFillNotesFromChords(bar, chords, 4)).toThrow();
+    it("does not throw when segments overrun the bar", () => {
+      const bar = barWith([makeChord("I", 3), makeChord("V", 3)]);
+      expect(() => generateNotesFromSegments(bar, TS_4_4, 4)).not.toThrow();
     });
 
-    it("fills correct notes for ii chord (Dm)", () => {
-      const bar = makeBar(0, 4);
-      const chords = [makeChord("ii", 4)];
-      const result = autoFillNotesFromChords(bar, chords, 4);
+    it("generates the correct notes for a ii chord (Dm)", () => {
+      const bar = barWith([makeChord("ii", 4)]);
+      const result = generateNotesFromSegments(bar, TS_4_4, 4);
       // Dm triad: D4, F4, A4 = MIDI 62, 65, 69
-      expect(result.some((n) => n.pitch === 62)).toBe(true);
-      expect(result.some((n) => n.pitch === 65)).toBe(true);
-      expect(result.some((n) => n.pitch === 69)).toBe(true);
+      expect(result.map((n) => n.pitch).sort((a, b) => a - b)).toEqual([62, 65, 69]);
+    });
+
+    it("generates four notes for a seventh chord", () => {
+      const bar = barWith([
+        { id: generateId(), kind: "chord", root: "G", quality: "dominant7", duration: 4 },
+      ]);
+      const result = generateNotesFromSegments(bar, TS_4_4, 4);
+      // G7: G4 B4 D5 F5 = 67, 71, 74, 77
+      expect(result.map((n) => n.pitch).sort((a, b) => a - b)).toEqual([67, 71, 74, 77]);
+    });
+
+    it("generates exactly one note for a note-kind segment", () => {
+      const bar = barWith([
+        { id: generateId(), kind: "note", pitch: 64, duration: 2 },
+      ]);
+      const result = generateNotesFromSegments(bar, TS_4_4, 4);
+      expect(result).toHaveLength(1);
+      expect(result[0].pitch).toBe(64);
+      expect(result[0].duration).toBe(2);
+      expect(result[0].startBeat).toBe(0);
+    });
+
+    it("mixes note and chord segments in one bar", () => {
+      const bar = barWith([
+        { id: generateId(), kind: "note", pitch: 60, duration: 1 },
+        makeChord("V", 1),
+      ]);
+      const result = generateNotesFromSegments(bar, TS_4_4, 4);
+      expect(result.filter((n) => n.startBeat === 0)).toHaveLength(1);
+      expect(result.filter((n) => n.startBeat === 1)).toHaveLength(3);
+    });
+
+    it("honours the bar's own time signature", () => {
+      const bar = barWith([makeChord("I", 1), makeChord("V", 1), makeChord("I", 1)], TS_3_4);
+      expect(() => generateNotesFromSegments(bar, TS_4_4, 4)).not.toThrow();
+      expect(generateNotesFromSegments(bar, TS_4_4, 4)).toHaveLength(9);
     });
 
     it("assigns unique IDs to generated notes", () => {
-      const bar = makeBar(0, 4);
-      const chords = [makeChord("I", 4)];
-      const result = autoFillNotesFromChords(bar, chords, 4);
-      const ids = result.map((n) => n.id);
+      const bar = barWith([makeChord("I", 4)]);
+      const ids = generateNotesFromSegments(bar, TS_4_4, 4).map((n) => n.id);
       expect(new Set(ids).size).toBe(ids.length);
     });
 
     it("sets velocity to default (100) for all notes", () => {
-      const bar = makeBar(0, 4);
-      const chords = [makeChord("I", 4)];
-      const result = autoFillNotesFromChords(bar, chords, 4);
-      result.forEach((note) => {
+      const bar = barWith([makeChord("I", 4)]);
+      generateNotesFromSegments(bar, TS_4_4, 4).forEach((note) => {
         expect(note.velocity).toBe(100);
       });
     });
@@ -301,6 +329,106 @@ describe("chordOperations", () => {
       ];
       const result = mergeAdjacentChords(chords);
       expect(result[0].chordSymbol).toBe("Cmaj7");
+    });
+  });
+
+  describe("retuneSegmentsToScale", () => {
+    const C_MAJOR: Scale = { root: "C", type: "major" };
+    const D_MAJOR: Scale = { root: "D", type: "major" };
+    const A_MINOR: Scale = { root: "A", type: "naturalMinor" };
+
+    /** A segment as the palette and splitBarIntoChords actually produce them. */
+    const diatonic = (
+      overrides: Partial<ChordSegment> = {}
+    ): ChordSegment => ({
+      id: generateId(),
+      kind: "chord",
+      duration: 1,
+      romanNumeral: "I",
+      root: "C",
+      quality: "major",
+      chordSymbol: "C",
+      ...overrides,
+    });
+
+    it("moves a tonic triad to the new key", () => {
+      const [segment] = retuneSegmentsToScale([diatonic()], C_MAJOR, D_MAJOR);
+      expect(segment.root).toBe("D");
+      expect(segment.quality).toBe("major");
+      expect(segment.chordSymbol).toBe("D");
+    });
+
+    it("follows the new scale's quality for the degree", () => {
+      const ii = diatonic({ romanNumeral: "ii", root: "D", quality: "minor", chordSymbol: "Dm" });
+      const [segment] = retuneSegmentsToScale([ii], C_MAJOR, A_MINOR);
+      // Degree 2 of A natural minor is B diminished, not a minor triad.
+      expect(segment.root).toBe("B");
+      expect(segment.quality).toBe("diminished");
+      expect(segment.romanNumeral).toBe("ii°");
+    });
+
+    it("retunes a seventh chord as a seventh", () => {
+      const maj7 = diatonic({ quality: "maj7", chordSymbol: "Cmaj7" });
+      const [segment] = retuneSegmentsToScale([maj7], C_MAJOR, D_MAJOR);
+      expect(segment.root).toBe("D");
+      expect(segment.quality).toBe("maj7");
+      expect(segment.chordSymbol).toBe("Dmaj7");
+    });
+
+    it("retunes a note segment to the same degree of the new scale", () => {
+      const note: ChordSegment = {
+        id: generateId(),
+        kind: "note",
+        pitch: 60,
+        duration: 1,
+        root: "C",
+        romanNumeral: "I",
+      };
+      const [segment] = retuneSegmentsToScale([note], C_MAJOR, D_MAJOR);
+      expect(segment.pitch).toBe(62);
+      expect(segment.root).toBe("D");
+    });
+
+    it("keeps a note segment near its original register", () => {
+      const note: ChordSegment = {
+        id: generateId(),
+        kind: "note",
+        pitch: 71, // B, degree 7 of C major
+        duration: 1,
+      };
+      const [segment] = retuneSegmentsToScale([note], C_MAJOR, D_MAJOR);
+      // Degree 7 of D major is C#: a whole tone up, not ten semitones down.
+      expect(segment.pitch).toBe(73);
+    });
+
+    it("leaves a chromatic segment with no roman numeral untouched", () => {
+      const chromatic = diatonic({ romanNumeral: undefined, root: "Ab", chordSymbol: "Ab" });
+      const [segment] = retuneSegmentsToScale([chromatic], C_MAJOR, D_MAJOR);
+      expect(segment.root).toBe("Ab");
+      expect(segment.chordSymbol).toBe("Ab");
+    });
+
+    it("leaves a degree that the new scale does not have", () => {
+      const vi = diatonic({ romanNumeral: "vi", root: "A", quality: "minor", chordSymbol: "Am" });
+      const [segment] = retuneSegmentsToScale([vi], C_MAJOR, {
+        root: "C",
+        type: "pentatonicMajor",
+      });
+      expect(segment.root).toBe("A");
+      expect(segment.chordSymbol).toBe("Am");
+    });
+
+    it("returns the same segments when the scale is unchanged", () => {
+      const segments = [diatonic(), diatonic({ romanNumeral: "V", root: "G", chordSymbol: "G" })];
+      const result = retuneSegmentsToScale(segments, C_MAJOR, C_MAJOR);
+      expect(result.map(s => s.chordSymbol)).toEqual(["C", "G"]);
+    });
+
+    it("preserves segment ids and durations", () => {
+      const segment = diatonic({ id: "keep-me", duration: 2.5 });
+      const [result] = retuneSegmentsToScale([segment], C_MAJOR, D_MAJOR);
+      expect(result.id).toBe("keep-me");
+      expect(result.duration).toBe(2.5);
     });
   });
 

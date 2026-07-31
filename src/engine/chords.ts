@@ -16,7 +16,7 @@ export interface ChordInfo {
 }
 
 /** Interval patterns for each chord quality (relative to root). */
-const CHORD_INTERVALS: Record<ChordQuality, number[]> = {
+export const CHORD_INTERVALS: Record<ChordQuality, number[]> = {
   major: [0, 4, 7],
   minor: [0, 3, 7],
   diminished: [0, 3, 6],
@@ -27,6 +27,8 @@ const CHORD_INTERVALS: Record<ChordQuality, number[]> = {
   maj7: [0, 4, 7, 11],
   min7: [0, 3, 7, 10],
   dim7: [0, 3, 6, 9],
+  halfDim7: [0, 3, 6, 10],
+  minMaj7: [0, 3, 7, 11],
 };
 
 /** Diatonic chord qualities for a major scale (I through vii°). */
@@ -73,30 +75,112 @@ function romanForQuality(quality: ChordQuality, base: string): string {
   }
 }
 
-/**
- * Returns the diatonic chords for the given scale.
- * @param scale - The scale to derive chords from.
- * @returns Array of 7 chord info objects (one per scale degree).
- */
-export function getDiatonicChords(scale: Scale): ChordInfo[] {
-  const scalePitches = getScalePitches(scale.root, scale.type);
-  const qualities =
-    scale.type === 'naturalMinor' || scale.type === 'harmonicMinor' || scale.type === 'melodicMinor'
-      ? DIATONIC_CHORD_QUALITIES_MINOR
-      : DIATONIC_CHORD_QUALITIES_MAJOR;
+/** True for the scale types whose roman numerals use minor-key casing. */
+function isMinorScale(scale: Scale): boolean {
+  return (
+    scale.type === 'naturalMinor' ||
+    scale.type === 'harmonicMinor' ||
+    scale.type === 'melodicMinor'
+  );
+}
 
-  const isMinor =
-    scale.type === 'naturalMinor' || scale.type === 'harmonicMinor' || scale.type === 'melodicMinor';
-  const bases = isMinor ? ROMAN_NUMERAL_BASES_MINOR : ROMAN_NUMERAL_BASES_MAJOR;
+/**
+ * Builds a chord by stacking thirds *within the scale itself* — taking degrees
+ * i, i+2, i+4 (and i+6 for a seventh), wrapping around the scale.
+ *
+ * Deriving chords from the scale rather than from a fixed 7-entry quality table
+ * is what makes this correct for every scale type, including the 5-note
+ * pentatonics and the 6-note blues scale.
+ *
+ * @param scalePitches - Pitch classes of the scale, in scale-degree order.
+ * @param degree - Index of the scale degree to build on.
+ * @param noteCount - 3 for a triad, 4 for a seventh.
+ * @returns Ascending semitone intervals relative to the chord root.
+ */
+export function buildStackedChord(
+  scalePitches: number[],
+  degree: number,
+  noteCount: 3 | 4
+): number[] {
+  const length = scalePitches.length;
+  const root = scalePitches[degree % length];
+  const intervals: number[] = [];
+
+  for (let i = 0; i < noteCount; i++) {
+    const pitch = scalePitches[(degree + i * 2) % length];
+    let interval = ((pitch - root) % 12 + 12) % 12;
+    // Keep the stack ascending — a wrapped degree belongs in the next octave.
+    while (i > 0 && interval <= intervals[i - 1]) {
+      interval += 12;
+    }
+    intervals.push(interval);
+  }
+
+  return intervals;
+}
+
+/**
+ * Matches an interval set back to a known chord quality.
+ * @returns The quality, or undefined when the intervals match nothing known.
+ */
+export function classifyIntervals(intervals: number[]): ChordQuality | undefined {
+  const qualities = Object.keys(CHORD_INTERVALS) as ChordQuality[];
+  return qualities.find(quality => intervalsEqual(intervals, CHORD_INTERVALS[quality]));
+}
+
+/**
+ * Falls back to a usable quality when a stacked chord matches no known pattern,
+ * which happens on gapped scales like pentatonic and blues. The third decides.
+ */
+function approximateQuality(intervals: number[]): ChordQuality {
+  return intervals[1] === 3 ? 'minor' : 'major';
+}
+
+/**
+ * Builds the diatonic chords of a scale by stacking thirds on each degree.
+ * @param scale - The scale to derive chords from.
+ * @param noteCount - 3 for triads, 4 for sevenths.
+ */
+function getDiatonicStack(scale: Scale, noteCount: 3 | 4): ChordInfo[] {
+  const scalePitches = getScalePitches(scale.root, scale.type);
+  const bases = isMinorScale(scale) ? ROMAN_NUMERAL_BASES_MINOR : ROMAN_NUMERAL_BASES_MAJOR;
 
   return scalePitches.map((pitch, index) => {
-    const rootNote = SEMITONE_TO_NOTE[pitch];
+    const intervals = buildStackedChord(scalePitches, index, noteCount);
+    const quality = classifyIntervals(intervals) ?? approximateQuality(intervals);
+
+    // Roman numerals are cased by the *triad* at this degree, so that a seventh
+    // reads as V7 rather than switching case with its extension.
+    const triadIntervals =
+      noteCount === 3 ? intervals : buildStackedChord(scalePitches, index, 3);
+    const triadQuality =
+      classifyIntervals(triadIntervals) ?? approximateQuality(triadIntervals);
+
     return {
-      root: rootNote,
-      quality: qualities[index],
-      romanNumeral: romanForQuality(qualities[index], bases[index]),
+      root: SEMITONE_TO_NOTE[pitch],
+      quality,
+      romanNumeral: romanForQuality(triadQuality, bases[index % bases.length]),
     };
   });
+}
+
+/**
+ * Returns the diatonic triads for the given scale.
+ * @param scale - The scale to derive chords from.
+ * @returns One chord info object per scale degree (7 for heptatonic scales).
+ */
+export function getDiatonicChords(scale: Scale): ChordInfo[] {
+  return getDiatonicStack(scale, 3);
+}
+
+/**
+ * Returns the diatonic seventh chords for the given scale — Imaj7, iim7, V7 and
+ * so on, including the half-diminished vii of a major key.
+ * @param scale - The scale to derive chords from.
+ * @returns One chord info object per scale degree.
+ */
+export function getDiatonicSevenths(scale: Scale): ChordInfo[] {
+  return getDiatonicStack(scale, 4);
 }
 
 /**
@@ -276,7 +360,7 @@ function parseChordQuality(rest: string): number[] {
   }
 
   // Check for maj7
-  if (trimmed === 'maj7' || trimmed === 'maj7' || trimmed === 'M7' || trimmed === 'Δ' || trimmed === '△') {
+  if (trimmed === 'maj7' || trimmed === 'M7' || trimmed === 'Δ' || trimmed === '△') {
     return CHORD_INTERVALS.maj7;
   }
 
@@ -293,6 +377,18 @@ function parseChordQuality(rest: string): number[] {
   // Check for diminished 7th
   if (trimmed === 'dim7' || trimmed === '°7' || trimmed === 'o7') {
     return CHORD_INTERVALS.dim7;
+  }
+
+  // Check for half-diminished 7th (m7b5)
+  if (
+    trimmed === 'm7b5' || trimmed === 'min7b5' || trimmed === 'ø' || trimmed === 'ø7'
+  ) {
+    return CHORD_INTERVALS.halfDim7;
+  }
+
+  // Check for minor-major 7th
+  if (trimmed === 'mMaj7' || trimmed === 'mM7' || trimmed === 'minMaj7') {
+    return CHORD_INTERVALS.minMaj7;
   }
 
   // Check for triads

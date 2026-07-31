@@ -1,6 +1,7 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Tailwind v4 entry point. The v3 `@tailwind base/components/utilities`
+   directives do not load the default theme under v4, which silently drops every
+   theme-driven utility (colors, spacing, sizes, radii) from the output. */
+@import "tailwindcss";
 
 :root {
   font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;

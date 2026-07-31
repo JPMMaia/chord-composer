@@ -27,7 +27,9 @@ export type ChordQuality =
   | 'dominant7'
   | 'maj7'
   | 'min7'
-  | 'dim7';
+  | 'dim7'
+  | 'halfDim7'
+  | 'minMaj7';
 
 // Time signature
 export interface TimeSignature {
@@ -41,9 +43,16 @@ export interface Scale {
   type: ScaleType;
 }
 
+// What a timeline segment represents: a single note or a stacked chord.
+export type SegmentKind = 'note' | 'chord';
+
 // Chord segment in a bar
 export interface ChordSegment {
   id: string;
+  /** Defaults to 'chord' when absent, so pre-existing projects keep working. */
+  kind?: SegmentKind;
+  /** MIDI pitch — only meaningful when kind === 'note'. */
+  pitch?: number;
   romanNumeral?: string;
   chordSymbol?: string;
   duration: number;
@@ -76,6 +85,8 @@ export interface Track {
 export interface Bar {
   id: string;
   barIndex: number;
+  /** Per-bar meter. Falls back to the project time signature when absent. */
+  timeSignature?: TimeSignature;
   scale: Scale;
   chords: ChordSegment[];
   notes: Note[];

@@ -6,7 +6,8 @@ interface TransportProps {
   isPaused: boolean;
   bpm: number;
   timeSignature: TimeSignature;
-  key: string;
+  /** Musical key readout. Named around React's reserved `key` prop. */
+  musicalKey: string;
   keyMode: 'major' | 'minor';
   hasLoopRegion: boolean;
   onPlay: () => void;
@@ -25,7 +26,7 @@ export const Transport: React.FC<TransportProps> = ({
   isPaused,
   bpm,
   timeSignature,
-  key,
+  musicalKey,
   keyMode,
   hasLoopRegion,
   onPlay,
@@ -117,7 +118,7 @@ export const Transport: React.FC<TransportProps> = ({
 
       {/* Key */}
       <div className="text-xs text-gray-400">
-        {key} {keyMode === 'major' ? 'Major' : 'Minor'}
+        {musicalKey} {keyMode === 'major' ? 'Major' : 'Minor'}
       </div>
 
       {/* Metronome toggle */}

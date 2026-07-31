@@ -79,6 +79,8 @@ const KIND_BY_QUALITY: Record<ChordQuality, string> = {
   maj7: 'major-seventh',
   min7: 'minor-seventh',
   dim7: 'diminished-seventh',
+  halfDim7: 'half-diminished',
+  minMaj7: 'major-minor',
 };
 
 /** Split a note name into a MusicXML step plus alteration. */

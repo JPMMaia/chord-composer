@@ -15,7 +15,7 @@ describe('Transport', () => {
     isPaused: false,
     bpm: 120,
     timeSignature: { beatsPerMeasure: 4, beatUnit: 4 },
-    key: 'C',
+    musicalKey: 'C',
     keyMode: 'major' as const,
     hasLoopRegion: false,
     onPlay: mockOnPlay,

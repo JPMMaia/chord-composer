@@ -1,12 +1,15 @@
 import { useEffect, useState, useCallback } from 'react';
 import { projectStore } from '@/store/projectStore';
+import { selectionStore } from '@/store/selectionStore';
 import { Transport } from '@/components/Transport';
 import { FileMenu } from '@/components/FileMenu';
-import { ChordEditor } from '@/components/ChordEditor';
+import { InstrumentsPanel } from '@/components/InstrumentsPanel';
+import { ScalePalette } from '@/components/ScalePalette';
+import { ChordTimeline } from '@/components/ChordTimeline';
 import { PianoRoll } from '@/components/PianoRoll';
-import { autoFillNotesFromChords, splitBarIntoChords } from '@/engine/chordOperations';
 import { usePlayback } from '@/hooks/usePlayback';
-import type { ChordSegment, NoteName, ScaleType } from '@/types/music';
+import { getTotalBeats } from '@/engine/timeline';
+import type { NoteName, ScaleType } from '@/types/music';
 import { NOTE_NAMES, SCALE_TYPES } from '@/utils/constants';
 
 function App() {
@@ -17,7 +20,10 @@ function App() {
   const removeBar = projectStore(s => s.removeBar);
   const updateBarScale = projectStore(s => s.updateBarScale);
 
-  const [selectedBarId, setSelectedBarId] = useState<string | null>(null);
+  const selectedBarId = selectionStore(s => s.selectedBarId);
+  const selectedSegmentId = selectionStore(s => s.selectedSegmentId);
+  const selectBar = selectionStore(s => s.selectBar);
+
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [, setMetronomeOn] = useState(false);
@@ -38,12 +44,14 @@ function App() {
 
   const selectedBar = project?.bars.find(b => b.id === selectedBarId);
 
-  // Auto-select first bar if none selected
+  // Auto-select the first bar so the palette always has a scale to work from.
   useEffect(() => {
     if (project && project.bars.length > 0 && !selectedBarId) {
-      setSelectedBarId(project.bars[0].id);
+      selectBar(project.bars[0].id);
     }
-  }, [project, selectedBarId]);
+  }, [project, selectedBarId, selectBar]);
+
+  const selectedSegment = selectedBar?.chords.find(c => c.id === selectedSegmentId);
 
   // Playback config
   const playbackConfig = project
@@ -53,7 +61,7 @@ function App() {
         bars: project.bars,
         tracks: ['main'],
         loopStart: hasLoopRegion ? 0 : null,
-        loopEnd: hasLoopRegion ? project.bars.length * project.timeSignature.beatsPerMeasure : null,
+        loopEnd: hasLoopRegion ? getTotalBeats(project.bars, project.timeSignature) : null,
       }
     : null;
 
@@ -91,108 +99,6 @@ function App() {
     setHasLoopRegion(prev => !prev);
   }, []);
 
-  const handleNoteClick = useCallback(
-    (barId: string, pitch: number, beat: number) => {
-      if (!project) return;
-      // Note: In a real app, this would update the store
-      console.log('Note clicked:', { barId, pitch, beat });
-    },
-    [project]
-  );
-
-  const handleNoteDrag = useCallback(
-    (noteId: string, _durationDelta: number) => {
-      console.log('Note dragged:', noteId);
-    },
-    []
-  );
-
-  // Chord editor handlers
-  const handleChordReorder = useCallback(
-    (chords: ChordSegment[]) => {
-      if (!project || !selectedBarId) return;
-      // Update bar chords in store
-      const newBars = project.bars.map(b =>
-        b.id === selectedBarId ? { ...b, chords } : b
-      );
-      projectStore.setState({
-        project: { ...project, bars: newBars, updatedAt: new Date() },
-      });
-    },
-    [project, selectedBarId]
-  );
-
-  const handleChordAdd = useCallback(
-    (chord: ChordSegment) => {
-      if (!project || !selectedBarId) return;
-      const newBars = project.bars.map(b =>
-        b.id === selectedBarId ? { ...b, chords: [...b.chords, chord] } : b
-      );
-      projectStore.setState({
-        project: { ...project, bars: newBars, updatedAt: new Date() },
-      });
-    },
-    [project, selectedBarId]
-  );
-
-  const handleChordRemove = useCallback(
-    (chordId: string) => {
-      if (!project || !selectedBarId) return;
-      const newBars = project.bars.map(b =>
-        b.id === selectedBarId
-          ? { ...b, chords: b.chords.filter(c => c.id !== chordId) }
-          : b
-      );
-      projectStore.setState({
-        project: { ...project, bars: newBars, updatedAt: new Date() },
-      });
-    },
-    [project, selectedBarId]
-  );
-
-  const handleBarSplit = useCallback(
-    (chordCount: number) => {
-      if (!project || !selectedBar) return;
-      const newChords = splitBarIntoChords(selectedBar, chordCount);
-      const newBars = project.bars.map(b =>
-        b.id === selectedBarId ? { ...b, chords: newChords } : b
-      );
-      projectStore.setState({
-        project: { ...project, bars: newBars, updatedAt: new Date() },
-      });
-    },
-    [project, selectedBar, selectedBarId]
-  );
-
-  const handleAutoFillNotes = useCallback(() => {
-    if (!project || !selectedBar || selectedBar.chords.length === 0) return;
-    const notes = autoFillNotesFromChords(selectedBar, selectedBar.chords, 4);
-    const newBars = project.bars.map(b =>
-      b.id === selectedBarId ? { ...b, notes } : b
-    );
-    projectStore.setState({
-      project: { ...project, bars: newBars, updatedAt: new Date() },
-    });
-  }, [project, selectedBar, selectedBarId]);
-
-  const handleCustomChordInput = useCallback(
-    (symbol: string) => {
-      if (!project || !selectedBarId) return;
-      const newChord: ChordSegment = {
-        id: crypto.randomUUID(),
-        chordSymbol: symbol,
-        duration: 1,
-      };
-      const newBars = project.bars.map(b =>
-        b.id === selectedBarId ? { ...b, chords: [...b.chords, newChord] } : b
-      );
-      projectStore.setState({
-        project: { ...project, bars: newBars, updatedAt: new Date() },
-      });
-    },
-    [project, selectedBarId]
-  );
-
   if (!project) return null;
 
   return (
@@ -208,7 +114,7 @@ function App() {
         isPaused={isPaused}
         bpm={project.bpm}
         timeSignature={project.timeSignature}
-        key={project.key}
+        musicalKey={project.key}
         keyMode={project.keyMode}
         hasLoopRegion={hasLoopRegion}
         onPlay={handlePlay}
@@ -221,58 +127,15 @@ function App() {
 
       {/* Main Content */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Left Sidebar - Bar List */}
-        <div className="w-48 bg-gray-800 border-r border-gray-700 overflow-y-auto">
-          <div className="p-3 border-b border-gray-700">
-            <h2 className="text-sm font-semibold text-gray-300">Bars</h2>
-          </div>
-          {project.bars.map((bar, index) => (
-            <button
-              key={bar.id}
-              onClick={() => setSelectedBarId(bar.id)}
-              className={`w-full text-left px-3 py-2 text-sm border-b border-gray-700 transition-colors ${
-                selectedBarId === bar.id
-                  ? 'bg-indigo-600 text-white'
-                  : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
-              }`}
-            >
-              <div className="font-medium">Bar {index + 1}</div>
-              <div className="text-xs opacity-75">
-                {bar.scale.root} {bar.scale.type.replace(/([A-Z])/g, ' $1').trim()}
-              </div>
-            </button>
-          ))}
-          <button
-            onClick={addBar}
-            className="w-full text-left px-3 py-2 text-sm text-indigo-400 hover:bg-gray-700 transition-colors"
-          >
-            + Add Bar
-          </button>
-        </div>
+        <InstrumentsPanel />
 
-        {/* Center - Chord Editor + Piano Roll */}
+        {/* Center — palette strip, chord timeline, piano roll */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          {/* Chord Editor */}
-          <div className="p-4 border-b border-gray-700 bg-gray-800">
-            {selectedBar ? (
-              <ChordEditor
-                bar={selectedBar}
-                scale={selectedBar.scale}
-                onChordReorder={handleChordReorder}
-                onChordAdd={handleChordAdd}
-                onChordRemove={handleChordRemove}
-                onBarSplit={handleBarSplit}
-                onAutoFillNotes={handleAutoFillNotes}
-                onCustomChordInput={handleCustomChordInput}
-                selectedChordId={undefined}
-              />
-            ) : (
-              <p className="text-sm text-gray-500">Select a bar to edit chords</p>
-            )}
-          </div>
+          {selectedBar && <ScalePalette scale={selectedBar.scale} />}
 
-          {/* Piano Roll */}
-          <div className="flex-1 bg-gray-900">
+          <ChordTimeline />
+
+          <div className="flex-1 bg-gray-900 overflow-hidden">
             {selectedBar && (
               <PianoRoll
                 bars={project.bars}
@@ -281,8 +144,6 @@ function App() {
                 pixelsPerBeat={80}
                 pixelsPerOctave={120}
                 gridSize={0.25}
-                onNoteClick={handleNoteClick}
-                onNoteDrag={handleNoteDrag}
               />
             )}
           </div>
@@ -298,8 +159,11 @@ function App() {
             <div className="p-3 space-y-4">
               {/* Scale Settings */}
               <div>
-                <label className="block text-xs text-gray-400 mb-1">Root Note</label>
+                <label className="block text-xs text-gray-400 mb-1" htmlFor="bar-root">
+                  Root Note
+                </label>
                 <select
+                  id="bar-root"
                   value={selectedBar.scale.root}
                   onChange={e =>
                     updateBarScale(selectedBar.id, {
@@ -316,8 +180,11 @@ function App() {
               </div>
 
               <div>
-                <label className="block text-xs text-gray-400 mb-1">Scale Type</label>
+                <label className="block text-xs text-gray-400 mb-1" htmlFor="bar-scale-type">
+                  Scale Type
+                </label>
                 <select
+                  id="bar-scale-type"
                   value={selectedBar.scale.type}
                   onChange={e =>
                     updateBarScale(selectedBar.id, {
@@ -335,23 +202,38 @@ function App() {
                 </select>
               </div>
 
-              {/* Bar Info */}
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">Chords</label>
-                <div className="text-sm text-gray-300">
-                  {selectedBar.chords.length} chord{selectedBar.chords.length !== 1 ? 's' : ''}
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">Notes</label>
-                <div className="text-sm text-gray-300">
-                  {selectedBar.notes.length} note{selectedBar.notes.length !== 1 ? 's' : ''}
-                </div>
-              </div>
-
-              {/* Actions */}
+              {/* Segment inspector */}
               <div className="pt-2 border-t border-gray-700">
+                <h3 className="text-xs font-semibold text-gray-400 mb-1">Segment</h3>
+                {selectedSegment ? (
+                  <div className="text-sm text-gray-300 space-y-0.5">
+                    <div>{selectedSegment.chordSymbol ?? selectedSegment.root}</div>
+                    <div className="text-xs text-gray-500">
+                      {selectedSegment.kind === 'note' ? 'Note' : 'Chord'}
+                      {selectedSegment.romanNumeral ? ` · ${selectedSegment.romanNumeral}` : ''}
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      {selectedSegment.duration} beat{selectedSegment.duration !== 1 ? 's' : ''}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-gray-500">No segment selected</p>
+                )}
+              </div>
+
+              {/* Bar Info */}
+              <div className="pt-2 border-t border-gray-700 space-y-2">
+                <div className="text-xs text-gray-400">
+                  {selectedBar.chords.length} segment
+                  {selectedBar.chords.length !== 1 ? 's' : ''} · {selectedBar.notes.length} note
+                  {selectedBar.notes.length !== 1 ? 's' : ''}
+                </div>
+                <button
+                  onClick={addBar}
+                  className="w-full px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 text-gray-200 rounded transition-colors"
+                >
+                  Add Bar
+                </button>
                 <button
                   onClick={() => removeBar(selectedBar.id)}
                   className="w-full px-3 py-1.5 text-sm bg-red-600 hover:bg-red-500 text-white rounded transition-colors"

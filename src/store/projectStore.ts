@@ -1,6 +1,27 @@
 import { create } from 'zustand';
-import type { Project, Bar, NoteName, ScaleType, TimeSignature } from '@/types/music';
+import type {
+  Project,
+  Bar,
+  ChordSegment,
+  NoteName,
+  ScaleType,
+  TimeSignature,
+} from '@/types/music';
 import { generateId } from '@/utils/id';
+import {
+  flattenSegments,
+  getBarBeats,
+  insertSegmentAt,
+  isValidTimeSignature,
+  reflowSegments,
+  removeSegmentById,
+  resizeSegment,
+} from '@/engine/timeline';
+import {
+  generateNotesFromSegments,
+  reorderChords,
+  retuneSegmentsToScale,
+} from '@/engine/chordOperations';
 import {
   DEFAULT_BPM,
   DEFAULT_TIME_SIGNATURE,
@@ -18,7 +39,43 @@ interface ProjectState {
   addBar: () => void;
   removeBar: (barId: string) => void;
   updateBarScale: (barId: string, scale: { root: NoteName; type: ScaleType }) => void;
+  setBarTimeSignature: (barId: string, ts: TimeSignature) => void;
+  insertSegment: (index: number, segment: ChordSegment) => void;
+  removeSegment: (segmentId: string) => void;
+  moveSegment: (fromIndex: number, toIndex: number) => void;
+  resizeSegmentDuration: (segmentId: string, duration: number) => void;
   resetProject: () => void;
+}
+
+/** Octave the generated chord roots sit in — the middle-C octave. */
+const GENERATED_NOTE_OCTAVE = 4;
+
+/**
+ * Regenerate every bar's notes from its segments.
+ *
+ * `bar.notes` is derived state: this is what keeps the piano roll in step with the
+ * chord panel. Running it over all bars rather than only the edited one is what makes
+ * overflow correct — a segment pushed across a bar line changes two bars at once.
+ */
+function withGeneratedNotes(bars: Bar[], projectTs: TimeSignature): Bar[] {
+  return bars.map(bar => ({
+    ...bar,
+    notes: generateNotesFromSegments(bar, projectTs, GENERATED_NOTE_OCTAVE),
+  }));
+}
+
+/**
+ * Rebuild the project from a flat segment list: reflow it onto bars, then resync
+ * the derived notes. Every segment mutation funnels through here so no caller can
+ * skip either step.
+ */
+function applySegments(project: Project, segments: ChordSegment[]): Project {
+  const bars = reflowSegments(segments, project.bars, project.timeSignature);
+  return {
+    ...project,
+    bars: withGeneratedNotes(bars, project.timeSignature),
+    updatedAt: new Date(),
+  };
 }
 
 const createInitialProject = (): Project => ({
@@ -64,7 +121,7 @@ export const projectStore = create<ProjectState>((set, get) => ({
   setTimeSignature: (ts: TimeSignature) => {
     const project = get().project;
     if (!project) return;
-    if (ts.beatsPerMeasure < 2 || (ts.beatUnit !== 4 && ts.beatUnit !== 8)) {
+    if (!isValidTimeSignature(ts)) {
       throw new Error('Invalid time signature');
     }
     set({
@@ -132,16 +189,80 @@ export const projectStore = create<ProjectState>((set, get) => ({
     if (barIndex === -1) {
       throw new Error('Bar not found');
     }
-    const newBars = project.bars.map((b, i) =>
-      i === barIndex ? { ...b, scale: { root: scale.root, type: scale.type } } : b
-    );
+    const newBars = project.bars.map((b, i) => {
+      if (i !== barIndex) return b;
+      const nextScale = { root: scale.root, type: scale.type };
+      // Diatonic segments name a scale degree, so a change of scale has to move them
+      // onto the new key's chord for that degree — and their notes with them.
+      return {
+        ...b,
+        scale: nextScale,
+        chords: retuneSegmentsToScale(b.chords, b.scale, nextScale),
+      };
+    });
     set({
       project: {
         ...project,
-        bars: newBars,
+        bars: withGeneratedNotes(newBars, project.timeSignature),
         updatedAt: new Date(),
       },
     });
+  },
+
+  setBarTimeSignature: (barId: string, ts: TimeSignature) => {
+    const project = get().project;
+    if (!project) return;
+    if (!isValidTimeSignature(ts)) {
+      throw new Error('Invalid time signature');
+    }
+    if (!project.bars.some(b => b.id === barId)) {
+      throw new Error('Bar not found');
+    }
+    const bars = project.bars.map(b => (b.id === barId ? { ...b, timeSignature: ts } : b));
+    // The bar's capacity just changed, so its contents may no longer fit.
+    set({ project: applySegments({ ...project, bars }, flattenSegments(bars)) });
+  },
+
+  insertSegment: (index: number, segment: ChordSegment) => {
+    const project = get().project;
+    if (!project) return;
+    const segments = insertSegmentAt(flattenSegments(project.bars), segment, index);
+    set({ project: applySegments(project, segments) });
+  },
+
+  removeSegment: (segmentId: string) => {
+    const project = get().project;
+    if (!project) return;
+    const segments = removeSegmentById(flattenSegments(project.bars), segmentId);
+    set({ project: applySegments(project, segments) });
+  },
+
+  moveSegment: (fromIndex: number, toIndex: number) => {
+    const project = get().project;
+    if (!project) return;
+    const segments = flattenSegments(project.bars);
+    // Out-of-range drags are a normal outcome of a sloppy drop, not an error.
+    if (
+      fromIndex < 0 ||
+      fromIndex >= segments.length ||
+      toIndex < 0 ||
+      toIndex >= segments.length
+    ) {
+      return;
+    }
+    set({ project: applySegments(project, reorderChords(segments, fromIndex, toIndex)) });
+  },
+
+  resizeSegmentDuration: (segmentId: string, duration: number) => {
+    const project = get().project;
+    if (!project) return;
+    const owner = project.bars.find(b => b.chords.some(c => c.id === segmentId));
+    if (!owner) return;
+    // A segment can never outgrow the bar it lives in; beyond that the reflow decides
+    // which bar it ends up in.
+    const maxBeats = getBarBeats(owner, project.timeSignature);
+    const segments = resizeSegment(flattenSegments(project.bars), segmentId, duration, maxBeats);
+    set({ project: applySegments(project, segments) });
   },
 
   resetProject: () => {

@@ -1,11 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import {
   getDiatonicChords,
+  getDiatonicSevenths,
+  buildStackedChord,
+  classifyIntervals,
+  CHORD_INTERVALS,
   getRomanNumeral,
   chordFromRomanNumeral,
   chordFromSymbol,
   chordToNotes,
 } from '@/engine/chords';
+import { getScalePitches } from '@/engine/scales';
 import { Scale, NoteName, ChordQuality } from '@/types/music';
 
 describe('chords', () => {
@@ -66,6 +71,90 @@ describe('chords', () => {
       chords.forEach((chord, i) => {
         expect(chord.quality).toBe(expectedQualities[i]);
       });
+    });
+  });
+
+  describe('buildStackedChord', () => {
+    it('stacks thirds within the scale for a C major triad', () => {
+      const pitches = getScalePitches('C', 'major'); // [0,2,4,5,7,9,11]
+      expect(buildStackedChord(pitches, 0, 3)).toEqual([0, 4, 7]);
+    });
+
+    it('stacks thirds for the ii chord (D minor)', () => {
+      const pitches = getScalePitches('C', 'major');
+      expect(buildStackedChord(pitches, 1, 3)).toEqual([0, 3, 7]);
+    });
+
+    it('wraps past the octave for the vii chord (B diminished)', () => {
+      const pitches = getScalePitches('C', 'major');
+      expect(buildStackedChord(pitches, 6, 3)).toEqual([0, 3, 6]);
+    });
+
+    it('builds four-note stacks for sevenths', () => {
+      const pitches = getScalePitches('C', 'major');
+      expect(buildStackedChord(pitches, 0, 4)).toEqual([0, 4, 7, 11]); // Cmaj7
+      expect(buildStackedChord(pitches, 4, 4)).toEqual([0, 4, 7, 10]); // G7
+      expect(buildStackedChord(pitches, 6, 4)).toEqual([0, 3, 6, 10]); // Bm7b5
+    });
+  });
+
+  describe('classifyIntervals', () => {
+    it('identifies each known quality', () => {
+      (Object.keys(CHORD_INTERVALS) as ChordQuality[]).forEach(quality => {
+        expect(classifyIntervals(CHORD_INTERVALS[quality])).toBe(quality);
+      });
+    });
+
+    it('returns undefined for an unrecognised interval set', () => {
+      expect(classifyIntervals([0, 1, 2])).toBeUndefined();
+    });
+  });
+
+  describe('getDiatonicSevenths', () => {
+    it('returns the seven diatonic sevenths of C major', () => {
+      const chords = getDiatonicSevenths({ root: 'C', type: 'major' });
+      expect(chords).toHaveLength(7);
+      expect(chords.map(c => c.root)).toEqual(['C', 'D', 'E', 'F', 'G', 'A', 'B']);
+      expect(chords.map(c => c.quality)).toEqual([
+        'maj7', 'min7', 'min7', 'maj7', 'dominant7', 'min7', 'halfDim7',
+      ]);
+    });
+
+    it('returns the seven diatonic sevenths of A natural minor', () => {
+      const chords = getDiatonicSevenths({ root: 'A', type: 'naturalMinor' });
+      expect(chords.map(c => c.root)).toEqual(['A', 'B', 'C', 'D', 'E', 'F', 'G']);
+      expect(chords.map(c => c.quality)).toEqual([
+        'min7', 'halfDim7', 'maj7', 'min7', 'min7', 'maj7', 'dominant7',
+      ]);
+    });
+
+    it('produces a minMaj7 tonic in harmonic minor', () => {
+      const chords = getDiatonicSevenths({ root: 'A', type: 'harmonicMinor' });
+      expect(chords[0].quality).toBe('minMaj7');
+      expect(chords[6].quality).toBe('dim7');
+    });
+
+    it('carries roman numerals matching the triad casing', () => {
+      const chords = getDiatonicSevenths({ root: 'C', type: 'major' });
+      expect(chords.map(c => c.romanNumeral)).toEqual([
+        'I', 'ii', 'iii', 'IV', 'V', 'vi', 'vii°',
+      ]);
+    });
+  });
+
+  describe('getDiatonicChords for non-heptatonic scales', () => {
+    it('returns one chord per pitch for a 5-note pentatonic scale', () => {
+      const chords = getDiatonicChords({ root: 'C', type: 'pentatonicMajor' });
+      expect(chords).toHaveLength(5);
+      chords.forEach(chord => {
+        expect(chord.root).toBeDefined();
+        expect(chord.romanNumeral).toBeString();
+      });
+    });
+
+    it('returns one chord per pitch for the 6-note blues scale', () => {
+      const chords = getDiatonicChords({ root: 'C', type: 'blues' });
+      expect(chords).toHaveLength(6);
     });
   });
 

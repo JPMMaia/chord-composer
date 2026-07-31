@@ -27,6 +27,14 @@ export const DEFAULT_TIME_SIGNATURE: TimeSignature = {
   beatUnit: 4,
 };
 
+/**
+ * Width of the piano roll's key column, in pixels.
+ *
+ * Shared with the chord timeline, which reserves the same gutter before bar 1 so
+ * its bar lines sit directly above the piano roll's.
+ */
+export const PIANO_KEYS_WIDTH = 80;
+
 /** Default BPM */
 export const DEFAULT_BPM = 120;
 

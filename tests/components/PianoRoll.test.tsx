@@ -62,6 +62,7 @@ describe('PianoRoll', () => {
         pixelsPerBeat={100}
         pixelsPerOctave={100}
         gridSize={0.25}
+        timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
         onNoteClick={() => {}}
         onNoteDrag={() => {}}
       />
@@ -79,6 +80,7 @@ describe('PianoRoll', () => {
         pixelsPerBeat={100}
         pixelsPerOctave={100}
         gridSize={0.25}
+        timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
         onNoteClick={() => {}}
         onNoteDrag={() => {}}
       />
@@ -99,6 +101,7 @@ describe('PianoRoll', () => {
         pixelsPerBeat={100}
         pixelsPerOctave={100}
         gridSize={0.25}
+        timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
         onNoteClick={() => {}}
         onNoteDrag={() => {}}
       />
@@ -116,6 +119,7 @@ describe('PianoRoll', () => {
         pixelsPerBeat={100}
         pixelsPerOctave={100}
         gridSize={0.25}
+        timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
         onNoteClick={() => {}}
         onNoteDrag={() => {}}
       />
@@ -133,6 +137,7 @@ describe('PianoRoll', () => {
         pixelsPerBeat={100}
         pixelsPerOctave={100}
         gridSize={0.25}
+        timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
         onNoteClick={() => {}}
         onNoteDrag={() => {}}
       />
@@ -150,6 +155,7 @@ describe('PianoRoll', () => {
         pixelsPerBeat={100}
         pixelsPerOctave={100}
         gridSize={0.25}
+        timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
         onNoteClick={() => {}}
         onNoteDrag={() => {}}
       />
@@ -168,6 +174,7 @@ describe('PianoRoll', () => {
         pixelsPerBeat={100}
         pixelsPerOctave={100}
         gridSize={0.25}
+        timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
         onNoteClick={onNoteClick}
         onNoteDrag={() => {}}
       />
@@ -184,6 +191,7 @@ describe('PianoRoll', () => {
         pixelsPerBeat={100}
         pixelsPerOctave={100}
         gridSize={0.25}
+        timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
         onNoteClick={() => {}}
         onNoteDrag={() => {}}
       />
@@ -201,6 +209,7 @@ describe('PianoRoll', () => {
         pixelsPerBeat={100}
         pixelsPerOctave={100}
         gridSize={0.25}
+        timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
         onNoteClick={() => {}}
         onNoteDrag={() => {}}
       />
@@ -218,6 +227,7 @@ describe('PianoRoll', () => {
         pixelsPerBeat={100}
         pixelsPerOctave={100}
         gridSize={0.25}
+        timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
         onNoteClick={() => {}}
         onNoteDrag={() => {}}
       />
@@ -235,6 +245,7 @@ describe('PianoRoll', () => {
         pixelsPerBeat={100}
         pixelsPerOctave={100}
         gridSize={0.25}
+        timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
         onNoteClick={() => {}}
         onNoteDrag={() => {}}
       />
@@ -252,6 +263,7 @@ describe('PianoRoll', () => {
         pixelsPerBeat={200}
         pixelsPerOctave={100}
         gridSize={0.25}
+        timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
         onNoteClick={() => {}}
         onNoteDrag={() => {}}
       />
@@ -269,6 +281,7 @@ describe('PianoRoll', () => {
         pixelsPerBeat={100}
         pixelsPerOctave={200}
         gridSize={0.25}
+        timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
         onNoteClick={() => {}}
         onNoteDrag={() => {}}
       />
@@ -286,6 +299,7 @@ describe('PianoRoll', () => {
         pixelsPerBeat={100}
         pixelsPerOctave={100}
         gridSize={0.25}
+        timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
         onNoteClick={() => {}}
         onNoteDrag={() => {}}
       />
@@ -298,11 +312,98 @@ describe('PianoRoll', () => {
         pixelsPerBeat={100}
         pixelsPerOctave={100}
         gridSize={0.25}
+        timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
         onNoteClick={() => {}}
         onNoteDrag={() => {}}
       />
     );
     const canvas = document.querySelector('canvas');
     expect(canvas).toBeInTheDocument();
+  });
+
+  describe('per-bar time signatures', () => {
+    const PIANO_KEYS_WIDTH = 80;
+    const BAR_LINE_COLOR = '#cccccc';
+
+    /**
+     * Install a recording 2D context.
+     *
+     * jsdom has no canvas backend, so `getContext` returns null and the component
+     * draws nothing. This stands in far enough to observe where lines are placed.
+     */
+    function recordStrokes(): { color: string; x: number }[] {
+      const strokes: { color: string; x: number }[] = [];
+      const ctx = {
+        strokeStyle: '',
+        fillStyle: '',
+        lineWidth: 0,
+        font: '',
+        clearRect: vi.fn(),
+        fillRect: vi.fn(),
+        strokeRect: vi.fn(),
+        fillText: vi.fn(),
+        beginPath: vi.fn(),
+        lineTo: vi.fn(),
+        stroke: vi.fn(),
+        moveTo: vi.fn((x: number) => {
+          strokes.push({ color: String(ctx.strokeStyle), x });
+        }),
+      };
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+        ctx as unknown as CanvasRenderingContext2D
+      );
+      return strokes;
+    }
+
+    it('places bar lines at cumulative starts across mixed meters', () => {
+      const bars: Bar[] = [
+        { id: 'b0', barIndex: 0, timeSignature: { beatsPerMeasure: 3, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, chords: [], notes: [] },
+        { id: 'b1', barIndex: 1, timeSignature: { beatsPerMeasure: 4, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, chords: [], notes: [] },
+        { id: 'b2', barIndex: 2, timeSignature: { beatsPerMeasure: 2, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, chords: [], notes: [] },
+      ];
+      const strokes = recordStrokes();
+
+      render(
+        <PianoRoll
+          bars={bars}
+          selectedBarId="b0"
+          playheadBeat={0}
+          pixelsPerBeat={10}
+          pixelsPerOctave={100}
+          gridSize={0.25}
+          timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
+        />
+      );
+
+      const barLines = strokes.filter(s => s.color === BAR_LINE_COLOR).map(s => s.x);
+      // Starts at beats 0, 3, 7 plus the closing line at beat 9.
+      expect(barLines).toEqual([0, 3, 7, 9].map(b => PIANO_KEYS_WIDTH + b * 10));
+    });
+
+    it('draws one gridline per beat of the whole project', () => {
+      const bars: Bar[] = [
+        { id: 'b0', barIndex: 0, timeSignature: { beatsPerMeasure: 3, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, chords: [], notes: [] },
+        { id: 'b1', barIndex: 1, scale: { root: 'C', type: 'major' }, chords: [], notes: [] },
+      ];
+      const strokes = recordStrokes();
+
+      render(
+        <PianoRoll
+          bars={bars}
+          selectedBarId="b0"
+          playheadBeat={0}
+          pixelsPerBeat={10}
+          pixelsPerOctave={100}
+          gridSize={0.25}
+          timeSignature={{ beatsPerMeasure: 6, beatUnit: 4 }}
+        />
+      );
+
+      // Bar 1 inherits 6/4 from the project: 3 + 6 = 9 beats, so 10 gridlines.
+      const gridLines = strokes.filter(s => s.color === '#e5e5e5').map(s => s.x);
+      expect(gridLines.slice(-10)).toEqual(
+        Array.from({ length: 10 }, (_, i) => PIANO_KEYS_WIDTH + i * 10)
+      );
+    });
   });
 });

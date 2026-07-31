@@ -144,6 +144,7 @@ function App() {
                 pixelsPerBeat={80}
                 pixelsPerOctave={120}
                 gridSize={0.25}
+                timeSignature={project.timeSignature}
               />
             )}
           </div>

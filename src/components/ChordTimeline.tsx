@@ -6,6 +6,7 @@ import { beatToInsertIndex, getBarBeats } from '@/engine/timeline';
 import { paletteItemToSegment, type PaletteItem } from '@/engine/palette';
 import { PALETTE_DRAG_TYPE } from '@/components/ScalePalette';
 import { ChordSegmentBlock } from '@/components/ChordSegmentBlock';
+import { PIANO_KEYS_WIDTH } from '@/utils/constants';
 
 /** Horizontal zoom of the timeline. A beat is this many pixels wide. */
 export const PIXELS_PER_BEAT = 80;
@@ -105,10 +106,20 @@ export const ChordTimeline: React.FC = () => {
       data-testid="chord-timeline"
       // shrink-0 keeps the lanes at their natural height when the piano roll
       // below competes for space in the column.
-      className="shrink-0 overflow-x-auto bg-gray-900 border-b border-gray-700"
+      className="shrink-0 flex items-stretch bg-gray-900 border-b border-gray-700"
       onDragLeave={() => setDropIndicator(null)}
     >
-      <div className="flex items-stretch min-w-max">
+      {/* Matches the piano roll's key column, so bar 1 starts where its grid
+          does. It sits outside the scroll container for the same reason that
+          column does: it must not slide away when the timeline scrolls. */}
+      <div
+        data-testid="timeline-gutter"
+        style={{ width: `${PIANO_KEYS_WIDTH}px` }}
+        className="shrink-0 bg-gray-800 border-r border-gray-700"
+      />
+
+      <div data-testid="timeline-scroll" className="flex-1 overflow-x-auto">
+        <div className="flex items-stretch min-w-max">
         {bars.map((bar, barIndex) => {
           const beats = getBarBeats(bar, projectTs);
           const width = beats * PIXELS_PER_BEAT;
@@ -221,6 +232,7 @@ export const ChordTimeline: React.FC = () => {
             </div>
           );
         })}
+        </div>
       </div>
     </div>
   );

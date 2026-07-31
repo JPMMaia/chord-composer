@@ -1,10 +1,14 @@
-import type { ChordQuality, NoteName, Project, ScaleType } from '@/types/music';
+import type { ChordQuality, NoteName, Project, ScaleType, SegmentKind, TimeSignature } from '@/types/music';
 import { isValidTimeSignature } from '@/engine/timeline';
 
 /**
  * Current schema version for forward/backward compatibility.
+ *
+ * 1.1 added per-bar time signatures and note segments. Files written by 1.0 read
+ * back unchanged: an absent bar meter means "inherit the project's" and an absent
+ * segment kind means "chord", which is exactly what 1.0 could express.
  */
-export const SCHEMA_VERSION = '1.0';
+export const SCHEMA_VERSION = '1.1';
 
 /**
  * Validation error returned by validateProject.
@@ -26,7 +30,7 @@ const VALID_NOTES: NoteName[] = [
  */
 const VALID_QUALITIES: ChordQuality[] = [
   'major', 'minor', 'diminished', 'augmented', 'sus2', 'sus4',
-  'dominant7', 'maj7', 'min7', 'dim7',
+  'dominant7', 'maj7', 'min7', 'dim7', 'halfDim7', 'minMaj7',
 ];
 
 /**
@@ -68,12 +72,17 @@ export function serializeProject(project: Project): string {
     bars: project.bars.map(b => ({
       id: b.id,
       barIndex: b.barIndex,
+      // Written only when the bar overrides the project meter, so a uniform
+      // project still serialises exactly as it did under schema 1.0.
+      timeSignature: b.timeSignature,
       scale: b.scale,
       chords: b.chords.map(c => ({
         id: c.id,
+        kind: c.kind ?? 'chord',
         romanNumeral: c.romanNumeral,
         chordSymbol: c.chordSymbol,
         duration: c.duration,
+        pitch: c.pitch,
         root: c.root,
         inversion: c.inversion,
         quality: c.quality,
@@ -146,13 +155,20 @@ export function deserializeProject(json: string): Project {
     ? (p.bars as Record<string, unknown>[]).map((b, i) => ({
         id: (b.id as string) ?? `bar-${i}`,
         barIndex: typeof b.barIndex === 'number' ? b.barIndex : i,
+        // A missing — or nonsensical — meter means the bar follows the project's.
+        timeSignature: isValidTimeSignature(b.timeSignature as TimeSignature | undefined)
+          ? (b.timeSignature as TimeSignature)
+          : undefined,
         scale: (b.scale as { root: NoteName; type: ScaleType }) ?? { root: 'C', type: 'major' },
         chords: Array.isArray(b.chords)
           ? (b.chords as Record<string, unknown>[]).map((c, j) => ({
               id: (c.id as string) ?? `chord-${i}-${j}`,
+              // Schema 1.0 had no note segments, so anything unlabelled is a chord.
+              kind: (c.kind === 'note' ? 'note' : 'chord') as SegmentKind,
               romanNumeral: typeof c.romanNumeral === 'string' ? c.romanNumeral : undefined,
               chordSymbol: typeof c.chordSymbol === 'string' ? c.chordSymbol : undefined,
               duration: typeof c.duration === 'number' ? c.duration : 4,
+              pitch: typeof c.pitch === 'number' ? c.pitch : undefined,
               root: typeof c.root === 'string' ? (c.root as NoteName) : undefined,
               inversion: typeof c.inversion === 'number' ? c.inversion : 0,
               quality: typeof c.quality === 'string' ? (c.quality as ChordQuality) : undefined,
@@ -240,6 +256,11 @@ export function validateProject(project: Project): ValidationResult {
     }
     if (!VALID_SCALE_TYPES.includes(b.scale.type)) {
       errors.push(`Bar ${i}: invalid scale type "${b.scale.type}".`);
+    }
+    // A bar may omit its meter to follow the project's, but not carry a bad one.
+    if (b.timeSignature && !isValidTimeSignature(b.timeSignature)) {
+      const { beatsPerMeasure, beatUnit } = b.timeSignature;
+      errors.push(`Bar ${i}: invalid time signature ${beatsPerMeasure}/${beatUnit}.`);
     }
     for (let j = 0; j < b.chords.length; j++) {
       const c = b.chords[j];

@@ -403,6 +403,103 @@ describe('fileIO', () => {
     });
   });
 
+  describe('schema 1.1 fields', () => {
+    /** A project exercising every field added by the chord-editor revamp. */
+    function revampProject(): Project {
+      return createTestProject({
+        bars: [
+          {
+            id: 'bar-a',
+            barIndex: 0,
+            timeSignature: { beatsPerMeasure: 3, beatUnit: 4 },
+            scale: { root: 'C', type: 'major' },
+            chords: [
+              { id: 'seg-1', kind: 'chord', romanNumeral: 'viiø7', chordSymbol: 'Bø7', duration: 2, root: 'B', quality: 'halfDim7' },
+              { id: 'seg-2', kind: 'note', duration: 1, pitch: 64, root: 'E' },
+            ],
+            notes: [],
+          },
+          {
+            id: 'bar-b',
+            barIndex: 1,
+            scale: { root: 'C', type: 'major' },
+            chords: [],
+            notes: [],
+          },
+        ],
+      });
+    }
+
+    it('declares schema version 1.1', () => {
+      const parsed = JSON.parse(serializeProject(createTestProject()));
+      expect(parsed.version).toBe('1.1');
+    });
+
+    it('round-trips per-bar time signatures', () => {
+      const restored = deserializeProject(serializeProject(revampProject()));
+
+      expect(restored.bars[0].timeSignature).toEqual({ beatsPerMeasure: 3, beatUnit: 4 });
+      // A bar that inherits the project meter stores nothing of its own.
+      expect(restored.bars[1].timeSignature).toBeUndefined();
+    });
+
+    it('round-trips segment kind and pitch', () => {
+      const restored = deserializeProject(serializeProject(revampProject()));
+      const [chordSeg, noteSeg] = restored.bars[0].chords;
+
+      expect(chordSeg).toMatchObject({ kind: 'chord', quality: 'halfDim7', root: 'B' });
+      expect(chordSeg.pitch).toBeUndefined();
+      expect(noteSeg).toMatchObject({ kind: 'note', pitch: 64, duration: 1 });
+    });
+
+    it('accepts the seventh-chord qualities the palette can produce', () => {
+      const result = validateProject(revampProject());
+      expect(result.errors).toEqual([]);
+      expect(result.valid).toBe(true);
+    });
+
+    it('drops a per-bar time signature that is not a legal meter', () => {
+      const json = JSON.stringify({
+        ...JSON.parse(serializeProject(createTestProject())),
+        bars: [{ id: 'bar-a', barIndex: 0, timeSignature: { beatsPerMeasure: 4, beatUnit: 5 }, scale: { root: 'C', type: 'major' }, chords: [], notes: [] }],
+      });
+
+      expect(deserializeProject(json).bars[0].timeSignature).toBeUndefined();
+    });
+
+    it('loads a v1.0 file as an all-chord project inheriting the project meter', () => {
+      // Exactly what the previous schema wrote: no version bump, no kind, no
+      // pitch, no per-bar time signature.
+      const legacy = JSON.stringify({
+        version: '1.0',
+        id: 'p1',
+        name: 'Legacy',
+        bpm: 100,
+        timeSignature: { beatsPerMeasure: 4, beatUnit: 4 },
+        key: 'C',
+        keyMode: 'major',
+        tracks: [],
+        bars: [
+          {
+            id: 'bar-a',
+            barIndex: 0,
+            scale: { root: 'C', type: 'major' },
+            chords: [{ id: 'c1', romanNumeral: 'I', chordSymbol: 'C', duration: 4, root: 'C', quality: 'major' }],
+            notes: [{ id: 'n1', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }],
+          },
+        ],
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-01-01T00:00:00.000Z',
+      });
+
+      const restored = deserializeProject(legacy);
+
+      expect(restored.bars[0].timeSignature).toBeUndefined();
+      expect(restored.bars[0].chords[0]).toMatchObject({ kind: 'chord', root: 'C', duration: 4 });
+      expect(restored.bars[0].notes).toHaveLength(1);
+    });
+  });
+
   describe('clearLocalStorage', () => {
     it('removes the autosave key from localStorage', () => {
       const project = createTestProject();

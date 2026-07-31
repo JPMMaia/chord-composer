@@ -11,6 +11,16 @@ import type { Bar, Note, TimeSignature } from '@/types/music';
 const makeBar = (barIndex: number, beats: number, notes: Note[] = []): Bar => ({
   id: `bar-${barIndex}`,
   barIndex,
+  timeSignature: { beatsPerMeasure: beats, beatUnit: 4 },
+  scale: { root: 'C', type: 'major' },
+  chords: [],
+  notes,
+});
+
+/** A bar with no meter of its own, so it inherits the project's. */
+const makeInheritingBar = (barIndex: number, notes: Note[] = []): Bar => ({
+  id: `bar-${barIndex}`,
+  barIndex,
   scale: { root: 'C', type: 'major' },
   chords: [],
   notes,
@@ -119,6 +129,33 @@ describe('playback', () => {
       const timings240 = calculateNoteTiming(config240);
       expect(timings240[0].duration).toBe(0.25);
     });
+
+    it('accumulates bar starts across differing per-bar time signatures', () => {
+      const bars: Bar[] = [
+        makeBar(0, 3, [{ id: 'n1', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }]),
+        makeBar(1, 4, [{ id: 'n2', pitch: 62, startBeat: 0, duration: 1, velocity: 100 }]),
+        makeBar(2, 2, [{ id: 'n3', pitch: 64, startBeat: 0, duration: 1, velocity: 100 }]),
+      ];
+      // 60 BPM → 1 beat = 1 second, so start times read directly as beats.
+      const timings = calculateNoteTiming(
+        makeConfig(60, { beatsPerMeasure: 4, beatUnit: 4 }, bars)
+      );
+
+      expect(timings.map(t => t.startTime)).toEqual([0, 3, 7]);
+    });
+
+    it('falls back to the project time signature for bars without one', () => {
+      const bars: Bar[] = [
+        makeInheritingBar(0),
+        makeInheritingBar(1, [{ id: 'n1', pitch: 60, startBeat: 1, duration: 1, velocity: 100 }]),
+      ];
+      const timings = calculateNoteTiming(
+        makeConfig(60, { beatsPerMeasure: 3, beatUnit: 4 }, bars)
+      );
+
+      // Bar 1 starts at beat 3, note sits a beat into it.
+      expect(timings[0].startTime).toBe(4);
+    });
   });
 
   describe('getLoopDuration', () => {
@@ -163,11 +200,22 @@ describe('playback', () => {
       // 3 - 1 = 2 beats at 60 BPM = 2 seconds
       expect(getLoopDuration(config)).toBe(2.0);
     });
+
+    it('sums differing bar lengths for the total duration', () => {
+      const bars: Bar[] = [makeBar(0, 4), makeBar(1, 3), makeBar(2, 2)];
+      const config = makeConfig(60, { beatsPerMeasure: 4, beatUnit: 4 }, bars);
+      // 4 + 3 + 2 = 9 beats at 60 BPM → 9 seconds
+      expect(getLoopDuration(config)).toBe(9.0);
+    });
   });
 
   describe('calculateMetronomeBeats', () => {
+    /** `count` bars that all inherit the project meter. */
+    const inheriting = (count: number): Bar[] =>
+      Array.from({ length: count }, (_, i) => makeInheritingBar(i));
+
     it('generates correct beat positions for 4/4 time', () => {
-      const beats = calculateMetronomeBeats({ beatsPerMeasure: 4, beatUnit: 4 }, 2);
+      const beats = calculateMetronomeBeats(inheriting(2), { beatsPerMeasure: 4, beatUnit: 4 });
       // 2 bars × 4 beats = 8 beats at 60 BPM
       expect(beats).toHaveLength(8);
       expect(beats[0]).toBe(0);
@@ -178,7 +226,7 @@ describe('playback', () => {
     });
 
     it('generates correct beat positions for 3/4 time', () => {
-      const beats = calculateMetronomeBeats({ beatsPerMeasure: 3, beatUnit: 4 }, 2);
+      const beats = calculateMetronomeBeats(inheriting(2), { beatsPerMeasure: 3, beatUnit: 4 });
       // 2 bars × 3 beats = 6 beats
       expect(beats).toHaveLength(6);
       expect(beats[0]).toBe(0);
@@ -190,15 +238,23 @@ describe('playback', () => {
     });
 
     it('generates correct beat positions for 6/8 time', () => {
-      const beats = calculateMetronomeBeats({ beatsPerMeasure: 6, beatUnit: 8 }, 1);
+      const beats = calculateMetronomeBeats(inheriting(1), { beatsPerMeasure: 6, beatUnit: 8 });
       // 1 bar × 6 beats = 6 beats
       expect(beats).toHaveLength(6);
       expect(beats[5]).toBe(5.0);
     });
 
     it('handles single bar', () => {
-      const beats = calculateMetronomeBeats({ beatsPerMeasure: 4, beatUnit: 4 }, 1);
+      const beats = calculateMetronomeBeats(inheriting(1), { beatsPerMeasure: 4, beatUnit: 4 });
       expect(beats).toHaveLength(4);
+    });
+
+    it('clicks once per beat across bars of differing lengths', () => {
+      const beats = calculateMetronomeBeats(
+        [makeBar(0, 4), makeBar(1, 3)],
+        { beatsPerMeasure: 4, beatUnit: 4 }
+      );
+      expect(beats).toEqual([0, 1, 2, 3, 4, 5, 6]);
     });
   });
 });

@@ -30,11 +30,20 @@ export function isValidTimeSignature(ts: TimeSignature | undefined | null): bool
 }
 
 /**
+ * The meter a bar is actually in: its own if it has one, otherwise the project's.
+ * Everything that needs a bar's metre — capacity, exporters, the piano roll grid —
+ * resolves it here so the fallback rule is stated once.
+ */
+export function getBarTimeSignature(bar: Bar, projectTs: TimeSignature): TimeSignature {
+  return bar.timeSignature ?? projectTs;
+}
+
+/**
  * Returns the number of beats a bar holds, preferring its own time signature
  * and falling back to the project's.
  */
 export function getBarBeats(bar: Bar, projectTs: TimeSignature): number {
-  return (bar.timeSignature ?? projectTs).beatsPerMeasure;
+  return getBarTimeSignature(bar, projectTs).beatsPerMeasure;
 }
 
 /**

@@ -1,5 +1,6 @@
-import type { Bar, Note, Project, Track } from '@/types/music';
+import type { Bar, Note, Project, TimeSignature, Track } from '@/types/music';
 import { generateId } from '@/utils/id';
+import { getBarStartBeat, getBarTimeSignature } from '@/engine/timeline';
 
 // ---------------------------------------------------------------------------
 // MIDI constants
@@ -119,7 +120,6 @@ function channelForTrack(index: number): number {
  */
 export function projectToMidi(project: Project): Uint8Array<ArrayBuffer> {
   const ppq = DEFAULT_PPQ;
-  const { beatsPerMeasure, beatUnit } = project.timeSignature;
 
   // A MIDI file needs at least one track chunk even for a track-less project.
   const trackCount = Math.max(1, project.tracks.length);
@@ -151,20 +151,8 @@ export function projectToMidi(project: Project): Uint8Array<ArrayBuffer> {
         ],
       });
 
-      events.push({
-        tick: 0,
-        order: 2,
-        data: [
-          META, META_TIME_SIGNATURE, 0x04,
-          beatsPerMeasure & 0xff,
-          // The denominator is stored as a power of two: 4 → 2, 8 → 3.
-          Math.round(Math.log2(beatUnit)) & 0xff,
-          24, // MIDI clocks per metronome click
-          8,  // 32nd notes per quarter note
-        ],
-      });
-
-      events.push(...noteEvents(project.bars, beatsPerMeasure, ppq, channelForTrack(t)));
+      events.push(...timeSignatureEvents(project.bars, project.timeSignature, ppq));
+      events.push(...noteEvents(project.bars, project.timeSignature, ppq, channelForTrack(t)));
     }
 
     chunks.push(buildTrackChunk(events));
@@ -182,17 +170,65 @@ export function projectToMidi(project: Project): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(bytes);
 }
 
+/**
+ * Build the time-signature meta events for a project.
+ *
+ * One is always written at tick 0; thereafter a bar contributes an event only
+ * when its metre differs from the bar before it, so a uniform project still
+ * produces exactly one event.
+ */
+function timeSignatureEvents(
+  bars: Bar[],
+  projectTs: TimeSignature,
+  ppq: number
+): AbsoluteEvent[] {
+  const events: AbsoluteEvent[] = [];
+  let previous: TimeSignature | null = null;
+
+  const metres = bars.length > 0
+    ? bars.map(bar => getBarTimeSignature(bar, projectTs))
+    : [projectTs];
+
+  metres.forEach((ts, i) => {
+    if (
+      previous &&
+      previous.beatsPerMeasure === ts.beatsPerMeasure &&
+      previous.beatUnit === ts.beatUnit
+    ) {
+      return;
+    }
+    previous = ts;
+
+    events.push({
+      tick: Math.round(getBarStartBeat(bars, i, projectTs) * ppq),
+      order: 2,
+      data: [
+        META, META_TIME_SIGNATURE, 0x04,
+        ts.beatsPerMeasure & 0xff,
+        // The denominator is stored as a power of two: 4 → 2, 8 → 3.
+        Math.round(Math.log2(ts.beatUnit)) & 0xff,
+        24, // MIDI clocks per metronome click
+        8,  // 32nd notes per quarter note
+      ],
+    });
+  });
+
+  return events;
+}
+
 /** Build note-on/note-off events for every note in every bar. */
 function noteEvents(
   bars: Bar[],
-  beatsPerMeasure: number,
+  projectTs: TimeSignature,
   ppq: number,
   channel: number
 ): AbsoluteEvent[] {
   const events: AbsoluteEvent[] = [];
 
-  for (const bar of bars) {
-    const barStartTick = bar.barIndex * beatsPerMeasure * ppq;
+  for (let i = 0; i < bars.length; i++) {
+    const bar = bars[i];
+    // Bars may each be in their own metre, so accumulate rather than multiply.
+    const barStartTick = Math.round(getBarStartBeat(bars, i, projectTs) * ppq);
     for (const note of bar.notes) {
       const startTick = barStartTick + Math.round(note.startBeat * ppq);
       // Zero-length notes would produce a note-off before the note-on is heard.

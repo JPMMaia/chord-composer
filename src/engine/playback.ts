@@ -1,4 +1,5 @@
 import type { Bar, TimeSignature } from '@/types/music';
+import { getBarStartBeat, getTotalBeats } from '@/engine/timeline';
 
 export interface NoteTiming {
   midiNote: number;
@@ -25,37 +26,24 @@ function beatDuration(bpm: number): number {
 }
 
 /**
- * Calculate absolute start time in seconds for a note at a given bar and beat position.
- */
-function noteStartTime(
-  barIndex: number,
-  startBeat: number,
-  beatsPerMeasure: number,
-  beatDur: number
-): number {
-  return (barIndex * beatsPerMeasure + startBeat) * beatDur;
-}
-
-/**
  * Calculate timing information for all notes in all bars.
+ *
+ * Bars may each be in their own metre, so a bar's position is the accumulated
+ * length of everything before it rather than `barIndex × beatsPerMeasure`.
  */
 export function calculateNoteTiming(config: PlaybackConfig): NoteTiming[] {
   const beatDur = beatDuration(config.bpm);
-  const bpm = config.bpm;
-  const beatsPerMeasure = config.timeSignature.beatsPerMeasure;
   const timings: NoteTiming[] = [];
 
-  for (const bar of config.bars) {
+  for (let i = 0; i < config.bars.length; i++) {
+    const bar = config.bars[i];
+    const barStartBeat = getBarStartBeat(config.bars, i, config.timeSignature);
+
     for (const note of bar.notes) {
       timings.push({
         midiNote: note.pitch,
-        startTime: noteStartTime(
-          bar.barIndex,
-          note.startBeat,
-          beatsPerMeasure,
-          beatDur
-        ),
-        duration: note.duration * beatDuration(bpm),
+        startTime: (barStartBeat + note.startBeat) * beatDur,
+        duration: note.duration * beatDur,
         velocity: note.velocity,
         barIndex: bar.barIndex,
       });
@@ -70,31 +58,24 @@ export function calculateNoteTiming(config: PlaybackConfig): NoteTiming[] {
  */
 export function getLoopDuration(config: PlaybackConfig): number {
   const beatDur = beatDuration(config.bpm);
-  const beatsPerMeasure = config.timeSignature.beatsPerMeasure;
-  const totalBeats = config.bars.length * beatsPerMeasure;
 
   if (config.loopStart !== null && config.loopEnd !== null) {
     return (config.loopEnd - config.loopStart) * beatDur;
   }
 
-  return totalBeats * beatDur;
+  return getTotalBeats(config.bars, config.timeSignature) * beatDur;
 }
 
 /**
- * Calculate metronome click times for all beats in the project.
+ * Calculate metronome click positions, in beats from the start of the project.
+ *
+ * Takes the bars themselves rather than a bar count because each may be in its
+ * own metre; the caller scales the result by BPM.
  */
 export function calculateMetronomeBeats(
-  timeSignature: TimeSignature,
-  totalBars: number
+  bars: Bar[],
+  projectTs: TimeSignature
 ): number[] {
-  const beatDur = 1; // Return in beat units, caller scales by BPM
-  const beatsPerMeasure = timeSignature.beatsPerMeasure;
-  const totalBeats = totalBars * beatsPerMeasure;
-  const beats: number[] = [];
-
-  for (let i = 0; i < totalBeats; i++) {
-    beats.push(i * beatDur);
-  }
-
-  return beats;
+  const totalBeats = getTotalBeats(bars, projectTs);
+  return Array.from({ length: totalBeats }, (_, i) => i);
 }

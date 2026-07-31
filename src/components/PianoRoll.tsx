@@ -1,5 +1,5 @@
 import { useRef, useEffect, useCallback, useMemo } from 'react';
-import type { Bar } from '@/types/music';
+import type { Bar, TimeSignature } from '@/types/music';
 import {
   snapToGrid,
   beatToPixel,
@@ -8,6 +8,8 @@ import {
   pixelToPitch,
 } from '@/engine/quantize';
 import { isNoteInScale } from '@/engine/scales';
+import { getBarBeats, getBarStartBeat, getTotalBeats } from '@/engine/timeline';
+import { PIANO_KEYS_WIDTH } from '@/utils/constants';
 
 export interface PianoRollProps {
   bars: Bar[];
@@ -16,6 +18,8 @@ export interface PianoRollProps {
   pixelsPerBeat: number;
   pixelsPerOctave: number;
   gridSize: number;
+  /** Project meter, used for any bar that does not carry one of its own. */
+  timeSignature: TimeSignature;
   /** Optional: the roll is a read-only view of the derived notes unless supplied. */
   onNoteClick?: (barId: string, pitch: number, beat: number) => void;
   onNoteDrag?: (noteId: string, durationDelta: number) => void;
@@ -42,8 +46,6 @@ const DEFAULT_COLORS = {
   pitchLabel: '#666666',
 };
 
-const PIANO_ROLL_WIDTH = 80;
-
 export function PianoRoll({
   bars,
   selectedBarId,
@@ -51,6 +53,7 @@ export function PianoRoll({
   pixelsPerBeat,
   pixelsPerOctave,
   gridSize,
+  timeSignature,
   onNoteClick,
   onNoteDrag,
 }: PianoRollProps): React.ReactElement {
@@ -84,7 +87,7 @@ export function PianoRoll({
   const render = useCallback(
     (ctx: CanvasRenderingContext2D, width: number, height: number) => {
       ctx.clearRect(0, 0, width, height);
-      const timelineStart = PIANO_ROLL_WIDTH;
+      const timelineStart = PIANO_KEYS_WIDTH;
 
       const semitonesPerOctave = 12;
       const pixelsPerSemitone = pixelsPerOctave / semitonesPerOctave;
@@ -97,11 +100,11 @@ export function PianoRoll({
         const isBlackKey = [1, 3, 6, 8, 10].includes(midi % 12);
 
         ctx.fillStyle = isBlackKey ? DEFAULT_COLORS.blackKey : DEFAULT_COLORS.whiteKey;
-        ctx.fillRect(0, y, PIANO_ROLL_WIDTH, noteHeight);
+        ctx.fillRect(0, y, PIANO_KEYS_WIDTH, noteHeight);
 
         ctx.strokeStyle = '#ccc';
         ctx.lineWidth = 0.5;
-        ctx.strokeRect(0, y, PIANO_ROLL_WIDTH, noteHeight);
+        ctx.strokeRect(0, y, PIANO_KEYS_WIDTH, noteHeight);
 
         if (midi % 12 === 0) {
           ctx.fillStyle = DEFAULT_COLORS.pitchLabel;
@@ -116,12 +119,12 @@ export function PianoRoll({
       for (let midi = minMidiNote; midi <= maxMidiNote; midi++) {
         const y = pitchToPixel(midi, pixelsPerOctave);
         ctx.beginPath();
-        ctx.moveTo(PIANO_ROLL_WIDTH, y);
+        ctx.moveTo(PIANO_KEYS_WIDTH, y);
         ctx.lineTo(width, y);
         ctx.stroke();
       }
 
-      const totalBeats = bars.length * 4;
+      const totalBeats = getTotalBeats(bars, timeSignature);
       for (let beat = 0; beat <= totalBeats; beat++) {
         const x = timelineStart + beatToPixel(beat, pixelsPerBeat);
         ctx.beginPath();
@@ -130,10 +133,12 @@ export function PianoRoll({
         ctx.stroke();
       }
 
+      // Bar lines sit at accumulated bar starts — bars need not share a metre —
+      // plus a closing line at the end of the last bar.
       ctx.strokeStyle = DEFAULT_COLORS.barLine;
       ctx.lineWidth = 1;
       for (let barIndex = 0; barIndex <= bars.length; barIndex++) {
-        const barStartBeat = barIndex * 4;
+        const barStartBeat = getBarStartBeat(bars, barIndex, timeSignature);
         const x = timelineStart + beatToPixel(barStartBeat, pixelsPerBeat);
         ctx.beginPath();
         ctx.moveTo(x, 0);
@@ -142,9 +147,10 @@ export function PianoRoll({
       }
 
       if (selectedBar) {
-        const barStartBeat = selectedBar.barIndex * 4;
+        const selectedIndex = bars.indexOf(selectedBar);
+        const barStartBeat = getBarStartBeat(bars, selectedIndex, timeSignature);
         const x = timelineStart + beatToPixel(barStartBeat, pixelsPerBeat);
-        const barWidth = 4 * pixelsPerBeat;
+        const barWidth = getBarBeats(selectedBar, timeSignature) * pixelsPerBeat;
 
         ctx.fillStyle = DEFAULT_COLORS.activeBar;
         ctx.fillRect(x, 0, barWidth, height);
@@ -172,7 +178,7 @@ export function PianoRoll({
       ctx.lineTo(playheadX, height);
       ctx.stroke();
     },
-    [bars, selectedBar, selectedBarNotes, pixelsPerBeat, pixelsPerOctave, playheadBeat]
+    [bars, selectedBar, selectedBarNotes, pixelsPerBeat, pixelsPerOctave, playheadBeat, timeSignature]
   );
 
   useEffect(() => {
@@ -240,14 +246,14 @@ export function PianoRoll({
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
 
-      if (x < PIANO_ROLL_WIDTH) return;
+      if (x < PIANO_KEYS_WIDTH) return;
 
-      const beat = pixelToBeat(x - PIANO_ROLL_WIDTH, pixelsPerBeat);
+      const beat = pixelToBeat(x - PIANO_KEYS_WIDTH, pixelsPerBeat);
       const snappedBeat = snapToGrid(beat, gridSize);
       const pitch = Math.round(pixelToPitch(y, pixelsPerOctave));
 
       for (const note of selectedBarNotes) {
-        const noteX = PIANO_ROLL_WIDTH + beatToPixel(note.startBeat, pixelsPerBeat);
+        const noteX = PIANO_KEYS_WIDTH + beatToPixel(note.startBeat, pixelsPerBeat);
         const noteY = pitchToPixel(note.pitch, pixelsPerOctave);
         const noteWidth = beatToPixel(note.duration, pixelsPerBeat);
         const noteHeight = pixelsPerOctave / 12;
@@ -293,10 +299,10 @@ export function PianoRoll({
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
 
-      if (x < PIANO_ROLL_WIDTH) return;
+      if (x < PIANO_KEYS_WIDTH) return;
 
       for (const note of selectedBarNotes) {
-        const noteX = PIANO_ROLL_WIDTH + beatToPixel(note.startBeat, pixelsPerBeat);
+        const noteX = PIANO_KEYS_WIDTH + beatToPixel(note.startBeat, pixelsPerBeat);
         const noteY = pitchToPixel(note.pitch, pixelsPerOctave);
         const noteWidth = beatToPixel(note.duration, pixelsPerBeat);
         const noteHeight = pixelsPerOctave / 12;

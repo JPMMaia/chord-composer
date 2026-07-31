@@ -223,7 +223,128 @@ describe('midiExporter', () => {
       expect(() => midiToProject(notMidi)).toThrow();
     });
   });
+
+  describe('per-bar time signatures', () => {
+    /** A bar carrying one note on its downbeat, so its start tick is observable. */
+    const barWith = (barIndex: number, ts: { beatsPerMeasure: number; beatUnit: number } | undefined, pitch: number): Bar => ({
+      id: generateId(),
+      barIndex,
+      timeSignature: ts,
+      scale: { root: 'C', type: 'major' },
+      chords: [],
+      notes: [{ id: generateId(), pitch, startBeat: 0, duration: 1, velocity: 100 }],
+    });
+
+    it('emits one time-signature event when every bar shares a meter', () => {
+      const project = createTestProject({
+        bars: [barWith(0, undefined, 60), barWith(1, undefined, 62)],
+      });
+      const events = scanTimeSignatureEvents(projectToMidi(project));
+
+      expect(events).toEqual([{ tick: 0, beatsPerMeasure: 4, beatUnit: 4 }]);
+    });
+
+    it('emits a further event at each bar whose meter changes', () => {
+      const project = createTestProject({
+        bars: [
+          barWith(0, { beatsPerMeasure: 4, beatUnit: 4 }, 60),
+          barWith(1, { beatsPerMeasure: 3, beatUnit: 4 }, 62),
+          barWith(2, { beatsPerMeasure: 3, beatUnit: 4 }, 64),
+          barWith(3, { beatsPerMeasure: 6, beatUnit: 8 }, 65),
+        ],
+      });
+      const events = scanTimeSignatureEvents(projectToMidi(project));
+
+      // Bar 2 repeats bar 1's meter, so it contributes no event.
+      expect(events).toEqual([
+        { tick: 0, beatsPerMeasure: 4, beatUnit: 4 },
+        { tick: 4 * PPQ, beatsPerMeasure: 3, beatUnit: 4 },
+        { tick: 10 * PPQ, beatsPerMeasure: 6, beatUnit: 8 },
+      ]);
+    });
+
+    it('places notes at cumulative bar starts rather than a fixed bar length', () => {
+      const project = createTestProject({
+        bars: [
+          barWith(0, { beatsPerMeasure: 3, beatUnit: 4 }, 60),
+          barWith(1, { beatsPerMeasure: 4, beatUnit: 4 }, 62),
+          barWith(2, { beatsPerMeasure: 2, beatUnit: 4 }, 64),
+        ],
+      });
+      const onsets = scanNoteOnTicks(projectToMidi(project));
+
+      expect(onsets).toEqual([
+        { tick: 0, pitch: 60 },
+        { tick: 3 * PPQ, pitch: 62 },
+        { tick: 7 * PPQ, pitch: 64 },
+      ]);
+    });
+  });
 });
+
+/**
+ * Walk track 0's delta-encoded event stream, yielding absolute ticks.
+ *
+ * Only the event shapes this exporter writes are handled — meta, note-on and
+ * note-off — which is enough to assert placement without pulling in a parser.
+ */
+function scanTrack0(data: Uint8Array): { tick: number; status: number; metaType?: number; body: number[] }[] {
+  // Skip the 14-byte MThd header, then the "MTrk" tag and its 4-byte length.
+  let offset = 14 + 8;
+  const events: { tick: number; status: number; metaType?: number; body: number[] }[] = [];
+  let tick = 0;
+
+  const readVarLen = () => {
+    let value = 0;
+    while (offset < data.length) {
+      const byte = data[offset++];
+      value = value * 128 + (byte & 0x7f);
+      if (byte < 0x80) break;
+    }
+    return value;
+  };
+
+  while (offset < data.length) {
+    tick += readVarLen();
+    const status = data[offset++];
+
+    if (status === 0xff) {
+      const metaType = data[offset++];
+      const length = readVarLen();
+      events.push({ tick, status, metaType, body: Array.from(data.subarray(offset, offset + length)) });
+      offset += length;
+      if (metaType === 0x2f) break; // end of track
+      continue;
+    }
+
+    const body = Array.from(data.subarray(offset, offset + 2));
+    events.push({ tick, status, body });
+    offset += 2;
+  }
+
+  return events;
+}
+
+/** Time-signature meta events of track 0, decoded back to a readable meter. */
+function scanTimeSignatureEvents(
+  data: Uint8Array
+): { tick: number; beatsPerMeasure: number; beatUnit: number }[] {
+  return scanTrack0(data)
+    .filter(e => e.status === 0xff && e.metaType === 0x58)
+    .map(e => ({
+      tick: e.tick,
+      beatsPerMeasure: e.body[0],
+      // The denominator is stored as a power of two.
+      beatUnit: 2 ** e.body[1],
+    }));
+}
+
+/** Note-on events of track 0, in stream order. */
+function scanNoteOnTicks(data: Uint8Array): { tick: number; pitch: number }[] {
+  return scanTrack0(data)
+    .filter(e => (e.status & 0xf0) === 0x90 && e.body[1] > 0)
+    .map(e => ({ tick: e.tick, pitch: e.body[0] }));
+}
 
 // Helper: count MTrk headers in MIDI bytes
 function countTrackHeaders(data: Uint8Array): number {

@@ -1,4 +1,5 @@
-import type { Bar, ChordQuality, ChordSegment, Note, NoteName, Project } from '@/types/music';
+import type { Bar, ChordQuality, ChordSegment, Note, NoteName, Project, TimeSignature } from '@/types/music';
+import { getBarTimeSignature } from '@/engine/timeline';
 
 /**
  * MusicXML divisions per quarter note. Four divisions resolve down to a
@@ -146,7 +147,6 @@ export function projectToMusicXML(project: Project): string {
   const { name, bpm, timeSignature, key, keyMode, tracks, bars } = project;
   const fifths = keyToFifths(key, keyMode);
   const useFlats = fifths <= 0;
-  const beatsPerMeasure = timeSignature.beatsPerMeasure;
 
   const lines: string[] = [];
 
@@ -179,26 +179,44 @@ export function projectToMusicXML(project: Project): string {
       ? bars
       : [{ id: 'empty', barIndex: 0, scale: { root: key, type: 'major' }, chords: [], notes: [] }];
 
+    // A measure restates the metre only when it differs from the one before it.
+    let previousTs: TimeSignature | null = null;
+
     measures.forEach((bar, index) => {
       lines.push(`    <measure number="${index + 1}">`);
 
-      if (index === 0) {
-        lines.push('      <attributes>');
-        lines.push(`        <divisions>${DIVISIONS}</divisions>`);
-        lines.push('        <key>');
-        lines.push(`          <fifths>${fifths}</fifths>`);
-        lines.push(`          <mode>${keyMode}</mode>`);
-        lines.push('        </key>');
-        lines.push('        <time>');
-        lines.push(`          <beats>${timeSignature.beatsPerMeasure}</beats>`);
-        lines.push(`          <beat-type>${timeSignature.beatUnit}</beat-type>`);
-        lines.push('        </time>');
-        lines.push('        <clef>');
-        lines.push('          <sign>G</sign>');
-        lines.push('          <line>2</line>');
-        lines.push('        </clef>');
-        lines.push('      </attributes>');
+      const barTs = getBarTimeSignature(bar, timeSignature);
+      const metreChanged =
+        previousTs === null ||
+        previousTs.beatsPerMeasure !== barTs.beatsPerMeasure ||
+        previousTs.beatUnit !== barTs.beatUnit;
+      previousTs = barTs;
 
+      if (index === 0 || metreChanged) {
+        lines.push('      <attributes>');
+        if (index === 0) {
+          lines.push(`        <divisions>${DIVISIONS}</divisions>`);
+          lines.push('        <key>');
+          lines.push(`          <fifths>${fifths}</fifths>`);
+          lines.push(`          <mode>${keyMode}</mode>`);
+          lines.push('        </key>');
+        }
+        if (metreChanged) {
+          lines.push('        <time>');
+          lines.push(`          <beats>${barTs.beatsPerMeasure}</beats>`);
+          lines.push(`          <beat-type>${barTs.beatUnit}</beat-type>`);
+          lines.push('        </time>');
+        }
+        if (index === 0) {
+          lines.push('        <clef>');
+          lines.push('          <sign>G</sign>');
+          lines.push('          <line>2</line>');
+          lines.push('        </clef>');
+        }
+        lines.push('      </attributes>');
+      }
+
+      if (index === 0) {
         lines.push('      <direction placement="above">');
         lines.push('        <direction-type>');
         lines.push('          <metronome>');
@@ -218,7 +236,7 @@ export function projectToMusicXML(project: Project): string {
         }
       }
 
-      lines.push(...renderMeasureNotes(bar.notes, beatsPerMeasure, useFlats));
+      lines.push(...renderMeasureNotes(bar.notes, barTs.beatsPerMeasure, useFlats));
 
       lines.push('    </measure>');
     });

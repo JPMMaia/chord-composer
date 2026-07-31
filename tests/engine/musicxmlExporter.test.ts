@@ -227,4 +227,60 @@ describe('musicxmlExporter', () => {
       expect(xml).toContain('<alter>-1</alter>'); // Db = C with -1 alteration
     });
   });
+
+  describe('per-bar time signatures', () => {
+    const emptyBar = (
+      barIndex: number,
+      timeSignature?: { beatsPerMeasure: number; beatUnit: number }
+    ): Bar => ({
+      id: generateId(),
+      barIndex,
+      timeSignature,
+      scale: { root: 'C', type: 'major' },
+      chords: [],
+      notes: [],
+    });
+
+    /** The `<beats>` values in document order, one per emitted `<time>`. */
+    function timeElements(xml: string): string[] {
+      return Array.from(xml.matchAll(/<beats>(\d+)<\/beats>\s*<beat-type>(\d+)<\/beat-type>/g)).map(
+        m => `${m[1]}/${m[2]}`
+      );
+    }
+
+    it('writes the meter once when no bar changes it', () => {
+      const project = createTestProject({ bars: [emptyBar(0), emptyBar(1), emptyBar(2)] });
+      expect(timeElements(projectToMusicXML(project))).toEqual(['4/4']);
+    });
+
+    it('writes a new <time> at each measure whose meter changes', () => {
+      const project = createTestProject({
+        bars: [
+          emptyBar(0, { beatsPerMeasure: 4, beatUnit: 4 }),
+          emptyBar(1, { beatsPerMeasure: 3, beatUnit: 4 }),
+          emptyBar(2, { beatsPerMeasure: 3, beatUnit: 4 }),
+          emptyBar(3, { beatsPerMeasure: 6, beatUnit: 8 }),
+        ],
+      });
+      // Measure 3 repeats measure 2's meter and so restates nothing.
+      expect(timeElements(projectToMusicXML(project))).toEqual(['4/4', '3/4', '6/8']);
+    });
+
+    it('takes the first measure meter from the bar, not just the project', () => {
+      const project = createTestProject({
+        bars: [emptyBar(0, { beatsPerMeasure: 5, beatUnit: 4 })],
+      });
+      expect(timeElements(projectToMusicXML(project))).toEqual(['5/4']);
+    });
+
+    it('sizes a measure rest to that bar own length', () => {
+      const project = createTestProject({
+        bars: [emptyBar(0, { beatsPerMeasure: 3, beatUnit: 4 })],
+      });
+      const xml = projectToMusicXML(project);
+
+      // 3 beats × 4 divisions per beat.
+      expect(xml).toContain('<rest measure="yes"/>\n        <duration>12</duration>');
+    });
+  });
 });

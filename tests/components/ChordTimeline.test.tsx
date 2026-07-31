@@ -6,6 +6,7 @@ import { selectionStore } from '@/store/selectionStore';
 import { getPaletteItems } from '@/engine/palette';
 import type { PaletteItem } from '@/engine/palette';
 import type { ChordSegment } from '@/types/music';
+import { PIANO_KEYS_WIDTH } from '@/utils/constants';
 
 /** Minimal stand-in for the DataTransfer jsdom does not implement. */
 function makeDataTransfer(item: PaletteItem) {
@@ -204,6 +205,16 @@ describe('ChordTimeline', () => {
     fireEvent.keyDown(first, { key: 'ArrowRight' });
 
     expect(segments().map(s => s.root)).toEqual(['G', 'C']);
+  });
+
+  it('reserves a gutter matching the piano roll key column, so bar 1 lines up', () => {
+    render(<ChordTimeline />);
+
+    const gutter = screen.getByTestId('timeline-gutter');
+    expect(gutter).toHaveStyle({ width: `${PIANO_KEYS_WIDTH}px` });
+    // The gutter must sit outside the scrolling lanes, as the piano roll's key
+    // column does, or scrolling would slide bar 1 out from under the grid.
+    expect(gutter.parentElement).not.toBe(screen.getByTestId('timeline-scroll'));
   });
 
   it('offers no Add Chord, chord-symbol field or Auto-Fill control', () => {

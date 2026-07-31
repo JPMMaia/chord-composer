@@ -267,6 +267,38 @@ describe("chordOperations", () => {
         expect(note.velocity).toBe(100);
       });
     });
+
+    it("places notes at the segment's own start beat", () => {
+      const bar = barWith([{ ...makeChord("I", 1), startBeat: 3 }]);
+      generateNotesFromSegments(bar, TS_4_4, 4).forEach((note) => {
+        expect(note.startBeat).toBe(3);
+      });
+    });
+
+    it("leaves a gap between segments as silence", () => {
+      // I on beat 0, V on beat 2: nothing at all sounds on beat 1.
+      const bar = barWith([
+        { ...makeChord("I", 1), startBeat: 0 },
+        { ...makeChord("V", 1), startBeat: 2 },
+      ]);
+      const result = generateNotesFromSegments(bar, TS_4_4, 4);
+      expect(result.map((n) => n.startBeat).sort()).toEqual([0, 0, 0, 2, 2, 2]);
+      expect(result.some((n) => n.startBeat > 0 && n.startBeat < 2)).toBe(false);
+    });
+
+    it("skips a segment that starts past the bar line", () => {
+      // Refitting owns moving this into the next bar; rendering it here would
+      // double it up.
+      const bar = barWith([{ ...makeChord("I", 1), startBeat: 4 }]);
+      expect(generateNotesFromSegments(bar, TS_4_4, 4)).toEqual([]);
+    });
+
+    it("packs positionless segments, as projects saved before free placement meant", () => {
+      const bar = barWith([makeChord("I", 2), makeChord("V", 2)]);
+      const result = generateNotesFromSegments(bar, TS_4_4, 4);
+      expect(result.filter((n) => n.startBeat === 0)).toHaveLength(3);
+      expect(result.filter((n) => n.startBeat === 2)).toHaveLength(3);
+    });
   });
 
   describe("mergeAdjacentChords", () => {

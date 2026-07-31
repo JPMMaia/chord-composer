@@ -7,7 +7,7 @@ import {
   SEMITONE_TO_NOTE,
 } from '@/engine/chords';
 import { getScalePitches } from '@/engine/scales';
-import { getBarBeats } from '@/engine/timeline';
+import { getBarBeats, withStartBeats } from '@/engine/timeline';
 import { formatChordSymbol } from '@/engine/palette';
 import { DEFAULT_TIME_SIGNATURE, NOTE_NAMES } from '@/utils/constants';
 
@@ -91,7 +91,8 @@ export function reorderChords(
  * This is the sync engine behind the chord panel: `bar.notes` is derived state,
  * regenerated whenever segments change, so the piano roll always mirrors the
  * timeline. A chord segment expands to its stacked intervals; a note segment
- * yields a single pitch.
+ * yields a single pitch. Segments sit where they were placed, so the gaps between
+ * them come out as silence with no further work.
  *
  * Deliberately total — it never throws — because it runs on every edit, including
  * transient states like a bar whose last segment was just deleted.
@@ -108,12 +109,15 @@ export function generateNotesFromSegments(
 ): Note[] {
   const notes: Note[] = [];
   const barBeats = getBarBeats(bar, projectTs);
-  let currentBeat = 0;
 
-  for (const segment of bar.chords) {
-    // Segments are reflowed to fit before they reach here; anything still sitting
-    // past the bar line belongs to the next bar and is that bar's job to render.
-    if (currentBeat >= barBeats) break;
+  // A segment saved before free placement carries no position; packing it is what
+  // its position used to mean.
+  for (const segment of withStartBeats(bar.chords)) {
+    const currentBeat = segment.startBeat!;
+
+    // Refitting owns moving a segment past the bar line into the next bar; drawing
+    // it here as well would sound it twice.
+    if (currentBeat >= barBeats) continue;
 
     // A single note carries its own pitch and needs no harmonic interpretation.
     if (segment.kind === 'note') {
@@ -126,7 +130,6 @@ export function generateNotesFromSegments(
           velocity: 100,
         });
       }
-      currentBeat += segment.duration;
       continue;
     }
 
@@ -142,8 +145,6 @@ export function generateNotesFromSegments(
         velocity: 100,
       });
     }
-
-    currentBeat += segment.duration;
   }
 
   return notes;

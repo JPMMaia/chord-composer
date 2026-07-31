@@ -7,8 +7,12 @@ import { isValidTimeSignature } from '@/engine/timeline';
  * 1.1 added per-bar time signatures and note segments. Files written by 1.0 read
  * back unchanged: an absent bar meter means "inherit the project's" and an absent
  * segment kind means "chord", which is exactly what 1.0 could express.
+ *
+ * 1.2 added segment start beats, so blocks can sit anywhere in a bar with silence
+ * between them. Older files carry no positions, and the store packs those segments
+ * end to end on load — which is exactly what having no position used to mean.
  */
-export const SCHEMA_VERSION = '1.1';
+export const SCHEMA_VERSION = '1.2';
 
 /**
  * Validation error returned by validateProject.
@@ -78,6 +82,7 @@ export function serializeProject(project: Project): string {
       scale: b.scale,
       chords: b.chords.map(c => ({
         id: c.id,
+        startBeat: c.startBeat,
         kind: c.kind ?? 'chord',
         romanNumeral: c.romanNumeral,
         chordSymbol: c.chordSymbol,
@@ -163,6 +168,9 @@ export function deserializeProject(json: string): Project {
         chords: Array.isArray(b.chords)
           ? (b.chords as Record<string, unknown>[]).map((c, j) => ({
               id: (c.id as string) ?? `chord-${i}-${j}`,
+              // Schema 1.1 and earlier had no positions; leaving it undefined lets
+              // the store pack the bar, which is what those files meant.
+              startBeat: typeof c.startBeat === 'number' ? c.startBeat : undefined,
               // Schema 1.0 had no note segments, so anything unlabelled is a chord.
               kind: (c.kind === 'note' ? 'note' : 'chord') as SegmentKind,
               romanNumeral: typeof c.romanNumeral === 'string' ? c.romanNumeral : undefined,

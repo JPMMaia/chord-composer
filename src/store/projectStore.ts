@@ -9,19 +9,16 @@ import type {
 } from '@/types/music';
 import { generateId } from '@/utils/id';
 import {
-  flattenSegments,
+  clampToBar,
   getBarBeats,
-  insertSegmentAt,
   isValidTimeSignature,
-  reflowSegments,
+  placeSegmentInBar,
+  refitBars,
   removeSegmentById,
   resizeSegment,
+  withStartBeats,
 } from '@/engine/timeline';
-import {
-  generateNotesFromSegments,
-  reorderChords,
-  retuneSegmentsToScale,
-} from '@/engine/chordOperations';
+import { generateNotesFromSegments, retuneSegmentsToScale } from '@/engine/chordOperations';
 import {
   DEFAULT_BPM,
   DEFAULT_TIME_SIGNATURE,
@@ -40,9 +37,9 @@ interface ProjectState {
   removeBar: (barId: string) => void;
   updateBarScale: (barId: string, scale: { root: NoteName; type: ScaleType }) => void;
   setBarTimeSignature: (barId: string, ts: TimeSignature) => void;
-  insertSegment: (index: number, segment: ChordSegment) => void;
+  insertSegment: (barId: string, startBeat: number, segment: ChordSegment) => void;
   removeSegment: (segmentId: string) => void;
-  moveSegment: (fromIndex: number, toIndex: number) => void;
+  moveSegment: (segmentId: string, targetBarId: string, startBeat: number) => void;
   resizeSegmentDuration: (segmentId: string, duration: number) => void;
   resetProject: () => void;
 }
@@ -65,17 +62,41 @@ function withGeneratedNotes(bars: Bar[], projectTs: TimeSignature): Bar[] {
 }
 
 /**
- * Rebuild the project from a flat segment list: reflow it onto bars, then resync
- * the derived notes. Every segment mutation funnels through here so no caller can
- * skip either step.
+ * Rebuild the project from a set of bars: refit them so every segment sits inside
+ * its bar without overlapping, then resync the derived notes. Every segment mutation
+ * funnels through here so no caller can skip either step.
  */
-function applySegments(project: Project, segments: ChordSegment[]): Project {
-  const bars = reflowSegments(segments, project.bars, project.timeSignature);
+function applyBars(project: Project, bars: Bar[]): Project {
+  const refitted = refitBars(bars, project.timeSignature);
   return {
     ...project,
-    bars: withGeneratedNotes(bars, project.timeSignature),
+    bars: withGeneratedNotes(refitted, project.timeSignature),
     updatedAt: new Date(),
   };
+}
+
+/**
+ * Rewrite one bar's segments, leaving every other bar alone. The refit that follows
+ * still sees the whole project, so a change here can still spill into later bars.
+ */
+function mapBar(bars: Bar[], barId: string, fn: (bar: Bar) => ChordSegment[]): Bar[] {
+  return bars.map(bar => (bar.id === barId ? { ...bar, chords: fn(bar) } : bar));
+}
+
+/**
+ * Drop `segment` into a bar at `startBeat`, rippling whatever it lands on.
+ *
+ * Blocks the ripple pushes off the end are parked at the bar line rather than
+ * discarded; the refit that follows is what carries them into the next bar.
+ */
+function placedIn(bar: Bar, segment: ChordSegment, startBeat: number, capacity: number) {
+  const { kept, overflow } = placeSegmentInBar(
+    bar.chords,
+    segment,
+    clampToBar(startBeat, segment.duration, capacity),
+    capacity
+  );
+  return [...kept, ...overflow.map(s => ({ ...s, startBeat: capacity }))];
 }
 
 const createInitialProject = (): Project => ({
@@ -100,7 +121,14 @@ export const projectStore = create<ProjectState>((set, get) => ({
 
   /** Replace the current project wholesale, e.g. after loading a file. */
   loadProject: (project: Project) => {
-    set({ project });
+    // A project saved before free placement carries no segment positions; packing
+    // them is what those files always meant.
+    set({
+      project: {
+        ...project,
+        bars: project.bars.map(bar => ({ ...bar, chords: withStartBeats(bar.chords) })),
+      },
+    });
   },
 
   setBpm: (bpm: number) => {
@@ -220,37 +248,57 @@ export const projectStore = create<ProjectState>((set, get) => ({
     }
     const bars = project.bars.map(b => (b.id === barId ? { ...b, timeSignature: ts } : b));
     // The bar's capacity just changed, so its contents may no longer fit.
-    set({ project: applySegments({ ...project, bars }, flattenSegments(bars)) });
+    set({ project: applyBars(project, bars) });
   },
 
-  insertSegment: (index: number, segment: ChordSegment) => {
+  insertSegment: (barId: string, startBeat: number, segment: ChordSegment) => {
     const project = get().project;
     if (!project) return;
-    const segments = insertSegmentAt(flattenSegments(project.bars), segment, index);
-    set({ project: applySegments(project, segments) });
+    const target = project.bars.find(b => b.id === barId);
+    // A drop that missed every bar is a sloppy gesture, not an error.
+    if (!target) return;
+
+    const capacity = getBarBeats(target, project.timeSignature);
+    const bars = mapBar(project.bars, barId, bar =>
+      placedIn(bar, segment, startBeat, capacity)
+    );
+    set({ project: applyBars(project, bars) });
   },
 
   removeSegment: (segmentId: string) => {
     const project = get().project;
     if (!project) return;
-    const segments = removeSegmentById(flattenSegments(project.bars), segmentId);
-    set({ project: applySegments(project, segments) });
+    // The space it occupied stays empty — a deleted block leaves a rest behind.
+    const bars = project.bars.map(bar => ({
+      ...bar,
+      chords: removeSegmentById(withStartBeats(bar.chords), segmentId),
+    }));
+    set({ project: applyBars(project, bars) });
   },
 
-  moveSegment: (fromIndex: number, toIndex: number) => {
+  moveSegment: (segmentId: string, targetBarId: string, startBeat: number) => {
     const project = get().project;
     if (!project) return;
-    const segments = flattenSegments(project.bars);
-    // Out-of-range drags are a normal outcome of a sloppy drop, not an error.
-    if (
-      fromIndex < 0 ||
-      fromIndex >= segments.length ||
-      toIndex < 0 ||
-      toIndex >= segments.length
-    ) {
-      return;
-    }
-    set({ project: applySegments(project, reorderChords(segments, fromIndex, toIndex)) });
+
+    const source = project.bars.find(b => b.chords.some(c => c.id === segmentId));
+    const target = project.bars.find(b => b.id === targetBarId);
+    if (!source || !target) return;
+
+    const moved = source.chords.find(c => c.id === segmentId)!;
+    const capacity = getBarBeats(target, project.timeSignature);
+
+    // Lift it out of its old bar first, so a move within one bar does not see a
+    // stale copy of itself to ripple against.
+    const lifted = project.bars.map(bar =>
+      bar.id === source.id
+        ? { ...bar, chords: removeSegmentById(withStartBeats(bar.chords), segmentId) }
+        : bar
+    );
+
+    const bars = mapBar(lifted, targetBarId, bar =>
+      placedIn(bar, moved, startBeat, capacity)
+    );
+    set({ project: applyBars(project, bars) });
   },
 
   resizeSegmentDuration: (segmentId: string, duration: number) => {
@@ -258,11 +306,17 @@ export const projectStore = create<ProjectState>((set, get) => ({
     if (!project) return;
     const owner = project.bars.find(b => b.chords.some(c => c.id === segmentId));
     if (!owner) return;
-    // A segment can never outgrow the bar it lives in; beyond that the reflow decides
-    // which bar it ends up in.
-    const maxBeats = getBarBeats(owner, project.timeSignature);
-    const segments = resizeSegment(flattenSegments(project.bars), segmentId, duration, maxBeats);
-    set({ project: applySegments(project, segments) });
+
+    const chords = withStartBeats(owner.chords);
+    // A block grows into the space in front of it, not into the whole bar: it is
+    // pinned where it sits, so the bar line is what caps it.
+    const start = chords.find(c => c.id === segmentId)!.startBeat!;
+    const maxBeats = getBarBeats(owner, project.timeSignature) - start;
+
+    const bars = mapBar(project.bars, owner.id, () =>
+      resizeSegment(chords, segmentId, duration, maxBeats)
+    );
+    set({ project: applyBars(project, bars) });
   },
 
   resetProject: () => {

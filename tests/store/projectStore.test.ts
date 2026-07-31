@@ -14,11 +14,41 @@ function chordSegment(overrides: Partial<ChordSegment> = {}): ChordSegment {
   };
 }
 
-/** Append a segment to the end of the flat segment list. */
+/** Beats occupied in a bar, i.e. where the next block butts up against the last. */
+function endOf(bar: Bar): number {
+  return bar.chords.reduce((max, c) => Math.max(max, (c.startBeat ?? 0) + c.duration), 0);
+}
+
+/**
+ * Place a segment in the first bar with room for it, adding a bar when none has any.
+ * With free placement there is no "end of the list" to append to, so tests that only
+ * care about a filled bar say so this way.
+ */
 function appendSegment(segment: ChordSegment): void {
-  const bars = projectStore.getState().project!.bars;
-  const count = bars.reduce((n, b) => n + b.chords.length, 0);
-  projectStore.getState().insertSegment(count, segment);
+  const state = () => projectStore.getState();
+  const project = state().project!;
+
+  for (const bar of project.bars) {
+    const capacity = (bar.timeSignature ?? project.timeSignature).beatsPerMeasure;
+    if (endOf(bar) + segment.duration <= capacity) {
+      state().insertSegment(bar.id, endOf(bar), segment);
+      return;
+    }
+  }
+
+  state().addBar();
+  const bars = state().project!.bars;
+  state().insertSegment(bars[bars.length - 1].id, 0, segment);
+}
+
+/** The bar holding a given segment, or undefined. */
+function barOf(segmentId: string): Bar | undefined {
+  return projectStore.getState().project!.bars.find(b => b.chords.some(c => c.id === segmentId));
+}
+
+/** `id@start` for every segment in a bar, so placement assertions read at a glance. */
+function layout(bar: Bar): string[] {
+  return bar.chords.map(c => `${c.id}@${c.startBeat}`);
 }
 
 describe('projectStore', () => {
@@ -371,61 +401,85 @@ describe('projectStore', () => {
       projectStore.getState().addBar();
     });
 
-    it('inserts a segment into the first bar', () => {
-      projectStore.getState().insertSegment(0, chordSegment({ id: 'a' }));
-      expect(projectStore.getState().project!.bars[0].chords.map(c => c.id)).toEqual(['a']);
+    const firstBarId = () => projectStore.getState().project!.bars[0].id;
+
+    it('inserts a segment at the beat it was dropped on', () => {
+      projectStore.getState().insertSegment(firstBarId(), 2, chordSegment({ id: 'a' }));
+      expect(layout(projectStore.getState().project!.bars[0])).toEqual(['a@2']);
     });
 
-    it('inserts at the given position in the flat segment list', () => {
+    it('leaves the space before a segment as silence', () => {
+      projectStore.getState().insertSegment(firstBarId(), 2, chordSegment({ id: 'a' }));
+      const notes = projectStore.getState().project!.bars[0].notes;
+      expect(notes.every(n => n.startBeat === 2)).toBe(true);
+    });
+
+    it('snaps nothing itself — it places exactly where it is told', () => {
+      // Snapping is the caller's job, so an unsnapped beat survives intact.
+      projectStore.getState().insertSegment(firstBarId(), 1.5, chordSegment({ id: 'a' }));
+      expect(projectStore.getState().project!.bars[0].chords[0].startBeat).toBe(1.5);
+    });
+
+    it('clamps a drop that would cross the bar line', () => {
+      projectStore
+        .getState()
+        .insertSegment(firstBarId(), 3.5, chordSegment({ id: 'wide', duration: 2 }));
+      expect(layout(projectStore.getState().project!.bars[0])).toEqual(['wide@2']);
+    });
+
+    it('pushes the block it lands on to the right', () => {
       appendSegment(chordSegment({ id: 'a' }));
       appendSegment(chordSegment({ id: 'b' }));
-      projectStore.getState().insertSegment(1, chordSegment({ id: 'mid' }));
-      expect(projectStore.getState().project!.bars[0].chords.map(c => c.id)).toEqual([
-        'a',
-        'mid',
-        'b',
-      ]);
+      projectStore.getState().insertSegment(firstBarId(), 0, chordSegment({ id: 'new' }));
+      expect(layout(projectStore.getState().project!.bars[0])).toEqual(['new@0', 'a@1', 'b@2']);
     });
 
-    it('pushes the fifth beat of a 4/4 bar into the next bar', () => {
-      for (let i = 0; i < 5; i++) appendSegment(chordSegment());
+    it('spills the last block into the next bar when the ripple fills the bar', () => {
+      for (let i = 0; i < 4; i++) appendSegment(chordSegment({ id: `s${i}` }));
+      projectStore.getState().insertSegment(firstBarId(), 0, chordSegment({ id: 'new' }));
       const bars = projectStore.getState().project!.bars;
-      expect(bars.length).toBe(2);
-      expect(bars[0].chords.length).toBe(4);
-      expect(bars[1].chords.length).toBe(1);
+      expect(bars).toHaveLength(2);
+      expect(layout(bars[0])).toEqual(['new@0', 's0@1', 's1@2', 's2@3']);
+      expect(layout(bars[1])).toEqual(['s3@0']);
     });
 
     it('generates the triad notes for a chord segment', () => {
-      projectStore.getState().insertSegment(0, chordSegment({ root: 'C', quality: 'major' }));
+      projectStore
+        .getState()
+        .insertSegment(firstBarId(), 0, chordSegment({ root: 'C', quality: 'major' }));
       const notes = projectStore.getState().project!.bars[0].notes;
       expect(notes.map(n => n.pitch)).toEqual([60, 64, 67]);
     });
 
     it('generates four notes for a seventh chord', () => {
-      projectStore.getState().insertSegment(0, chordSegment({ root: 'C', quality: 'maj7' }));
+      projectStore
+        .getState()
+        .insertSegment(firstBarId(), 0, chordSegment({ root: 'C', quality: 'maj7' }));
       expect(projectStore.getState().project!.bars[0].notes.length).toBe(4);
     });
 
     it('generates exactly one note for a note segment', () => {
-      projectStore.getState().insertSegment(0, chordSegment({ kind: 'note', pitch: 62 }));
+      projectStore
+        .getState()
+        .insertSegment(firstBarId(), 0, chordSegment({ kind: 'note', pitch: 62 }));
       const notes = projectStore.getState().project!.bars[0].notes;
       expect(notes.length).toBe(1);
       expect(notes[0].pitch).toBe(62);
     });
 
     it('regenerates notes in the bar a segment overflows into', () => {
-      for (let i = 0; i < 5; i++) appendSegment(chordSegment({ root: 'C', quality: 'major' }));
+      for (let i = 0; i < 4; i++) {
+        appendSegment(chordSegment({ id: `s${i}`, root: 'C', quality: 'major' }));
+      }
+      projectStore.getState().insertSegment(firstBarId(), 0, chordSegment({ id: 'new' }));
       const bars = projectStore.getState().project!.bars;
       expect(bars[1].notes.map(n => n.pitch)).toEqual([60, 64, 67]);
       expect(bars[1].notes[0].startBeat).toBe(0);
     });
 
-    it('creates a bar to drop into when the project has none', () => {
-      projectStore.getState().removeBar(projectStore.getState().project!.bars[0].id);
-      projectStore.getState().insertSegment(0, chordSegment({ id: 'a' }));
-      const bars = projectStore.getState().project!.bars;
-      expect(bars.length).toBe(1);
-      expect(bars[0].chords.map(c => c.id)).toEqual(['a']);
+    it('ignores an unknown bar id', () => {
+      projectStore.getState().insertSegment('nope', 0, chordSegment({ id: 'a' }));
+      expect(projectStore.getState().project!.bars[0].chords).toEqual([]);
     });
   });
 
@@ -449,12 +503,12 @@ describe('projectStore', () => {
       expect(projectStore.getState().project!.bars[0].notes).toEqual([]);
     });
 
-    it('pulls a segment back from the following bar', () => {
-      for (let i = 0; i < 5; i++) appendSegment(chordSegment({ id: `s${i}` }));
+    it('leaves the hole where a segment was, rather than closing it up', () => {
+      // The gap is now the point: deleting a block writes a rest, it does not
+      // drag everything after it a beat earlier.
+      for (let i = 0; i < 3; i++) appendSegment(chordSegment({ id: `s${i}` }));
       projectStore.getState().removeSegment('s0');
-      const bars = projectStore.getState().project!.bars;
-      expect(bars[0].chords.map(c => c.id)).toEqual(['s1', 's2', 's3', 's4']);
-      expect(bars[1].chords).toEqual([]);
+      expect(layout(projectStore.getState().project!.bars[0])).toEqual(['s1@1', 's2@2']);
     });
 
     it('ignores an unknown segment id', () => {
@@ -465,46 +519,49 @@ describe('projectStore', () => {
   });
 
   describe('moveSegment', () => {
+    const bars = () => projectStore.getState().project!.bars;
+
     beforeEach(() => {
       projectStore.getState().createProject();
       projectStore.getState().addBar();
+      projectStore.getState().addBar();
       appendSegment(chordSegment({ id: 'a' }));
       appendSegment(chordSegment({ id: 'b' }));
-      appendSegment(chordSegment({ id: 'c' }));
     });
 
-    it('moves a segment later in the list', () => {
-      projectStore.getState().moveSegment(0, 2);
-      expect(projectStore.getState().project!.bars[0].chords.map(c => c.id)).toEqual([
-        'b',
-        'c',
-        'a',
-      ]);
+    it('moves a segment to a free beat in its own bar', () => {
+      projectStore.getState().moveSegment('a', bars()[0].id, 3);
+      expect(layout(bars()[0])).toEqual(['b@1', 'a@3']);
     });
 
-    it('moves a segment earlier in the list', () => {
-      projectStore.getState().moveSegment(2, 0);
-      expect(projectStore.getState().project!.bars[0].chords.map(c => c.id)).toEqual([
-        'c',
-        'a',
-        'b',
-      ]);
+    it('moves a segment into another bar', () => {
+      projectStore.getState().moveSegment('a', bars()[1].id, 2);
+      expect(layout(bars()[0])).toEqual(['b@1']);
+      expect(layout(bars()[1])).toEqual(['a@2']);
+      expect(barOf('a')!.id).toBe(bars()[1].id);
     });
 
-    it('regenerates notes in the new order', () => {
-      projectStore.getState().moveSegment(0, 2);
-      const notes = projectStore.getState().project!.bars[0].notes;
-      expect(notes.length).toBe(9);
-      expect(notes[0].startBeat).toBe(0);
+    it('regenerates the notes in both the bar it left and the bar it joined', () => {
+      projectStore.getState().moveSegment('a', bars()[1].id, 2);
+      expect(bars()[0].notes.every(n => n.startBeat === 1)).toBe(true);
+      expect(bars()[1].notes.every(n => n.startBeat === 2)).toBe(true);
     });
 
-    it('ignores an out-of-range index', () => {
-      projectStore.getState().moveSegment(0, 9);
-      expect(projectStore.getState().project!.bars[0].chords.map(c => c.id)).toEqual([
-        'a',
-        'b',
-        'c',
-      ]);
+    it('clamps a move that would cross the bar line', () => {
+      projectStore.getState().resizeSegmentDuration('a', 2);
+      projectStore.getState().moveSegment('a', bars()[0].id, 3.5);
+      expect(barOf('a')!.chords.find(c => c.id === 'a')!.startBeat).toBe(2);
+    });
+
+    it('pushes a block it is dropped on top of', () => {
+      projectStore.getState().moveSegment('a', bars()[0].id, 1);
+      expect(layout(bars()[0])).toEqual(['a@1', 'b@2']);
+    });
+
+    it('ignores an unknown segment or bar id', () => {
+      projectStore.getState().moveSegment('nope', bars()[0].id, 2);
+      projectStore.getState().moveSegment('a', 'nope', 2);
+      expect(layout(bars()[0])).toEqual(['a@0', 'b@1']);
     });
   });
 
@@ -537,6 +594,14 @@ describe('projectStore', () => {
       appendSegment(chordSegment({ id: 'a' }));
       projectStore.getState().resizeSegmentDuration('a', 99);
       expect(projectStore.getState().project!.bars[0].chords[0].duration).toBe(4);
+    });
+
+    it('caps growth at the bar line, not at the bar length', () => {
+      // A block starting on beat 3 of a 4/4 bar has one beat of room, not four.
+      const barId = projectStore.getState().project!.bars[0].id;
+      projectStore.getState().insertSegment(barId, 3, chordSegment({ id: 'a' }));
+      projectStore.getState().resizeSegmentDuration('a', 99);
+      expect(projectStore.getState().project!.bars[0].chords[0].duration).toBe(1);
     });
 
     it('pushes later segments over the bar line when it grows', () => {

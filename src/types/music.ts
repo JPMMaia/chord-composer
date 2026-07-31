@@ -49,6 +49,12 @@ export type SegmentKind = 'note' | 'chord';
 // Chord segment in a bar
 export interface ChordSegment {
   id: string;
+  /**
+   * Beats from the start of the containing bar. Absent in projects written before
+   * free placement, where position was implied by packing segments end to end;
+   * `withStartBeats` fills those in on load.
+   */
+  startBeat?: number;
   /** Defaults to 'chord' when absent, so pre-existing projects keep working. */
   kind?: SegmentKind;
   /** MIDI pitch — only meaningful when kind === 'note'. */

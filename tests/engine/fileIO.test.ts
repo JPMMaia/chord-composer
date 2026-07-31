@@ -430,9 +430,9 @@ describe('fileIO', () => {
       });
     }
 
-    it('declares schema version 1.1', () => {
+    it('declares schema version 1.2', () => {
       const parsed = JSON.parse(serializeProject(createTestProject()));
-      expect(parsed.version).toBe('1.1');
+      expect(parsed.version).toBe('1.2');
     });
 
     it('round-trips per-bar time signatures', () => {
@@ -497,6 +497,77 @@ describe('fileIO', () => {
       expect(restored.bars[0].timeSignature).toBeUndefined();
       expect(restored.bars[0].chords[0]).toMatchObject({ kind: 'chord', root: 'C', duration: 4 });
       expect(restored.bars[0].notes).toHaveLength(1);
+    });
+  });
+
+  describe('schema 1.2 segment positions', () => {
+    /** A bar with a hole in the middle of it: block, silence, block. */
+    function spacedProject(): Project {
+      return createTestProject({
+        bars: [
+          {
+            id: 'bar-a',
+            barIndex: 0,
+            scale: { root: 'C', type: 'major' },
+            chords: [
+              { id: 'seg-1', kind: 'chord', startBeat: 0, duration: 1, root: 'C', quality: 'major' },
+              { id: 'seg-2', kind: 'chord', startBeat: 3, duration: 1, root: 'G', quality: 'major' },
+            ],
+            notes: [],
+          },
+        ],
+      });
+    }
+
+    it('round-trips the beat a segment starts on', () => {
+      const restored = deserializeProject(serializeProject(spacedProject()));
+      expect(restored.bars[0].chords.map(c => c.startBeat)).toEqual([0, 3]);
+    });
+
+    it('keeps a segment on beat 0 rather than losing it as a falsy value', () => {
+      const parsed = JSON.parse(serializeProject(spacedProject()));
+      expect(parsed.bars[0].chords[0].startBeat).toBe(0);
+    });
+
+    it('leaves a position-less segment unpositioned, for the store to pack', () => {
+      // Deserialization does not invent positions: `loadProject` packs them, which
+      // is the one place that rule lives.
+      const legacy = JSON.stringify({
+        ...JSON.parse(serializeProject(createTestProject())),
+        version: '1.1',
+        bars: [
+          {
+            id: 'bar-a',
+            barIndex: 0,
+            scale: { root: 'C', type: 'major' },
+            chords: [
+              { id: 'c1', kind: 'chord', duration: 2, root: 'C', quality: 'major' },
+              { id: 'c2', kind: 'chord', duration: 2, root: 'G', quality: 'major' },
+            ],
+            notes: [],
+          },
+        ],
+      });
+
+      const restored = deserializeProject(legacy);
+      expect(restored.bars[0].chords.every(c => c.startBeat === undefined)).toBe(true);
+    });
+
+    it('ignores a start beat that is not a number', () => {
+      const json = JSON.stringify({
+        ...JSON.parse(serializeProject(createTestProject())),
+        bars: [
+          {
+            id: 'bar-a',
+            barIndex: 0,
+            scale: { root: 'C', type: 'major' },
+            chords: [{ id: 'c1', kind: 'chord', startBeat: 'two', duration: 1 }],
+            notes: [],
+          },
+        ],
+      });
+
+      expect(deserializeProject(json).bars[0].chords[0].startBeat).toBeUndefined();
     });
   });
 

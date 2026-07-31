@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
-import type { Bar, TimeSignature } from '@/types/music';
+import React, { useEffect, useRef, useState } from 'react';
+import type { Bar, ChordSegment, TimeSignature } from '@/types/music';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
-import { beatToInsertIndex, getBarBeats } from '@/engine/timeline';
+import { editorStore } from '@/store/editorStore';
+import { getBarBeats, snapBeat, SNAP_OPTIONS } from '@/engine/timeline';
 import { paletteItemToSegment, type PaletteItem } from '@/engine/palette';
 import { PALETTE_DRAG_TYPE } from '@/components/ScalePalette';
 import { ChordSegmentBlock } from '@/components/ChordSegmentBlock';
@@ -34,6 +35,23 @@ function parseTs(value: string): TimeSignature {
   return { beatsPerMeasure, beatUnit };
 }
 
+/** A drag in flight: where the block would land if the pointer were released now. */
+interface DragState {
+  segmentId: string;
+  /** Beats between the block's left edge and the point the user grabbed it by. */
+  grabOffset: number;
+  barId: string;
+  startBeat: number;
+  /** False until the pointer actually travels, so a click is not mistaken for a drag. */
+  moved: boolean;
+}
+
+/** How far the pointer may wander before the gesture counts as a drag, in pixels. */
+const DRAG_THRESHOLD_PX = 3;
+
+/** Attribute the drag hit-test looks for; a lane carries its bar's id. */
+const LANE_ATTRIBUTE = 'data-timeline-lane';
+
 /**
  * The chord area: every bar of the project laid out on one scrollable horizontal
  * timeline, with bar lines, beat gridlines and per-bar meters.
@@ -54,23 +72,77 @@ export const ChordTimeline: React.FC = () => {
   const selectBar = selectionStore(s => s.selectBar);
   const selectSegment = selectionStore(s => s.selectSegment);
 
-  /** Where the insertion caret sits while a palette block hovers, in flat index terms. */
+  const snapBeats = editorStore(s => s.snapBeats);
+  const setSnapBeats = editorStore(s => s.setSnapBeats);
+
+  /** Where the insertion caret sits while a palette block hovers. */
   const [dropIndicator, setDropIndicator] = useState<{ barId: string; beat: number } | null>(null);
+  const [drag, setDrag] = useState<DragState | null>(null);
+
+  // Read by the click handler to tell a drag from a click. A ref, not state,
+  // because the click arrives after the gesture has already been committed.
+  const draggedRef = useRef(false);
+  // The live drag, for the window listeners, which are installed once.
+  const dragRef = useRef<DragState | null>(null);
+  dragRef.current = drag;
+
+  useEffect(() => {
+    /** Beats from the start of a lane element to a viewport x coordinate. */
+    const beatIn = (lane: Element, clientX: number): number => {
+      const beat = (clientX - lane.getBoundingClientRect().left) / PIXELS_PER_BEAT;
+      return Number.isFinite(beat) ? Math.max(0, beat) : 0;
+    };
+
+    const handleMove = (e: PointerEvent) => {
+      const state = dragRef.current;
+      if (!state) return;
+
+      // Hit-test rather than track the origin lane, so a block can be dragged
+      // into a different bar.
+      const lane = document
+        .elementFromPoint?.(e.clientX, e.clientY)
+        ?.closest(`[${LANE_ATTRIBUTE}]`);
+      if (!lane) return;
+
+      const barId = lane.getAttribute(LANE_ATTRIBUTE)!;
+      const startBeat = snapBeat(beatIn(lane, e.clientX) - state.grabOffset, snapBeats);
+      const moved =
+        state.moved ||
+        barId !== state.barId ||
+        Math.abs(startBeat - state.startBeat) * PIXELS_PER_BEAT > DRAG_THRESHOLD_PX;
+
+      setDrag({ ...state, barId, startBeat, moved });
+    };
+
+    const handleUp = () => {
+      const state = dragRef.current;
+      setDrag(null);
+      if (!state) return;
+
+      draggedRef.current = state.moved;
+      if (state.moved) {
+        moveSegment(state.segmentId, state.barId, state.startBeat);
+      }
+    };
+
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+    return () => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+    };
+  }, [snapBeats, moveSegment]);
 
   if (!project) return null;
 
   const { bars, timeSignature: projectTs } = project;
-
-  /** Index of a bar's first segment in the flat, cross-bar segment list. */
-  const flatOffset = (barIndex: number): number =>
-    bars.slice(0, barIndex).reduce((n, b) => n + b.chords.length, 0);
 
   /** Beats from the start of a lane to the pointer. */
   const beatAt = (e: React.DragEvent<HTMLDivElement>): number => {
     const rect = e.currentTarget.getBoundingClientRect();
     const beat = (e.clientX - rect.left) / PIXELS_PER_BEAT;
     // A drag with no usable coordinate lands at the bar's start rather than
-    // poisoning the insert index with NaN.
+    // poisoning the drop position with NaN.
     return Number.isFinite(beat) ? Math.max(0, beat) : 0;
   };
 
@@ -78,10 +150,10 @@ export const ChordTimeline: React.FC = () => {
     // Without this the browser refuses the drop outright.
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
-    setDropIndicator({ barId: bar.id, beat: beatAt(e) });
+    setDropIndicator({ barId: bar.id, beat: snapBeat(beatAt(e), snapBeats) });
   };
 
-  const handleDrop = (e: React.DragEvent<HTMLDivElement>, bar: Bar, barIndex: number) => {
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>, bar: Bar) => {
     e.preventDefault();
     setDropIndicator(null);
 
@@ -96,9 +168,52 @@ export const ChordTimeline: React.FC = () => {
       return;
     }
 
-    const index = flatOffset(barIndex) + beatToInsertIndex(bar.chords, beatAt(e));
-    insertSegment(index, paletteItemToSegment(item, DROP_DURATION_BEATS));
+    insertSegment(
+      bar.id,
+      snapBeat(beatAt(e), snapBeats),
+      paletteItemToSegment(item, DROP_DURATION_BEATS)
+    );
     selectBar(bar.id);
+  };
+
+  const handleMoveStart = (
+    e: React.PointerEvent,
+    bar: Bar,
+    segment: ChordSegment,
+    startBeat: number
+  ) => {
+    draggedRef.current = false;
+    const lane = (e.target as Element).closest(`[${LANE_ATTRIBUTE}]`);
+    const pointerBeat = lane
+      ? Math.max(0, (e.clientX - lane.getBoundingClientRect().left) / PIXELS_PER_BEAT)
+      : startBeat;
+
+    setDrag({
+      segmentId: segment.id,
+      grabOffset: pointerBeat - startBeat,
+      barId: bar.id,
+      startBeat,
+      moved: false,
+    });
+  };
+
+  /** Move a block by one grid step, the visible meaning of the arrow keys. */
+  const nudge = (bar: Bar, segment: ChordSegment, startBeat: number, direction: -1 | 1) => {
+    moveSegment(segment.id, bar.id, Math.max(0, startBeat + direction * snapBeats));
+  };
+
+  /**
+   * The blocks a lane draws: its own, with the one being dragged pulled out and
+   * re-drawn wherever the pointer currently puts it — which may be another lane.
+   */
+  const laneSegments = (bar: Bar): ChordSegment[] => {
+    if (!drag) return bar.chords;
+
+    const dragged = bars.flatMap(b => b.chords).find(s => s.id === drag.segmentId);
+    const own = bar.chords.filter(s => s.id !== drag.segmentId);
+    return dragged && drag.barId === bar.id
+      ? [...own, { ...dragged, startBeat: drag.startBeat }]
+      : own;
   };
 
   return (
@@ -106,9 +221,29 @@ export const ChordTimeline: React.FC = () => {
       data-testid="chord-timeline"
       // shrink-0 keeps the lanes at their natural height when the piano roll
       // below competes for space in the column.
-      className="shrink-0 flex items-stretch bg-gray-900 border-b border-gray-700"
+      className="shrink-0 flex flex-col bg-gray-900 border-b border-gray-700"
       onDragLeave={() => setDropIndicator(null)}
     >
+      {/* Toolbar */}
+      <div className="flex items-center gap-2 px-2 py-1 border-b border-gray-800 text-xs text-gray-400">
+        <label className="flex items-center gap-1">
+          Snap
+          <select
+            aria-label="Snap"
+            value={snapBeats}
+            onChange={e => setSnapBeats(Number(e.target.value))}
+            className="bg-gray-700 border border-gray-600 rounded text-gray-200 px-1 focus:outline-none focus:border-indigo-500"
+          >
+            {SNAP_OPTIONS.map(option => (
+              <option key={option.label} value={option.beats}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div className="flex items-stretch">
       {/* Matches the piano roll's key column, so bar 1 starts where its grid
           does. It sits outside the scroll container for the same reason that
           column does: it must not slide away when the timeline scrolls. */}
@@ -123,10 +258,16 @@ export const ChordTimeline: React.FC = () => {
         {bars.map((bar, barIndex) => {
           const beats = getBarBeats(bar, projectTs);
           const width = beats * PIXELS_PER_BEAT;
-          const offset = flatOffset(barIndex);
           const isSelectedBar = selectedBarId === bar.id;
 
-          let cursorBeat = 0;
+          // Every position the grid will snap to, minus the ones a beat line
+          // already draws.
+          const subdivisions =
+            snapBeats < 1
+              ? Array.from({ length: Math.round(beats / snapBeats) }, (_, i) => i * snapBeats).filter(
+                  beat => !Number.isInteger(beat)
+                )
+              : [];
 
           return (
             <div
@@ -168,9 +309,10 @@ export const ChordTimeline: React.FC = () => {
               {/* Segment lane */}
               <div
                 data-testid={`timeline-lane-${bar.id}`}
+                data-timeline-lane={bar.id}
                 onClick={() => selectBar(bar.id)}
                 onDragOver={e => handleDragOver(e, bar)}
-                onDrop={e => handleDrop(e, bar, barIndex)}
+                onDrop={e => handleDrop(e, bar)}
                 className="relative h-20 bg-gray-900"
               >
                 {/* Beat gridlines */}
@@ -185,6 +327,16 @@ export const ChordTimeline: React.FC = () => {
                   />
                 ))}
 
+                {/* Where a finer grid will land, drawn faintly so the beats still read */}
+                {subdivisions.map(beat => (
+                  <div
+                    key={beat}
+                    data-testid="subdivision-line"
+                    style={{ left: `${beat * PIXELS_PER_BEAT}px` }}
+                    className="absolute top-0 bottom-0 w-px bg-gray-800"
+                  />
+                ))}
+
                 {/* Insertion caret */}
                 {dropIndicator?.barId === bar.id && (
                   <div
@@ -194,27 +346,29 @@ export const ChordTimeline: React.FC = () => {
                   />
                 )}
 
-                {bar.chords.map((segment, i) => {
-                  const startBeat = cursorBeat;
-                  cursorBeat += segment.duration;
-                  const flatIndex = offset + i;
+                {laneSegments(bar).map(segment => {
+                  const startBeat = segment.startBeat ?? 0;
 
                   return (
                     <ChordSegmentBlock
                       key={segment.id}
                       segment={segment}
                       isSelected={selectedSegmentId === segment.id}
+                      isDragging={drag?.segmentId === segment.id}
                       startBeat={startBeat}
                       pixelsPerBeat={PIXELS_PER_BEAT}
                       onSelect={id => {
+                        // A drag ends in a click too; only a still pointer selects.
+                        if (draggedRef.current) return;
                         // Bar first: selecting a new bar drops the segment selection.
                         selectBar(bar.id);
                         selectSegment(id);
                       }}
                       onRemove={removeSegment}
                       onResize={resizeSegmentDuration}
-                      onMoveLeft={() => moveSegment(flatIndex, flatIndex - 1)}
-                      onMoveRight={() => moveSegment(flatIndex, flatIndex + 1)}
+                      onMoveStart={e => handleMoveStart(e, bar, segment, startBeat)}
+                      onMoveLeft={() => nudge(bar, segment, startBeat, -1)}
+                      onMoveRight={() => nudge(bar, segment, startBeat, 1)}
                     />
                   );
                 })}
@@ -223,6 +377,7 @@ export const ChordTimeline: React.FC = () => {
           );
         })}
         </div>
+      </div>
       </div>
     </div>
   );

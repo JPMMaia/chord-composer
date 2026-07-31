@@ -12,6 +12,172 @@ function snapToGrid(beats: number): number {
   return Math.round(beats / MIN_SEGMENT_BEATS) * MIN_SEGMENT_BEATS;
 }
 
+/**
+ * Snap resolutions offered in the timeline toolbar, labelled as note values.
+ *
+ * The beat figures assume a quarter-note beat: a whole note is four beats, a
+ * sixteenth is a quarter of one — which is also `MIN_SEGMENT_BEATS`, so no option
+ * can ask for a position finer than a segment can be.
+ */
+export const SNAP_OPTIONS = [
+  { label: '1/1', beats: 4 },
+  { label: '1/2', beats: 2 },
+  { label: '1/4', beats: 1 },
+  { label: '1/8', beats: 0.5 },
+  { label: '1/16', beats: 0.25 },
+] as const;
+
+/** Quarter notes: the resolution most progressions are written at. */
+export const DEFAULT_SNAP_BEATS = 1;
+
+/**
+ * Snap a beat to the chosen grid. The second rounding is not redundant: it pulls
+ * the result back onto the 0.25 lattice so a chain of snapped edits cannot
+ * accumulate float error.
+ */
+export function snapBeat(beat: number, snapBeats: number): number {
+  if (!Number.isFinite(beat) || snapBeats <= 0) return 0;
+  return Math.max(0, snapToGrid(Math.round(beat / snapBeats) * snapBeats));
+}
+
+/**
+ * Keep a block wholly inside its bar. A block longer than the bar itself cannot be
+ * made to fit, so it starts at 0 and simply overhangs — `refitBars` leaves it there
+ * rather than looping looking for a bar it will never fit in.
+ */
+export function clampToBar(startBeat: number, duration: number, capacity: number): number {
+  return Math.max(0, Math.min(startBeat, capacity - duration));
+}
+
+/** A segment's position, treating an absent one as "wherever the packing left off". */
+function startOf(segment: ChordSegment, fallback: number): number {
+  return typeof segment.startBeat === 'number' && Number.isFinite(segment.startBeat)
+    ? segment.startBeat
+    : fallback;
+}
+
+/**
+ * Fill in any missing `startBeat` by packing segments in order.
+ *
+ * That packing is exactly what a position-less list used to mean — durations
+ * accumulated from the start of the bar — so this is what lets projects saved before
+ * free placement open with the positions they always had.
+ */
+export function withStartBeats(segments: ChordSegment[]): ChordSegment[] {
+  let cursor = 0;
+  return segments.map(segment => {
+    const startBeat = startOf(segment, cursor);
+    cursor = startBeat + segment.duration;
+    return segment.startBeat === startBeat ? segment : { ...segment, startBeat };
+  });
+}
+
+/** Order segments by position. */
+function byStart(segments: ChordSegment[]): ChordSegment[] {
+  return [...segments].sort((a, b) => startOf(a, 0) - startOf(b, 0));
+}
+
+/**
+ * Place `segment` at `startBeat` within one bar, rippling whatever it lands on to
+ * the right.
+ *
+ * A block is only moved if it actually overlaps the placed one, or overlaps a block
+ * that was itself pushed — so the cascade stops at the first gap wide enough to
+ * absorb the shift, and empty space elsewhere in the bar survives untouched. A block
+ * pushed past `capacity` comes back in `overflow` for the caller to hand to the next
+ * bar; nothing is ever dropped.
+ *
+ * Passing a segment already present moves it, rather than duplicating it.
+ */
+export function placeSegmentInBar(
+  segments: ChordSegment[],
+  segment: ChordSegment,
+  startBeat: number,
+  capacity: number
+): { kept: ChordSegment[]; overflow: ChordSegment[] } {
+  const placed = { ...segment, startBeat };
+  const others = byStart(withStartBeats(segments.filter(s => s.id !== placed.id)));
+
+  const kept: ChordSegment[] = [placed];
+  const overflow: ChordSegment[] = [];
+  let cursor = startBeat + placed.duration;
+
+  for (const other of others) {
+    const start = startOf(other, 0);
+
+    // Entirely before the placed block: untouched, gap and all.
+    if (start + other.duration <= startBeat) {
+      kept.push(other);
+      continue;
+    }
+
+    const shifted = Math.max(start, cursor);
+    cursor = shifted + other.duration;
+
+    if (cursor > capacity) {
+      overflow.push(other);
+      continue;
+    }
+    kept.push(shifted === start ? other : { ...other, startBeat: shifted });
+  }
+
+  return { kept: byStart(kept), overflow };
+}
+
+/**
+ * Restore the bar invariant across the whole project: every segment positioned,
+ * inside its bar, in order and non-overlapping.
+ *
+ * Anything that no longer fits — because a block grew, a bar narrowed, or a drop
+ * rippled its neighbours — moves to the start of the following bar and keeps
+ * cascading, appending bars as needed. Every mutation ends here, which is what keeps
+ * one rule in one place.
+ */
+export function refitBars(bars: Bar[], projectTs: TimeSignature): Bar[] {
+  if (bars.length === 0) return [];
+
+  const result: Bar[] = [];
+  let carried: ChordSegment[] = [];
+
+  for (let i = 0; bars[i] || carried.length > 0; i++) {
+    const source = bars[i] ?? createBar(result.length, result);
+    const capacity = getBarBeats(source, projectTs);
+    // Carried blocks were pushed out of the previous bar, so they come first.
+    const incoming = [...carried, ...byStart(withStartBeats(source.chords))];
+
+    const chords: ChordSegment[] = [];
+    carried = [];
+    let cursor = 0;
+
+    for (const segment of incoming) {
+      if (carried.length > 0) {
+        // Once one block has spilled, everything after it must follow, or the order
+        // the user wrote would silently change.
+        carried.push(segment);
+        continue;
+      }
+
+      const startBeat = Math.max(startOf(segment, cursor), cursor);
+      // A block longer than the bar fits nowhere; parking it here and overhanging
+      // beats pushing it forever from bar to bar.
+      const overhangs = startBeat + segment.duration > capacity;
+      if (overhangs && cursor > 0) {
+        carried.push({ ...segment, startBeat: 0 });
+        continue;
+      }
+
+      chords.push(segment.startBeat === startBeat ? segment : { ...segment, startBeat });
+      cursor = overhangs ? capacity : startBeat + segment.duration;
+    }
+
+    // Spilled blocks restart at the top of the next bar.
+    carried = carried.map(s => ({ ...s, startBeat: undefined }));
+    result.push({ ...source, barIndex: result.length, chords });
+  }
+
+  return result;
+}
+
 /** Beat units the app understands: the powers of two from a half note to a sixteenth. */
 const VALID_BEAT_UNITS = [2, 4, 8, 16];
 
@@ -74,61 +240,6 @@ export function flattenSegments(bars: Bar[]): ChordSegment[] {
 }
 
 /**
- * Re-assign a flat segment list back onto bars.
- *
- * Each bar is filled to its capacity in order. A segment that does not fit in
- * the space remaining is moved *wholly* into the next bar rather than being split
- * across the bar line — the leftover space simply stays empty. Bars are appended
- * as needed so no segment is ever dropped.
- *
- * Every bar's `notes`, `scale`, `id` and `timeSignature` are preserved; only
- * `chords` and `barIndex` are rewritten.
- */
-export function reflowSegments(
-  segments: ChordSegment[],
-  bars: Bar[],
-  projectTs: TimeSignature
-): Bar[] {
-  // Always keep at least one bar to drop into.
-  const source = bars.length > 0 ? bars : [createBar(0, bars)];
-
-  const result: Bar[] = source.map(bar => ({ ...bar, chords: [] }));
-
-  let barIndex = 0;
-  let used = 0;
-
-  for (const segment of segments) {
-    // Grow the bar list on demand when we run past the last existing bar.
-    if (barIndex >= result.length) {
-      result.push(createBar(result.length, result));
-      used = 0;
-    }
-
-    const capacity = getBarBeats(result[barIndex], projectTs);
-
-    // A segment longer than a whole bar still has to live somewhere: give it its
-    // own bar rather than looping forever looking for room it will never find.
-    if (used > 0 && used + segment.duration > capacity) {
-      barIndex++;
-      used = 0;
-      if (barIndex >= result.length) {
-        result.push(createBar(result.length, result));
-      }
-    }
-
-    result[barIndex].chords.push(segment);
-    used += segment.duration;
-
-    if (used >= getBarBeats(result[barIndex], projectTs)) {
-      barIndex++;
-      used = 0;
-    }
-  }
-
-  return result.map((bar, i) => ({ ...bar, barIndex: i }));
-}
-
-/**
  * Build a fresh empty bar, inheriting the scale and meter of the bar before it so
  * that overflowing into new territory does not silently change key or metre.
  */
@@ -142,18 +253,6 @@ function createBar(index: number, existing: Bar[]): Bar {
     chords: [],
     notes: [],
   };
-}
-
-/** Insert a segment at `index`, appending when the index is past the end. */
-export function insertSegmentAt(
-  segments: ChordSegment[],
-  segment: ChordSegment,
-  index: number
-): ChordSegment[] {
-  const result = [...segments];
-  const clamped = Math.max(0, Math.min(index, result.length));
-  result.splice(clamped, 0, segment);
-  return result;
 }
 
 /** Remove a segment by id. Unknown ids are a no-op. */
@@ -179,24 +278,4 @@ export function resizeSegment(
     next = Math.min(next, maxBeats);
   }
   return segments.map(s => (s.id === id ? { ...s, duration: next } : s));
-}
-
-/**
- * Map an absolute beat offset to the index at which a dropped segment should be
- * inserted. Within a segment the nearer boundary wins, so dropping on the left
- * half inserts before it and the right half after it.
- */
-export function beatToInsertIndex(segments: ChordSegment[], beat: number): number {
-  if (segments.length === 0) return 0;
-
-  let start = 0;
-  for (let i = 0; i < segments.length; i++) {
-    const { duration } = segments[i];
-    if (beat < start + duration) {
-      return beat < start + duration / 2 ? i : i + 1;
-    }
-    start += duration;
-  }
-
-  return segments.length;
 }

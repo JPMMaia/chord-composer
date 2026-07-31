@@ -283,4 +283,47 @@ describe('musicxmlExporter', () => {
       expect(xml).toContain('<rest measure="yes"/>\n        <duration>12</duration>');
     });
   });
+
+  describe('silence between blocks', () => {
+    it('writes a rest for the empty beats before a note', () => {
+      const project = createTestProject({
+        bars: [
+          {
+            id: generateId(),
+            barIndex: 0,
+            scale: { root: 'C', type: 'major' },
+            chords: [],
+            notes: [
+              { id: generateId(), pitch: 60, startBeat: 2, duration: 1, velocity: 100 },
+            ],
+          },
+        ],
+      });
+      const xml = projectToMusicXML(project);
+
+      // Two beats of rest, the note, then a beat of rest to close the measure.
+      expect(xml).toContain('<rest/>\n        <duration>8</duration>');
+      expect(xml).toContain('<rest/>\n        <duration>4</duration>');
+    });
+
+    it('writes a rest for a hole between two notes', () => {
+      const project = createTestProject({
+        bars: [
+          {
+            id: generateId(),
+            barIndex: 0,
+            scale: { root: 'C', type: 'major' },
+            chords: [],
+            notes: [
+              { id: generateId(), pitch: 60, startBeat: 0, duration: 1, velocity: 100 },
+              { id: generateId(), pitch: 67, startBeat: 3, duration: 1, velocity: 100 },
+            ],
+          },
+        ],
+      });
+
+      // The two beats between them are silence, not a held chord.
+      expect(projectToMusicXML(project)).toContain('<rest/>\n        <duration>8</duration>');
+    });
+  });
 });

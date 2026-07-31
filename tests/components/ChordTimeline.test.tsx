@@ -1,11 +1,13 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, fireEvent, createEvent, within } from '@testing-library/react';
 import { ChordTimeline, PIXELS_PER_BEAT } from '@/components/ChordTimeline';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
+import { editorStore } from '@/store/editorStore';
 import { getPaletteItems } from '@/engine/palette';
 import type { PaletteItem } from '@/engine/palette';
 import type { ChordSegment } from '@/types/music';
+import { DEFAULT_SNAP_BEATS } from '@/engine/timeline';
 import { PIANO_KEYS_WIDTH } from '@/utils/constants';
 
 /** Minimal stand-in for the DataTransfer jsdom does not implement. */
@@ -32,6 +34,11 @@ function segments(): ChordSegment[] {
   return bars().flatMap(b => b.chords);
 }
 
+/** `id@start` for a bar's blocks, so placement assertions read at a glance. */
+function layout(barIndex: number): string[] {
+  return bars()[barIndex].chords.map(c => `${c.id}@${c.startBeat}`);
+}
+
 /**
  * Fire a drag event carrying a real `clientX`.
  *
@@ -56,12 +63,35 @@ function dropAt(barId: string, item: PaletteItem, beat: number) {
   fireDrag(lane, 'drop', dataTransfer, beat * PIXELS_PER_BEAT);
 }
 
+/**
+ * Drag a block from `fromBeat` to `toBeat` with the pointer.
+ *
+ * `document.elementFromPoint` is stubbed to the destination lane: jsdom has no
+ * layout engine, so hit-testing has to be told what the pointer is over.
+ */
+function dragBlock(segmentId: string, toBarId: string, fromBeat: number, toBeat: number) {
+  const block = screen.getByTestId(`chord-block-${segmentId}`);
+  const target = screen.getByTestId(`timeline-lane-${toBarId}`);
+  document.elementFromPoint = () => target;
+
+  fireEvent.pointerDown(block, { clientX: fromBeat * PIXELS_PER_BEAT, pointerId: 1 });
+  fireEvent.pointerMove(window, { clientX: toBeat * PIXELS_PER_BEAT, pointerId: 1 });
+  fireEvent.pointerUp(window, { clientX: toBeat * PIXELS_PER_BEAT, pointerId: 1 });
+}
+
 describe('ChordTimeline', () => {
+  const originalElementFromPoint = document.elementFromPoint;
+
   beforeEach(() => {
     selectionStore.getState().clearSelection();
+    editorStore.setState({ snapBeats: DEFAULT_SNAP_BEATS });
     projectStore.getState().createProject();
     projectStore.getState().addBar();
     projectStore.getState().addBar();
+  });
+
+  afterEach(() => {
+    document.elementFromPoint = originalElementFromPoint;
   });
 
   it('renders one bar element per bar, numbered from 1', () => {
@@ -115,24 +145,147 @@ describe('ChordTimeline', () => {
     expect(bars()[0].notes.map(n => n.pitch)).toEqual([60, 64, 67]);
   });
 
-  it('pushes the fifth segment of a 4/4 bar into the next bar', () => {
-    render(<ChordTimeline />);
-    const items = cMajorChords();
-    for (let i = 0; i < 5; i++) {
-      dropAt(bars()[0].id, items[i], 4);
-    }
+  describe('grid snapping', () => {
+    it('offers the snap resolutions as note values', () => {
+      render(<ChordTimeline />);
+      const select = screen.getByLabelText('Snap') as HTMLSelectElement;
+      expect([...select.options].map(o => o.text)).toEqual([
+        '1/1',
+        '1/2',
+        '1/4',
+        '1/8',
+        '1/16',
+      ]);
+    });
 
-    expect(bars()[0].chords).toHaveLength(4);
-    expect(bars()[1].chords).toHaveLength(1);
+    it('records the chosen resolution so every gesture shares it', () => {
+      render(<ChordTimeline />);
+      fireEvent.change(screen.getByLabelText('Snap'), { target: { value: '0.5' } });
+      expect(editorStore.getState().snapBeats).toBe(0.5);
+    });
+
+    it('snaps a drop to the nearest whole beat at 1/4', () => {
+      render(<ChordTimeline />);
+      dropAt(bars()[0].id, cMajorChords()[0], 1.4);
+      expect(segments()[0].startBeat).toBe(1);
+    });
+
+    it('snaps a drop to the nearest half beat at 1/8', () => {
+      editorStore.getState().setSnapBeats(0.5);
+      render(<ChordTimeline />);
+      dropAt(bars()[0].id, cMajorChords()[0], 1.4);
+      expect(segments()[0].startBeat).toBe(1.5);
+    });
+
+    it('draws subdivision lines when the grid is finer than a beat', () => {
+      editorStore.getState().setSnapBeats(0.5);
+      render(<ChordTimeline />);
+      const el = screen.getByTestId(`timeline-bar-${bars()[0].id}`);
+      // Four beats at 1/8: a line on each half beat that is not already a beat line.
+      expect(within(el).getAllByTestId('subdivision-line')).toHaveLength(4);
+    });
+
+    it('draws no subdivision lines at a whole-beat grid', () => {
+      render(<ChordTimeline />);
+      const el = screen.getByTestId(`timeline-bar-${bars()[0].id}`);
+      expect(within(el).queryAllByTestId('subdivision-line')).toHaveLength(0);
+    });
   });
 
-  it('inserts before a segment when dropped on its left half', () => {
-    render(<ChordTimeline />);
-    const items = cMajorChords();
-    dropAt(bars()[0].id, items[4], 0); // G
-    dropAt(bars()[0].id, items[0], 0.25); // C, onto the left half of G
+  describe('placement', () => {
+    it('leaves the space before a dropped block empty', () => {
+      render(<ChordTimeline />);
+      dropAt(bars()[0].id, cMajorChords()[0], 2);
 
-    expect(segments().map(s => s.root)).toEqual(['C', 'G']);
+      expect(segments()[0].startBeat).toBe(2);
+      expect(bars()[0].notes.every(n => n.startBeat === 2)).toBe(true);
+    });
+
+    it('pushes the block it is dropped on to the right', () => {
+      render(<ChordTimeline />);
+      const items = cMajorChords();
+      dropAt(bars()[0].id, items[0], 0); // C
+      dropAt(bars()[0].id, items[4], 0); // G, on top of it
+
+      expect(segments().map(s => s.root)).toEqual(['G', 'C']);
+      expect(layout(0).map(s => s.split('@')[1])).toEqual(['0', '1']);
+    });
+
+    it('clamps a drop that would cross the bar line', () => {
+      render(<ChordTimeline />);
+      dropAt(bars()[0].id, cMajorChords()[0], 9);
+      expect(segments()[0].startBeat).toBe(3);
+    });
+  });
+
+  describe('dragging a block', () => {
+    it('moves a block to the beat it was dragged to', () => {
+      render(<ChordTimeline />);
+      dropAt(bars()[0].id, cMajorChords()[0], 0);
+      const id = segments()[0].id;
+
+      dragBlock(id, bars()[0].id, 0, 2);
+
+      expect(segments()[0].startBeat).toBe(2);
+    });
+
+    it('snaps the drag to the grid', () => {
+      editorStore.getState().setSnapBeats(0.5);
+      render(<ChordTimeline />);
+      dropAt(bars()[0].id, cMajorChords()[0], 0);
+      const id = segments()[0].id;
+
+      dragBlock(id, bars()[0].id, 0, 1.4);
+
+      expect(segments()[0].startBeat).toBe(1.5);
+    });
+
+    it('moves a block into another bar', () => {
+      render(<ChordTimeline />);
+      dropAt(bars()[0].id, cMajorChords()[0], 0);
+      const id = segments()[0].id;
+
+      dragBlock(id, bars()[1].id, 0, 1);
+
+      expect(bars()[0].chords).toHaveLength(0);
+      expect(layout(1)).toEqual([`${id}@1`]);
+    });
+
+    it('keeps the grab point under the pointer instead of jumping', () => {
+      render(<ChordTimeline />);
+      dropAt(bars()[0].id, cMajorChords()[0], 0);
+      const id = segments()[0].id;
+
+      // Grabbed halfway along the block, dragged two beats right.
+      dragBlock(id, bars()[0].id, 0.5, 2.5);
+
+      expect(segments()[0].startBeat).toBe(2);
+    });
+
+    it('does not select the block when the gesture was a drag', () => {
+      render(<ChordTimeline />);
+      dropAt(bars()[0].id, cMajorChords()[0], 0);
+      const id = segments()[0].id;
+      selectionStore.getState().clearSelection();
+
+      dragBlock(id, bars()[0].id, 0, 2);
+      fireEvent.click(screen.getByTestId(`chord-block-${id}`));
+
+      expect(selectionStore.getState().selectedSegmentId).toBeNull();
+    });
+
+    it('still selects on a click that never moved', () => {
+      render(<ChordTimeline />);
+      dropAt(bars()[0].id, cMajorChords()[0], 0);
+      const id = segments()[0].id;
+
+      const block = screen.getByTestId(`chord-block-${id}`);
+      fireEvent.pointerDown(block, { clientX: 0, pointerId: 1 });
+      fireEvent.pointerUp(window, { clientX: 0, pointerId: 1 });
+      fireEvent.click(block);
+
+      expect(selectionStore.getState().selectedSegmentId).toBe(id);
+    });
   });
 
   it('renders a block per segment, labelled with its symbol and numeral', () => {
@@ -185,7 +338,7 @@ describe('ChordTimeline', () => {
     render(<ChordTimeline />);
     const items = cMajorChords();
     dropAt(bars()[0].id, items[0], 0); // C
-    dropAt(bars()[0].id, items[4], 4); // G, after it
+    dropAt(bars()[0].id, items[4], 1); // G, after it
 
     const [c, g] = segments();
     expect(screen.getByTestId(`chord-block-${c.id}`)).toHaveStyle({
@@ -195,6 +348,15 @@ describe('ChordTimeline', () => {
     expect(screen.getByTestId(`chord-block-${g.id}`)).toHaveStyle({
       left: `${PIXELS_PER_BEAT}px`,
       width: `${PIXELS_PER_BEAT}px`,
+    });
+  });
+
+  it('positions a block dropped into empty space at its own beat', () => {
+    render(<ChordTimeline />);
+    dropAt(bars()[0].id, cMajorChords()[0], 3);
+
+    expect(screen.getByTestId(`chord-block-${segments()[0].id}`)).toHaveStyle({
+      left: `${3 * PIXELS_PER_BEAT}px`,
     });
   });
 
@@ -216,16 +378,28 @@ describe('ChordTimeline', () => {
     });
   });
 
-  it('reorders a segment with the arrow keys', () => {
+  it('nudges a segment by one snap step with the arrow keys', () => {
     render(<ChordTimeline />);
-    const items = cMajorChords();
-    dropAt(bars()[0].id, items[0], 0); // C
-    dropAt(bars()[0].id, items[4], 4); // G
+    dropAt(bars()[0].id, cMajorChords()[0], 1);
+    const id = segments()[0].id;
+    const block = screen.getByTestId(`chord-block-${id}`);
 
-    const first = screen.getByTestId(`chord-block-${segments()[0].id}`);
-    fireEvent.keyDown(first, { key: 'ArrowRight' });
+    fireEvent.keyDown(block, { key: 'ArrowRight' });
+    expect(segments()[0].startBeat).toBe(2);
 
-    expect(segments().map(s => s.root)).toEqual(['G', 'C']);
+    fireEvent.keyDown(screen.getByTestId(`chord-block-${id}`), { key: 'ArrowLeft' });
+    expect(segments()[0].startBeat).toBe(1);
+  });
+
+  it('nudges by the current snap resolution, not always a whole beat', () => {
+    editorStore.getState().setSnapBeats(0.5);
+    render(<ChordTimeline />);
+    dropAt(bars()[0].id, cMajorChords()[0], 1);
+
+    fireEvent.keyDown(screen.getByTestId(`chord-block-${segments()[0].id}`), {
+      key: 'ArrowRight',
+    });
+    expect(segments()[0].startBeat).toBe(1.5);
   });
 
   it('reserves a gutter matching the piano roll key column, so bar 1 lines up', () => {

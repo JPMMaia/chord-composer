@@ -12,8 +12,15 @@ interface ChordSegmentBlockProps {
   onSelect: (segmentId: string) => void;
   onRemove: (segmentId: string) => void;
   onResize: (segmentId: string, durationBeats: number) => void;
+  /**
+   * Begins a drag. The gesture itself is run by the timeline, which is the only
+   * thing that knows where the other lanes are and so where the pointer may land.
+   */
+  onMoveStart?: (e: React.PointerEvent) => void;
   onMoveLeft?: () => void;
   onMoveRight?: () => void;
+  /** True while this block is being dragged, so it can lift above its neighbours. */
+  isDragging?: boolean;
 }
 
 /** What the block leads with: a chord's symbol, a note's name. */
@@ -36,8 +43,10 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
   onSelect,
   onRemove,
   onResize,
+  onMoveStart,
   onMoveLeft,
   onMoveRight,
+  isDragging = false,
 }) => {
   const isNote = segment.kind === 'note';
 
@@ -103,6 +112,7 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
         onSelect(segment.id);
       }}
       onKeyDown={handleKeyDown}
+      onPointerDown={onMoveStart}
       // Spans exactly its own beats, so a block covers the same span as the notes
       // it generates in the piano roll below.
       style={{
@@ -111,7 +121,8 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
       }}
       className={`
         absolute top-0 bottom-0 flex flex-col items-center justify-center overflow-hidden
-        rounded-md cursor-pointer select-none border transition-colors
+        rounded-md select-none border transition-colors
+        ${isDragging ? 'cursor-grabbing z-20 opacity-80' : 'cursor-grab'}
         ${isSelected ? 'ring-2 ring-indigo-400 z-10' : ''}
         ${isNote
           ? 'bg-teal-800 border-teal-600 text-teal-50'
@@ -126,6 +137,9 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
       )}
 
       <button
+        // Stopped here as well as on click, so reaching for the × never reads as
+        // the start of a drag.
+        onPointerDown={e => e.stopPropagation()}
         onClick={e => {
           e.stopPropagation();
           onRemove(segment.id);

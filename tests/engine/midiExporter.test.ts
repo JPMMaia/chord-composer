@@ -279,6 +279,20 @@ describe('midiExporter', () => {
         { tick: 7 * PPQ, pitch: 64 },
       ]);
     });
+
+    it('leaves a hole in the tick stream where the timeline has silence', () => {
+      // Nothing on the downbeat, one note on beat 2 — the gap must survive export.
+      const bar: Bar = {
+        id: generateId(),
+        barIndex: 0,
+        scale: { root: 'C', type: 'major' },
+        chords: [],
+        notes: [{ id: generateId(), pitch: 60, startBeat: 2, duration: 1, velocity: 100 }],
+      };
+      const onsets = scanNoteOnTicks(projectToMidi(createTestProject({ bars: [bar] })));
+
+      expect(onsets).toEqual([{ tick: 2 * PPQ, pitch: 60 }]);
+    });
   });
 });
 

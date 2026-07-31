@@ -195,37 +195,27 @@ export const ChordTimeline: React.FC = () => {
                 )}
 
                 {bar.chords.map((segment, i) => {
-                  const left = cursorBeat * PIXELS_PER_BEAT;
+                  const startBeat = cursorBeat;
                   cursorBeat += segment.duration;
                   const flatIndex = offset + i;
 
                   return (
-                    <div
+                    <ChordSegmentBlock
                       key={segment.id}
-                      style={{
-                        position: 'absolute',
-                        left: `${left}px`,
-                        width: `${segment.duration * PIXELS_PER_BEAT}px`,
-                        top: 0,
-                        bottom: 0,
+                      segment={segment}
+                      isSelected={selectedSegmentId === segment.id}
+                      startBeat={startBeat}
+                      pixelsPerBeat={PIXELS_PER_BEAT}
+                      onSelect={id => {
+                        // Bar first: selecting a new bar drops the segment selection.
+                        selectBar(bar.id);
+                        selectSegment(id);
                       }}
-                      className="p-0.5"
-                    >
-                      <ChordSegmentBlock
-                        segment={segment}
-                        isSelected={selectedSegmentId === segment.id}
-                        pixelsPerBeat={PIXELS_PER_BEAT}
-                        onSelect={id => {
-                          // Bar first: selecting a new bar drops the segment selection.
-                          selectBar(bar.id);
-                          selectSegment(id);
-                        }}
-                        onRemove={removeSegment}
-                        onResize={resizeSegmentDuration}
-                        onMoveLeft={() => moveSegment(flatIndex, flatIndex - 1)}
-                        onMoveRight={() => moveSegment(flatIndex, flatIndex + 1)}
-                      />
-                    </div>
+                      onRemove={removeSegment}
+                      onResize={resizeSegmentDuration}
+                      onMoveLeft={() => moveSegment(flatIndex, flatIndex - 1)}
+                      onMoveRight={() => moveSegment(flatIndex, flatIndex + 1)}
+                    />
                   );
                 })}
               </div>

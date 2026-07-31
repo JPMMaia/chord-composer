@@ -5,7 +5,9 @@ import { MIN_SEGMENT_BEATS } from '@/engine/timeline';
 interface ChordSegmentBlockProps {
   segment: ChordSegment;
   isSelected: boolean;
-  /** Horizontal scale, so a pointer delta can be read back as beats. */
+  /** Beats from the start of the containing bar. */
+  startBeat: number;
+  /** Horizontal scale: sizes the block, and reads a pointer delta back as beats. */
   pixelsPerBeat: number;
   onSelect: (segmentId: string) => void;
   onRemove: (segmentId: string) => void;
@@ -29,6 +31,7 @@ function primaryLabel(segment: ChordSegment): string {
 export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
   segment,
   isSelected,
+  startBeat,
   pixelsPerBeat,
   onSelect,
   onRemove,
@@ -100,6 +103,12 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
         onSelect(segment.id);
       }}
       onKeyDown={handleKeyDown}
+      // Spans exactly its own beats, so a block covers the same span as the notes
+      // it generates in the piano roll below.
+      style={{
+        left: `${startBeat * pixelsPerBeat}px`,
+        width: `${segment.duration * pixelsPerBeat}px`,
+      }}
       className={`
         absolute top-0 bottom-0 flex flex-col items-center justify-center overflow-hidden
         rounded-md cursor-pointer select-none border transition-colors

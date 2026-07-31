@@ -181,6 +181,23 @@ describe('ChordTimeline', () => {
     expect(bars()[0].notes).toHaveLength(0);
   });
 
+  it('sizes each block to its duration and places it at its start beat', () => {
+    render(<ChordTimeline />);
+    const items = cMajorChords();
+    dropAt(bars()[0].id, items[0], 0); // C
+    dropAt(bars()[0].id, items[4], 4); // G, after it
+
+    const [c, g] = segments();
+    expect(screen.getByTestId(`chord-block-${c.id}`)).toHaveStyle({
+      left: '0px',
+      width: `${PIXELS_PER_BEAT}px`,
+    });
+    expect(screen.getByTestId(`chord-block-${g.id}`)).toHaveStyle({
+      left: `${PIXELS_PER_BEAT}px`,
+      width: `${PIXELS_PER_BEAT}px`,
+    });
+  });
+
   it('resizes a segment by dragging its right edge', () => {
     render(<ChordTimeline />);
     dropAt(bars()[0].id, cMajorChords()[0], 0);
@@ -193,6 +210,10 @@ describe('ChordTimeline', () => {
 
     expect(segments()[0].duration).toBe(2);
     expect(bars()[0].notes[0].duration).toBe(2);
+    // The block must widen with it, or the timeline stops matching the piano roll.
+    expect(screen.getByTestId(`chord-block-${id}`)).toHaveStyle({
+      width: `${2 * PIXELS_PER_BEAT}px`,
+    });
   });
 
   it('reorders a segment with the arrow keys', () => {

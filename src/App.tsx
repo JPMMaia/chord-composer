@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { projectStore } from '@/store/projectStore';
 import { Transport } from '@/components/Transport';
+import { FileMenu } from '@/components/FileMenu';
 import { ChordEditor } from '@/components/ChordEditor';
 import { PianoRoll } from '@/components/PianoRoll';
 import { autoFillNotesFromChords, splitBarIntoChords } from '@/engine/chordOperations';
@@ -196,6 +197,11 @@ function App() {
 
   return (
     <div className="flex flex-col h-screen bg-gray-900 text-gray-100">
+      {/* File Menu */}
+      <div className="px-4 py-2 bg-gray-800 border-b border-gray-700">
+        <FileMenu />
+      </div>
+
       {/* Transport Bar */}
       <Transport
         isPlaying={isPlaying}

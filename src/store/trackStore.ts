@@ -4,6 +4,7 @@ import { generateId } from '@/utils/id';
 
 interface TrackState {
   tracks: Track[];
+  setTracks: (tracks: Track[]) => void;
   addTrack: (name?: string) => void;
   removeTrack: (trackId: string) => void;
   setTrackVolume: (trackId: string, volume: number) => void;
@@ -18,6 +19,12 @@ let trackCounter = 0;
 
 export const trackStore = create<TrackState>((set, get) => ({
   tracks: [],
+
+  /** Replace all tracks, e.g. after loading a project file. */
+  setTracks: (tracks: Track[]) => {
+    trackCounter = tracks.length;
+    set({ tracks });
+  },
 
   addTrack: (name?: string) => {
     const tracks = get().tracks;

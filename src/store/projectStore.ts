@@ -11,6 +11,7 @@ import {
 interface ProjectState {
   project: Project | null;
   createProject: () => void;
+  loadProject: (project: Project) => void;
   setBpm: (bpm: number) => void;
   setTimeSignature: (ts: TimeSignature) => void;
   setKey: (key: NoteName, mode?: 'major' | 'minor') => void;
@@ -38,6 +39,11 @@ export const projectStore = create<ProjectState>((set, get) => ({
 
   createProject: () => {
     set({ project: createInitialProject() });
+  },
+
+  /** Replace the current project wholesale, e.g. after loading a file. */
+  loadProject: (project: Project) => {
+    set({ project });
   },
 
   setBpm: (bpm: number) => {

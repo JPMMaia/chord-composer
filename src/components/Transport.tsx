@@ -10,6 +10,8 @@ interface TransportProps {
   musicalKey: string;
   keyMode: 'major' | 'minor';
   hasLoopRegion: boolean;
+  /** True while the instrument's samples are still downloading. */
+  isLoading?: boolean;
   onPlay: () => void;
   onPause: () => void;
   onStop: () => void;
@@ -29,6 +31,7 @@ export const Transport: React.FC<TransportProps> = ({
   musicalKey,
   keyMode,
   hasLoopRegion,
+  isLoading = false,
   onPlay,
   onPause,
   onStop,
@@ -64,14 +67,17 @@ export const Transport: React.FC<TransportProps> = ({
       <div className="flex items-center gap-1">
         <button
           onClick={onPlay}
+          disabled={isLoading}
           className={`px-3 py-1.5 text-sm rounded transition-colors ${
-            isPlaying
-              ? 'bg-green-600 text-white'
-              : 'bg-gray-600 text-gray-200 hover:bg-gray-500'
+            isLoading
+              ? 'bg-gray-700 text-gray-400 cursor-wait'
+              : isPlaying
+                ? 'bg-green-600 text-white'
+                : 'bg-gray-600 text-gray-200 hover:bg-gray-500'
           }`}
           aria-label="Play"
         >
-          ▶ Play
+          {isLoading ? '⏳ Loading…' : '▶ Play'}
         </button>
         <button
           onClick={onPause}

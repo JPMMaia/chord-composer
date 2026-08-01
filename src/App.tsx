@@ -8,6 +8,7 @@ import { ScalePalette } from '@/components/ScalePalette';
 import { ChordTimeline } from '@/components/ChordTimeline';
 import { PianoRoll } from '@/components/PianoRoll';
 import { usePlayback } from '@/hooks/usePlayback';
+import { songTimeToBeat } from '@/engine/scheduler';
 import { getTotalBeats } from '@/engine/timeline';
 import type { NoteName, ScaleType } from '@/types/music';
 import { NOTE_NAMES, SCALE_TYPES } from '@/utils/constants';
@@ -24,11 +25,8 @@ function App() {
   const selectedSegmentId = selectionStore(s => s.selectedSegmentId);
   const selectBar = selectionStore(s => s.selectBar);
 
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [isPaused, setIsPaused] = useState(false);
   const [, setMetronomeOn] = useState(false);
   const [hasLoopRegion, setHasLoopRegion] = useState(false);
-  const [playheadBeat, setPlayheadBeat] = useState(0);
 
   // Initialize project on mount
   useEffect(() => {
@@ -65,27 +63,17 @@ function App() {
       }
     : null;
 
-  const { play, pause, stop } = usePlayback(playbackConfig!);
+  // Playback state lives in the hook, which is the only thing that knows when sound
+  // actually starts — a local copy would claim "playing" during the sample load.
+  const { play, pause, stop, isPlaying, isPaused, isLoading, currentTime } =
+    usePlayback(playbackConfig!);
+
+  const playheadBeat = songTimeToBeat(currentTime, project?.bpm ?? 120);
 
   // Handlers
   const handlePlay = useCallback(() => {
-    play();
-    setIsPlaying(true);
-    setIsPaused(false);
+    void play();
   }, [play]);
-
-  const handlePause = useCallback(() => {
-    pause();
-    setIsPaused(true);
-    setIsPlaying(false);
-  }, [pause]);
-
-  const handleStop = useCallback(() => {
-    stop();
-    setIsPlaying(false);
-    setIsPaused(false);
-    setPlayheadBeat(0);
-  }, [stop]);
 
   const handleBpmChange = useCallback((bpm: number) => {
     setBpm(bpm);
@@ -117,9 +105,10 @@ function App() {
         musicalKey={project.key}
         keyMode={project.keyMode}
         hasLoopRegion={hasLoopRegion}
+        isLoading={isLoading}
         onPlay={handlePlay}
-        onPause={handlePause}
-        onStop={handleStop}
+        onPause={pause}
+        onStop={stop}
         onBpmChange={handleBpmChange}
         onMetronomeToggle={handleMetronomeToggle}
         onLoopToggle={handleLoopToggle}

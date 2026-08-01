@@ -1,153 +1,215 @@
 import { useRef, useCallback, useEffect, useState } from 'react';
-import { SoundFontPlayer } from '@/engine/soundfontPlayer';
+import { SmplrPianoInstrument } from '@/engine/smplrPiano';
+import type { Instrument } from '@/engine/instrument';
 import { calculateNoteTiming, getLoopDuration } from '@/engine/playback';
-import type { PlaybackConfig } from '@/engine/playback';
+import type { NoteTiming, PlaybackConfig } from '@/engine/playback';
+import {
+  LOOKAHEAD_SECONDS,
+  TICK_MS,
+  notesInWindow,
+  toClockTime,
+} from '@/engine/scheduler';
 
 /**
- * Hook to manage playback scheduling with Web Audio API.
- * Schedules notes ahead of time using AudioContext.currentTime.
+ * Drives playback: owns the AudioContext, the instrument, and the look-ahead
+ * scheduling loop.
+ *
+ * The scheduling arithmetic lives in `@/engine/scheduler` and the sound in an
+ * `Instrument`; this hook is the part that has to care about React lifecycles and
+ * the browser's autoplay rules.
  */
 export function usePlayback(config: PlaybackConfig) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
-  const playerRef = useRef<SoundFontPlayer | null>(null);
-  const scheduledNotesRef = useRef<Set<string>>(new Set());
-  const startTimeRef = useRef<number>(0);
-  const pauseTimeRef = useRef<number>(0);
 
-  // Initialize SoundFontPlayer when config changes
-  useEffect(() => {
-    if (!playerRef.current) {
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      playerRef.current = new SoundFontPlayer(audioCtx);
+  const ctxRef = useRef<AudioContext | null>(null);
+  const instrumentRef = useRef<Instrument | null>(null);
+
+  /** Clock reading at song position 0. Playback's whole frame of reference. */
+  const songStartClockRef = useRef(0);
+  /** Song time up to which notes have already been handed to the instrument. */
+  const scheduledUpToRef = useRef(0);
+  /** Song position to resume from. Non-zero only after Pause. */
+  const resumeFromRef = useRef(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** Guards against a second Play landing while the first is still loading samples. */
+  const startingRef = useRef(false);
+
+  /**
+   * The config is rebuilt on every render by the caller, so the scheduling loop
+   * reads it from a ref. Otherwise every keystroke would tear down the interval.
+   */
+  const configRef = useRef(config);
+  configRef.current = config;
+
+  const clearTimer = useCallback(() => {
+    if (timerRef.current !== null) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
     }
-    return () => {
-      playerRef.current?.stopAllTracks();
-    };
   }, []);
 
   /**
-   * Schedule all notes for playback.
+   * One scheduling pass: hand the instrument every note between where we left off
+   * and the look-ahead horizon, then advance the playhead.
    */
-  const scheduleAllNotes = useCallback(() => {
-    if (!playerRef.current) return;
+  const tick = useCallback(
+    (timings: NoteTiming[]) => {
+      const instrument = instrumentRef.current;
+      if (!instrument) return;
 
-    const timings = calculateNoteTiming(config);
+      const cfg = configRef.current;
+      const elapsed = instrument.now() - songStartClockRef.current;
+      const loopDuration = getLoopDuration(cfg);
+      const isLooping = cfg.loopStart !== null && cfg.loopEnd !== null;
+      const loopFrom = cfg.loopStart ?? 0;
 
-    // Clear previous scheduling
-    scheduledNotesRef.current.clear();
+      const horizon = elapsed + LOOKAHEAD_SECONDS;
+      /** Song time at which playback ends or wraps. */
+      const endSong = isLooping ? loopFrom + loopDuration : loopDuration;
 
-    for (const timing of timings) {
-      const noteKey = `${timing.midiNote}-${timing.barIndex}`;
-      scheduledNotesRef.current.add(noteKey);
+      const due = notesInWindow({
+        timings,
+        fromSong: scheduledUpToRef.current,
+        toSong: Math.min(horizon, endSong),
+      });
 
-      const noteDuration = timing.duration;
-      const velocity = timing.velocity;
+      for (const note of due) {
+        instrument.schedule({
+          midiNote: note.midiNote,
+          velocity: note.velocity,
+          when: toClockTime(note.startTime, songStartClockRef.current),
+          duration: note.duration,
+        });
+      }
 
-      // Schedule note playback
-      playerRef.current.playNote(
-        timing.midiNote,
-        velocity,
-        noteDuration,
-        'main'
-      );
-    }
-  }, [config]);
+      scheduledUpToRef.current = Math.max(scheduledUpToRef.current, horizon);
 
-  /**
-   * Start playback.
-   */
-  const play = useCallback(() => {
-    if (!playerRef.current) return;
-
-    // Resume AudioContext (autoplay policy)
-    const ctx = playerRef.current.getAudioContext();
-    if (ctx.state === 'suspended') {
-      ctx.resume();
-    }
-
-    setIsPlaying(true);
-    setIsPaused(false);
-
-    // Start scheduling notes
-    scheduleAllNotes();
-
-    // Start playhead tracking
-    startTimeRef.current = ctx.currentTime;
-  }, [scheduleAllNotes]);
-
-  /**
-   * Pause playback.
-   */
-  const pause = useCallback(() => {
-    if (!playerRef.current) return;
-
-    setIsPaused(true);
-    setIsPlaying(false);
-
-    // Record pause time
-    pauseTimeRef.current = currentTime;
-
-    // Stop all playing notes
-    playerRef.current.stopAllTracks();
-  }, [currentTime]);
-
-  /**
-   * Stop playback and reset.
-   */
-  const stop = useCallback(() => {
-    if (!playerRef.current) return;
-
-    setIsPlaying(false);
-    setIsPaused(false);
-    setCurrentTime(0);
-
-    playerRef.current.stopAllTracks();
-    scheduledNotesRef.current.clear();
-  }, []);
-
-  /**
-   * Update playhead position based on elapsed time.
-   */
-  useEffect(() => {
-    if (!isPlaying || isPaused) return;
-
-    let animationFrame: number;
-    const updatePlayhead = () => {
-      if (!playerRef.current) return;
-
-      const ctx = playerRef.current.getAudioContext();
-      const elapsed = ctx.currentTime - startTimeRef.current;
-      const loopDur = getLoopDuration(config);
-
-      if (elapsed >= loopDur) {
-        // Loop reached end
-        if (config.loopStart !== null && config.loopEnd !== null) {
-          // Restart from loop start
-          startTimeRef.current = ctx.currentTime;
-        } else {
-          // Stop at end
-          setIsPlaying(false);
+      // Reaching the end either wraps the loop or ends playback. Wrapping shifts the
+      // frame of reference forward by one loop length rather than resetting it to
+      // `now`, so the wrap lands on the beat instead of wherever the tick fired.
+      if (elapsed >= endSong) {
+        if (isLooping) {
+          songStartClockRef.current += loopDuration;
+          scheduledUpToRef.current = loopFrom;
+          setCurrentTime(loopFrom);
           return;
+        }
+
+        clearTimer();
+        instrument.stopAll();
+        setIsPlaying(false);
+        setCurrentTime(0);
+        resumeFromRef.current = 0;
+        return;
+      }
+
+      setCurrentTime(Math.max(0, Math.min(elapsed, endSong)));
+    },
+    [clearTimer]
+  );
+
+  const play = useCallback(async () => {
+    if (startingRef.current) return;
+    startingRef.current = true;
+
+    try {
+      // The context is created here, inside the click handler, rather than on mount:
+      // one created without a user gesture starts suspended, and scheduling against a
+      // suspended context's clock is what makes timing drift on the first Play.
+      if (!ctxRef.current) {
+        ctxRef.current = new (window.AudioContext ||
+          (window as unknown as { webkitAudioContext: typeof AudioContext })
+            .webkitAudioContext)();
+      }
+      const ctx = ctxRef.current;
+
+      if (!instrumentRef.current) {
+        instrumentRef.current = new SmplrPianoInstrument(ctx);
+      }
+      const instrument = instrumentRef.current;
+
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+
+      // First Play in a session waits on the sample download; the transport shows a
+      // loading state rather than appearing to do nothing.
+      if (!instrument.isLoaded) {
+        setIsLoading(true);
+        try {
+          await instrument.load();
+        } finally {
+          setIsLoading(false);
         }
       }
 
-      setCurrentTime(Math.min(elapsed, loopDur));
-      animationFrame = requestAnimationFrame(updatePlayhead);
-    };
+      const timings = calculateNoteTiming(configRef.current);
+      const resumeFrom = resumeFromRef.current;
 
-    animationFrame = requestAnimationFrame(updatePlayhead);
-    return () => cancelAnimationFrame(animationFrame);
-  }, [isPlaying, isPaused, config]);
+      // Anchoring the reference *behind* `now` by the resume offset is what makes a
+      // paused project pick up where it left off with the same arithmetic.
+      songStartClockRef.current = instrument.now() - resumeFrom;
+      scheduledUpToRef.current = resumeFrom;
+
+      setIsPlaying(true);
+      setIsPaused(false);
+      setCurrentTime(resumeFrom);
+
+      clearTimer();
+      tick(timings);
+      timerRef.current = setInterval(() => tick(timings), TICK_MS);
+    } finally {
+      startingRef.current = false;
+    }
+  }, [clearTimer, tick]);
+
+  const pause = useCallback(() => {
+    clearTimer();
+    instrumentRef.current?.stopAll();
+
+    const instrument = instrumentRef.current;
+    resumeFromRef.current = instrument
+      ? Math.max(0, instrument.now() - songStartClockRef.current)
+      : 0;
+
+    setIsPaused(true);
+    setIsPlaying(false);
+  }, [clearTimer]);
+
+  const stop = useCallback(() => {
+    clearTimer();
+    instrumentRef.current?.stopAll();
+
+    resumeFromRef.current = 0;
+    scheduledUpToRef.current = 0;
+    setIsPlaying(false);
+    setIsPaused(false);
+    setCurrentTime(0);
+  }, [clearTimer]);
+
+  // Tear down on unmount only. The instrument and context are deliberately kept
+  // across config changes so a BPM edit does not re-download the samples.
+  useEffect(() => {
+    return () => {
+      clearTimer();
+      instrumentRef.current?.dispose();
+      instrumentRef.current = null;
+      ctxRef.current?.close();
+      ctxRef.current = null;
+    };
+  }, [clearTimer]);
 
   return {
     isPlaying,
     isPaused,
+    isLoading,
     currentTime,
     play,
     pause,
     stop,
-    player: playerRef.current,
+    instrument: instrumentRef.current,
   };
 }

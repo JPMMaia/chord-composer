@@ -14,8 +14,9 @@ interface ChordSegmentBlockProps {
   onRemove: (segmentId: string) => void;
   onResize: (segmentId: string, durationBeats: number) => void;
   /**
-   * Begins a drag. The gesture itself is run by the timeline, which is the only
-   * thing that knows where the other lanes are and so where the pointer may land.
+   * Begins a press: resolves the selection, then a drag. The gesture itself is run
+   * by the timeline, which is the only thing that knows where the other lanes are
+   * and so where the pointer may land — and which blocks travel along with this one.
    */
   onMoveStart?: (e: React.PointerEvent) => void;
   onMoveLeft?: () => void;
@@ -135,12 +136,15 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
               inversionLabel(segment) ? ` ${inversionLabel(segment)} inversion` : ''
             }`
       }
-      onClick={e => {
-        e.stopPropagation();
-        onSelect(segment.id);
-      }}
       onKeyDown={handleKeyDown}
-      onPointerDown={onMoveStart}
+      // Selection happens here rather than on click. A click is dispatched on the
+      // nearest common ancestor of the press and the release, so any re-render that
+      // moves this node between the two — a drag preview reordering the lane, say —
+      // retargets the click to the lane and the block never hears it.
+      onPointerDown={e => {
+        e.stopPropagation();
+        onMoveStart?.(e);
+      }}
       // Spans exactly its own beats, so a block covers the same span as the notes
       // it generates in the piano roll below.
       style={{

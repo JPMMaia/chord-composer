@@ -4,6 +4,7 @@ import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { editorStore } from '@/store/editorStore';
 import {
+  flattenSegments,
   getBarBeats,
   getBarStartBeat,
   getTotalBeats,
@@ -38,14 +39,34 @@ function parseTs(value: string): TimeSignature {
   return { beatsPerMeasure, beatUnit };
 }
 
-/** A drag in flight: where the block would land if the pointer were released now. */
-interface DragState {
-  segmentId: string;
-  /** Beats between the block's left edge and the point the user grabbed it by. */
-  grabOffset: number;
-  barId: string;
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+/** Where a block sat when a drag began, or would land if released now. */
+interface SegmentPlacement {
+  barIndex: number;
   startBeat: number;
-  /** False until the pointer actually travels, so a click is not mistaken for a drag. */
+}
+
+/** Where a block sat when a drag began, plus what the clamp needs to know about it. */
+interface DragOrigin extends SegmentPlacement {
+  /** In beats — what decides how far right the block may travel inside its bar. */
+  duration: number;
+}
+
+/**
+ * A drag in flight. The whole selection travels, so this tracks the block actually
+ * grabbed and carries every selected block's origin to offset against it.
+ */
+interface DragState {
+  /** The block under the pointer — the one the delta is measured from. */
+  segmentId: string;
+  /** Beats between the grabbed block's left edge and the point it was grabbed by. */
+  grabOffset: number;
+  /** Where each dragged block sat when the gesture began. */
+  origins: Map<string, DragOrigin>;
+  /** Where each dragged block would land if the pointer were released now. */
+  preview: Map<string, SegmentPlacement>;
+  /** False until the pointer actually travels, so a press is not mistaken for a drag. */
   moved: boolean;
 }
 
@@ -87,10 +108,16 @@ export const ChordTimeline: React.FC = () => {
   const setBarTimeSignature = projectStore(s => s.setBarTimeSignature);
   const setLoopRegion = projectStore(s => s.setLoopRegion);
 
+  const moveSegments = projectStore(s => s.moveSegments);
+
   const selectedBarId = selectionStore(s => s.selectedBarId);
-  const selectedSegmentId = selectionStore(s => s.selectedSegmentId);
+  const selectedSegmentIds = selectionStore(s => s.selectedSegmentIds);
   const selectBar = selectionStore(s => s.selectBar);
   const selectSegment = selectionStore(s => s.selectSegment);
+  const setSelectedSegments = selectionStore(s => s.setSelectedSegments);
+  const toggleSegment = selectionStore(s => s.toggleSegment);
+  const anchorSegment = selectionStore(s => s.anchorSegment);
+  const clearSegmentSelection = selectionStore(s => s.clearSegmentSelection);
 
   const snapBeats = editorStore(s => s.snapBeats);
   const setSnapBeats = editorStore(s => s.setSnapBeats);
@@ -107,9 +134,6 @@ export const ChordTimeline: React.FC = () => {
   const rangeDragRef = useRef<RangeDragState | null>(null);
   rangeDragRef.current = rangeDrag;
 
-  // Read by the click handler to tell a drag from a click. A ref, not state,
-  // because the click arrives after the gesture has already been committed.
-  const draggedRef = useRef(false);
   // The live drag, for the window listeners, which are installed once.
   const dragRef = useRef<DragState | null>(null);
   dragRef.current = drag;
@@ -125,6 +149,10 @@ export const ChordTimeline: React.FC = () => {
       const state = dragRef.current;
       if (!state) return;
 
+      const currentProject = projectStore.getState().project;
+      if (!currentProject) return;
+      const currentBars = currentProject.bars;
+
       // Hit-test rather than track the origin lane, so a block can be dragged
       // into a different bar.
       const lane = document
@@ -133,24 +161,71 @@ export const ChordTimeline: React.FC = () => {
       if (!lane) return;
 
       const barId = lane.getAttribute(LANE_ATTRIBUTE)!;
+      const barIndex = currentBars.findIndex(bar => bar.id === barId);
+      if (barIndex < 0) return;
+
+      const grabbed = state.origins.get(state.segmentId);
+      if (!grabbed) return;
+
+      // The grabbed block follows the pointer; everything else in the selection
+      // keeps its offset from it, so the shape of the selection is preserved.
       const startBeat = snapBeat(beatIn(lane, e.clientX) - state.grabOffset, snapBeats);
+      const origins = [...state.origins.values()];
+
+      // Clamp the delta once for the whole selection, never each block's landing
+      // separately. Per-block clamping collapses blocks onto the same beat, and the
+      // commit then ripples them apart again in reverse order — drag four blocks
+      // hard against the bar line and they come back reversed. Holding the delta
+      // instead keeps the selection's shape, so the preview and the commit agree.
+      const barDelta = clamp(
+        barIndex - grabbed.barIndex,
+        -Math.min(...origins.map(o => o.barIndex)),
+        currentBars.length - 1 - Math.max(...origins.map(o => o.barIndex))
+      );
+
+      let low = -Infinity;
+      let high = Infinity;
+      for (const origin of origins) {
+        const target = currentBars[origin.barIndex + barDelta];
+        const capacity = getBarBeats(target, currentProject.timeSignature);
+        low = Math.max(low, -origin.startBeat);
+        high = Math.min(high, capacity - origin.duration - origin.startBeat);
+      }
+      // A block that already overruns its bar would invert the window; the start of
+      // the bar wins, and the refit sorts out the overflow as it always has.
+      const beatDelta = clamp(startBeat - grabbed.startBeat, low, Math.max(low, high));
+
+      const preview = new Map<string, SegmentPlacement>();
+      for (const [segmentId, origin] of state.origins) {
+        preview.set(segmentId, {
+          barIndex: origin.barIndex + barDelta,
+          startBeat: origin.startBeat + beatDelta,
+        });
+      }
+
       const moved =
         state.moved ||
-        barId !== state.barId ||
-        Math.abs(startBeat - state.startBeat) * PIXELS_PER_BEAT > DRAG_THRESHOLD_PX;
+        barDelta !== 0 ||
+        Math.abs(beatDelta) * PIXELS_PER_BEAT > DRAG_THRESHOLD_PX;
 
-      setDrag({ ...state, barId, startBeat, moved });
+      setDrag({ ...state, preview, moved });
     };
 
     const handleUp = () => {
       const state = dragRef.current;
       setDrag(null);
-      if (!state) return;
+      if (!state || !state.moved) return;
 
-      draggedRef.current = state.moved;
-      if (state.moved) {
-        moveSegment(state.segmentId, state.barId, state.startBeat);
-      }
+      const currentBars = projectStore.getState().project?.bars;
+      if (!currentBars) return;
+
+      moveSegments(
+        [...state.preview].map(([segmentId, placement]) => ({
+          segmentId,
+          targetBarId: currentBars[placement.barIndex].id,
+          startBeat: placement.startBeat,
+        }))
+      );
     };
 
     window.addEventListener('pointermove', handleMove);
@@ -159,7 +234,7 @@ export const ChordTimeline: React.FC = () => {
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
     };
-  }, [snapBeats, moveSegment]);
+  }, [snapBeats, moveSegments]);
 
   /** Absolute beat under a viewport x coordinate, snapped to the editing grid. */
   const rulerBeatAt = useCallback(
@@ -224,6 +299,16 @@ export const ChordTimeline: React.FC = () => {
       element.scrollLeft = scrollX;
     }
   }, [scrollX]);
+
+  // Nothing tells the selection when a block is deleted, so it would otherwise keep
+  // a dead id and arm the keyboard shortcuts over nothing. Only write on a real
+  // shrink, or this loops against its own update.
+  useEffect(() => {
+    if (!project || selectedSegmentIds.length === 0) return;
+    const live = new Set(flattenSegments(project.bars).map(s => s.id));
+    const kept = selectedSegmentIds.filter(id => live.has(id));
+    if (kept.length !== selectedSegmentIds.length) setSelectedSegments(kept);
+  }, [project, selectedSegmentIds, setSelectedSegments]);
 
   if (!project) return null;
 
@@ -296,13 +381,70 @@ export const ChordTimeline: React.FC = () => {
     selectBar(bar.id);
   };
 
+  /** Where a block sits, by id, across the whole project — the drag's starting point. */
+  const placementOf = (segmentId: string): DragOrigin | null => {
+    const barIndex = bars.findIndex(bar => bar.chords.some(c => c.id === segmentId));
+    if (barIndex < 0) return null;
+    const segment = bars[barIndex].chords.find(c => c.id === segmentId)!;
+    return { barIndex, startBeat: segment.startBeat ?? 0, duration: segment.duration };
+  };
+
+  /**
+   * Press on a block: resolve the selection, then arm a drag for everything in it.
+   *
+   * Ctrl/Cmd toggles and Shift extends, and neither begins a drag — those gestures
+   * are about *changing* the selection, and dragging on them reads as an accident.
+   * A plain press on a block that is already selected keeps the selection intact,
+   * which is what lets a multi-selection be dragged as a unit.
+   */
   const handleMoveStart = (
     e: React.PointerEvent,
     bar: Bar,
     segment: ChordSegment,
     startBeat: number
   ) => {
-    draggedRef.current = false;
+    if (e.ctrlKey || e.metaKey) {
+      toggleSegment(segment.id);
+      selectBar(bar.id);
+      return;
+    }
+
+    // Read the selection live rather than from the render closure: a press is the
+    // start of a gesture that acts on whatever is selected *now*.
+    const current = selectionStore.getState().selectedSegmentIds;
+
+    if (e.shiftKey) {
+      const order = flattenSegments(bars).map(s => s.id);
+      const anchor = selectionStore.getState().anchorSegmentId;
+      const from = anchor ? order.indexOf(anchor) : -1;
+      const to = order.indexOf(segment.id);
+      setSelectedSegments(
+        from < 0
+          ? [segment.id]
+          : order.slice(Math.min(from, to), Math.max(from, to) + 1)
+      );
+      selectBar(bar.id);
+      return;
+    }
+
+    // Keep a multi-selection the user is about to drag; otherwise this block alone.
+    const dragged = current.includes(segment.id) ? current : [segment.id];
+    if (current.includes(segment.id)) {
+      // The selection stands, but the block just pressed is where the next Shift
+      // range measures from — otherwise the anchor sticks to a stale block.
+      anchorSegment(segment.id);
+    } else {
+      selectSegment(segment.id);
+    }
+    selectBar(bar.id);
+
+    const origins = new Map<string, DragOrigin>();
+    for (const id of dragged) {
+      const placement = placementOf(id);
+      if (placement) origins.set(id, placement);
+    }
+    if (!origins.has(segment.id)) return;
+
     const lane = (e.target as Element).closest(`[${LANE_ATTRIBUTE}]`);
     const pointerBeat = lane
       ? Math.max(0, (e.clientX - lane.getBoundingClientRect().left) / PIXELS_PER_BEAT)
@@ -311,8 +453,8 @@ export const ChordTimeline: React.FC = () => {
     setDrag({
       segmentId: segment.id,
       grabOffset: pointerBeat - startBeat,
-      barId: bar.id,
-      startBeat,
+      origins,
+      preview: new Map<string, SegmentPlacement>(origins),
       moved: false,
     });
   };
@@ -323,17 +465,31 @@ export const ChordTimeline: React.FC = () => {
   };
 
   /**
-   * The blocks a lane draws: its own, with the one being dragged pulled out and
-   * re-drawn wherever the pointer currently puts it — which may be another lane.
+   * The blocks a lane draws: its own, with any being dragged re-drawn wherever the
+   * pointer currently puts them — which may be another lane.
+   *
+   * A block that stays in its own lane keeps its position in the array. That is not
+   * cosmetic: reordering here moves the DOM node, and a node that moves between a
+   * pointerdown and a pointerup takes the click event with it. Blocks that lift
+   * above their neighbours do so via z-index instead.
    */
-  const laneSegments = (bar: Bar): ChordSegment[] => {
+  const laneSegments = (bar: Bar, barIndex: number): ChordSegment[] => {
     if (!drag) return bar.chords;
 
-    const dragged = bars.flatMap(b => b.chords).find(s => s.id === drag.segmentId);
-    const own = bar.chords.filter(s => s.id !== drag.segmentId);
-    return dragged && drag.barId === bar.id
-      ? [...own, { ...dragged, startBeat: drag.startBeat }]
-      : own;
+    const at = (segmentId: string) => drag.preview.get(segmentId);
+
+    const own = bar.chords
+      .filter(s => (at(s.id) ? at(s.id)!.barIndex === barIndex : true))
+      .map(s => (at(s.id) ? { ...s, startBeat: at(s.id)!.startBeat } : s));
+
+    // Blocks dragged in from another bar, which this lane has no copy of yet.
+    const incoming = bars
+      .filter((_, index) => index !== barIndex)
+      .flatMap(other => other.chords)
+      .filter(s => at(s.id)?.barIndex === barIndex)
+      .map(s => ({ ...s, startBeat: at(s.id)!.startBeat }));
+
+    return [...own, ...incoming];
   };
 
   return (
@@ -482,7 +638,13 @@ export const ChordTimeline: React.FC = () => {
               <div
                 data-testid={`timeline-lane-${bar.id}`}
                 data-timeline-lane={bar.id}
-                onClick={() => selectBar(bar.id)}
+                // A press on empty lane space selects the bar and drops the block
+                // selection — the discoverable way out of a multi-selection. Blocks
+                // stop propagation, so this only ever hears the background.
+                onPointerDown={() => {
+                  selectBar(bar.id);
+                  clearSegmentSelection();
+                }}
                 onDragOver={e => handleDragOver(e, bar)}
                 onDrop={e => handleDrop(e, bar)}
                 className="relative h-20 bg-gray-900"
@@ -518,21 +680,18 @@ export const ChordTimeline: React.FC = () => {
                   />
                 )}
 
-                {laneSegments(bar).map(segment => {
+                {laneSegments(bar, barIndex).map(segment => {
                   const startBeat = segment.startBeat ?? 0;
 
                   return (
                     <ChordSegmentBlock
                       key={segment.id}
                       segment={segment}
-                      isSelected={selectedSegmentId === segment.id}
-                      isDragging={drag?.segmentId === segment.id}
+                      isSelected={selectedSegmentIds.includes(segment.id)}
+                      isDragging={drag?.preview.has(segment.id) ?? false}
                       startBeat={startBeat}
                       pixelsPerBeat={PIXELS_PER_BEAT}
                       onSelect={id => {
-                        // A drag ends in a click too; only a still pointer selects.
-                        if (draggedRef.current) return;
-                        // Bar first: selecting a new bar drops the segment selection.
                         selectBar(bar.id);
                         selectSegment(id);
                       }}

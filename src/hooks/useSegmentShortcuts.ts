@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
+import { flattenSegments } from '@/engine/timeline';
 
 /** True for the elements that own their own arrow keys — selects, text fields. */
 function isTextEntry(target: EventTarget | null): boolean {
@@ -14,13 +15,18 @@ function isTextEntry(target: EventTarget | null): boolean {
 }
 
 /**
- * Keyboard shortcuts that edit the pitch of the selected timeline segment.
+ * Keyboard shortcuts that act on the timeline's selected segments.
  *
  * | Key | Note | Chord |
  * | --- | --- | --- |
  * | `↑` `↓` | next / previous note of the bar's scale | next / previous scale degree |
  * | `+` `-` | pitch ± an octave | register ± 1 |
  * | `i` | — | cycle inversion, wrapping to root position |
+ * | `Ctrl/Cmd+A` | select every block in the project | |
+ * | `Esc` | clear the selection | |
+ *
+ * Every edit applies to the whole selection in one store write, so a keypress is
+ * one visual step and one undo entry however many blocks are selected.
  *
  * Bound to the window rather than to the block's own `onKeyDown`, because the
  * shortcut follows *selection*, not DOM focus: a block stays selected after a
@@ -29,39 +35,59 @@ function isTextEntry(target: EventTarget | null): boolean {
  * start-beat context only it has.
  */
 export function useSegmentShortcuts(): void {
-  const selectedSegmentId = selectionStore(s => s.selectedSegmentId);
-  const stepSegmentPitch = projectStore(s => s.stepSegmentPitch);
-  const shiftSegmentOctave = projectStore(s => s.shiftSegmentOctave);
-  const cycleSegmentInversion = projectStore(s => s.cycleSegmentInversion);
+  const selectedSegmentIds = selectionStore(s => s.selectedSegmentIds);
+  const setSelectedSegments = selectionStore(s => s.setSelectedSegments);
+  const clearSegmentSelection = selectionStore(s => s.clearSegmentSelection);
+  const stepSegmentsPitch = projectStore(s => s.stepSegmentsPitch);
+  const shiftSegmentsOctave = projectStore(s => s.shiftSegmentsOctave);
+  const cycleSegmentsInversion = projectStore(s => s.cycleSegmentsInversion);
 
   useEffect(() => {
-    if (!selectedSegmentId) return;
-
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Leave the snap, octave and time-signature dropdowns their arrow keys, and
-      // let Ctrl/Cmd combinations through to the shortcuts that own them.
-      if (isTextEntry(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+      // Leave the snap, octave and time-signature dropdowns their own keys.
+      if (isTextEntry(e.target)) return;
+
+      // Select-all comes first: it is the one shortcut here that both carries a
+      // modifier and works from an empty selection.
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'a' || e.key === 'A')) {
+        const project = projectStore.getState().project;
+        if (!project) return;
+        setSelectedSegments(flattenSegments(project.bars).map(s => s.id));
+        e.preventDefault();
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        clearSegmentSelection();
+        e.preventDefault();
+        return;
+      }
+
+      // Let the remaining Ctrl/Cmd combinations through to the shortcuts that own
+      // them — undo/redo, above all.
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (selectedSegmentIds.length === 0) return;
 
       switch (e.key) {
         case 'ArrowUp':
-          stepSegmentPitch(selectedSegmentId, 1);
+          stepSegmentsPitch(selectedSegmentIds, 1);
           break;
         case 'ArrowDown':
-          stepSegmentPitch(selectedSegmentId, -1);
+          stepSegmentsPitch(selectedSegmentIds, -1);
           break;
         // '=' and '_' are the unshifted twins of '+' and '-' on most layouts, and
         // reaching for either plainly means the same thing.
         case '+':
         case '=':
-          shiftSegmentOctave(selectedSegmentId, 1);
+          shiftSegmentsOctave(selectedSegmentIds, 1);
           break;
         case '-':
         case '_':
-          shiftSegmentOctave(selectedSegmentId, -1);
+          shiftSegmentsOctave(selectedSegmentIds, -1);
           break;
         case 'i':
         case 'I':
-          cycleSegmentInversion(selectedSegmentId);
+          cycleSegmentsInversion(selectedSegmentIds);
           break;
         default:
           return;
@@ -72,5 +98,12 @@ export function useSegmentShortcuts(): void {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedSegmentId, stepSegmentPitch, shiftSegmentOctave, cycleSegmentInversion]);
+  }, [
+    selectedSegmentIds,
+    setSelectedSegments,
+    clearSegmentSelection,
+    stepSegmentsPitch,
+    shiftSegmentsOctave,
+    cycleSegmentsInversion,
+  ]);
 }

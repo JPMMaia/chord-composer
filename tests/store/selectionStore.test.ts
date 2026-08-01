@@ -1,45 +1,88 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { selectionStore } from '@/store/selectionStore';
+import { selectionStore, soleSelectedSegmentId } from '@/store/selectionStore';
+
+const state = () => selectionStore.getState();
 
 describe('selectionStore', () => {
   beforeEach(() => {
-    selectionStore.getState().clearSelection();
+    state().clearSelection();
   });
 
   it('starts with nothing selected', () => {
-    expect(selectionStore.getState().selectedBarId).toBeNull();
-    expect(selectionStore.getState().selectedSegmentId).toBeNull();
+    expect(state().selectedBarId).toBeNull();
+    expect(state().selectedSegmentIds).toEqual([]);
   });
 
   it('selects a bar', () => {
-    selectionStore.getState().selectBar('bar-1');
-    expect(selectionStore.getState().selectedBarId).toBe('bar-1');
+    state().selectBar('bar-1');
+    expect(state().selectedBarId).toBe('bar-1');
   });
 
-  it('selects a segment', () => {
-    selectionStore.getState().selectSegment('seg-1');
-    expect(selectionStore.getState().selectedSegmentId).toBe('seg-1');
+  it('selects a segment, replacing whatever was selected', () => {
+    state().setSelectedSegments(['seg-1', 'seg-2']);
+    state().selectSegment('seg-3');
+    expect(state().selectedSegmentIds).toEqual(['seg-3']);
   });
 
-  it('clears the segment selection when a different bar is selected', () => {
-    selectionStore.getState().selectBar('bar-1');
-    selectionStore.getState().selectSegment('seg-1');
-    selectionStore.getState().selectBar('bar-2');
-    expect(selectionStore.getState().selectedSegmentId).toBeNull();
+  it('keeps the segment selection when a different bar is selected', () => {
+    // A Ctrl- or Shift-click selection spans bars, so moving the bar cursor must
+    // not disturb it.
+    state().selectBar('bar-1');
+    state().setSelectedSegments(['seg-1', 'seg-2']);
+    state().selectBar('bar-2');
+    expect(state().selectedSegmentIds).toEqual(['seg-1', 'seg-2']);
   });
 
-  it('keeps the segment selection when the same bar is re-selected', () => {
-    selectionStore.getState().selectBar('bar-1');
-    selectionStore.getState().selectSegment('seg-1');
-    selectionStore.getState().selectBar('bar-1');
-    expect(selectionStore.getState().selectedSegmentId).toBe('seg-1');
+  it('toggles a segment in and back out of the selection', () => {
+    state().selectSegment('seg-1');
+    state().toggleSegment('seg-2');
+    expect(state().selectedSegmentIds).toEqual(['seg-1', 'seg-2']);
+
+    state().toggleSegment('seg-1');
+    expect(state().selectedSegmentIds).toEqual(['seg-2']);
+  });
+
+  it('never holds the same segment twice', () => {
+    state().setSelectedSegments(['seg-1', 'seg-1', 'seg-2']);
+    expect(state().selectedSegmentIds).toEqual(['seg-1', 'seg-2']);
+  });
+
+  it('anchors a range at the last segment picked on its own', () => {
+    state().selectSegment('seg-1');
+    expect(state().anchorSegmentId).toBe('seg-1');
+
+    state().toggleSegment('seg-3');
+    expect(state().anchorSegmentId).toBe('seg-3');
+
+    // Removing a block is a poor place to measure the next range from.
+    state().toggleSegment('seg-3');
+    expect(state().anchorSegmentId).toBe('seg-3');
+  });
+
+  it('clears the segment selection without touching the bar', () => {
+    state().selectBar('bar-1');
+    state().setSelectedSegments(['seg-1', 'seg-2']);
+    state().clearSegmentSelection();
+    expect(state().selectedSegmentIds).toEqual([]);
+    expect(state().anchorSegmentId).toBeNull();
+    expect(state().selectedBarId).toBe('bar-1');
   });
 
   it('clears both selections', () => {
-    selectionStore.getState().selectBar('bar-1');
-    selectionStore.getState().selectSegment('seg-1');
-    selectionStore.getState().clearSelection();
-    expect(selectionStore.getState().selectedBarId).toBeNull();
-    expect(selectionStore.getState().selectedSegmentId).toBeNull();
+    state().selectBar('bar-1');
+    state().selectSegment('seg-1');
+    state().clearSelection();
+    expect(state().selectedBarId).toBeNull();
+    expect(state().selectedSegmentIds).toEqual([]);
+  });
+
+  it('reports a sole selection only when exactly one segment is selected', () => {
+    expect(soleSelectedSegmentId(state())).toBeNull();
+
+    state().selectSegment('seg-1');
+    expect(soleSelectedSegmentId(selectionStore.getState())).toBe('seg-1');
+
+    state().toggleSegment('seg-2');
+    expect(soleSelectedSegmentId(selectionStore.getState())).toBeNull();
   });
 });

@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { projectStore } from '@/store/projectStore';
-import { selectionStore } from '@/store/selectionStore';
+import { selectionStore, soleSelectedSegmentId } from '@/store/selectionStore';
 import { Transport } from '@/components/Transport';
 import { FileMenu } from '@/components/FileMenu';
 import { InstrumentsPanel } from '@/components/InstrumentsPanel';
@@ -52,7 +52,9 @@ function App() {
   const updateBarScale = projectStore(s => s.updateBarScale);
 
   const selectedBarId = selectionStore(s => s.selectedBarId);
-  const selectedSegmentId = selectionStore(s => s.selectedSegmentId);
+  // The inspector speaks about one block, so it shows nothing while several are
+  // selected — the keyboard shortcuts are what act on the whole selection.
+  const selectedSegmentId = selectionStore(soleSelectedSegmentId);
   const selectBar = selectionStore(s => s.selectBar);
 
   const toggleLoopEnabled = projectStore(s => s.toggleLoopEnabled);

@@ -35,6 +35,13 @@ import {
   DEFAULT_KEY_MODE,
 } from '@/utils/constants';
 
+/** One block's destination in a batch move. */
+export interface SegmentMove {
+  segmentId: string;
+  targetBarId: string;
+  startBeat: number;
+}
+
 interface ProjectState {
   project: Project | null;
   createProject: () => void;
@@ -49,10 +56,14 @@ interface ProjectState {
   insertSegment: (barId: string, startBeat: number, segment: ChordSegment) => void;
   removeSegment: (segmentId: string) => void;
   moveSegment: (segmentId: string, targetBarId: string, startBeat: number) => void;
+  moveSegments: (moves: SegmentMove[]) => void;
   resizeSegmentDuration: (segmentId: string, duration: number) => void;
   stepSegmentPitch: (segmentId: string, direction: -1 | 1) => void;
   shiftSegmentOctave: (segmentId: string, direction: -1 | 1) => void;
   cycleSegmentInversion: (segmentId: string) => void;
+  stepSegmentsPitch: (segmentIds: string[], direction: -1 | 1) => void;
+  shiftSegmentsOctave: (segmentIds: string[], direction: -1 | 1) => void;
+  cycleSegmentsInversion: (segmentIds: string[]) => void;
   setLoopRegion: (start: number | null, end: number | null) => void;
   toggleLoopEnabled: () => void;
   resetProject: () => void;
@@ -114,33 +125,39 @@ function placedIn(bar: Bar, segment: ChordSegment, startBeat: number, capacity: 
 }
 
 /**
- * Rewrite a single segment in place, leaving where it sits alone.
+ * Rewrite segments in place, leaving where they sit alone.
  *
- * The transform is handed the scale of the bar the segment actually lives in,
- * which is what lets "the next note of the scale" mean the right thing in a
- * project whose bars are in different keys. Only the derived notes are resynced:
- * none of these edits moves a block along the timeline, so unlike `applyBars`
- * there is nothing here for `refitBars` to refit.
+ * Each transform is handed the scale of the bar that segment actually lives in,
+ * which is what lets "the next note of the scale" mean the right thing when a
+ * multi-selection spans bars in different keys. Only the derived notes are
+ * resynced: none of these edits moves a block along the timeline, so unlike
+ * `applyBars` there is nothing here for `refitBars` to refit.
  *
- * Returns null when no bar holds the segment, so the caller can leave the store
- * untouched rather than publishing an identical project.
+ * The whole selection is rewritten in one pass so a keypress is one visual step
+ * and one history entry rather than one per block.
+ *
+ * Returns null when no bar holds any of the segments, so the caller can leave the
+ * store untouched rather than publishing an identical project.
  */
-function withTransformedSegment(
+function withTransformedSegments(
   project: Project,
-  segmentId: string,
+  segmentIds: string[],
   transform: (segment: ChordSegment, scale: Scale) => ChordSegment
 ): Project | null {
-  const owner = project.bars.find(b => b.chords.some(c => c.id === segmentId));
-  if (!owner) return null;
+  const targets = new Set(segmentIds);
+  if (targets.size === 0) return null;
 
-  const bars = project.bars.map(bar =>
-    bar.id === owner.id
-      ? {
-          ...bar,
-          chords: bar.chords.map(c => (c.id === segmentId ? transform(c, bar.scale) : c)),
-        }
-      : bar
-  );
+  let matched = false;
+  const bars = project.bars.map(bar => {
+    if (!bar.chords.some(c => targets.has(c.id))) return bar;
+    matched = true;
+    return {
+      ...bar,
+      chords: bar.chords.map(c => (targets.has(c.id) ? transform(c, bar.scale) : c)),
+    };
+  });
+
+  if (!matched) return null;
 
   return {
     ...project,
@@ -363,27 +380,60 @@ export const projectStore = create<ProjectState>((set, get) => ({
   },
 
   moveSegment: (segmentId: string, targetBarId: string, startBeat: number) => {
+    get().moveSegments([{ segmentId, targetBarId, startBeat }]);
+  },
+
+  /**
+   * Reposition several blocks at once — what dragging a multi-selection commits.
+   *
+   * Every moved block is lifted out first, so blocks in the same bar never ripple
+   * against stale copies of themselves or of each other. They are then placed in
+   * ascending destination order, which makes the ripple deterministic regardless
+   * of the order the caller listed them in, and the whole batch ends in a single
+   * refit — one visual step, one history entry.
+   */
+  moveSegments: (moves: SegmentMove[]) => {
     const project = get().project;
     if (!project) return;
+    if (moves.length === 0) return;
 
-    const source = project.bars.find(b => b.chords.some(c => c.id === segmentId));
-    const target = project.bars.find(b => b.id === targetBarId);
-    if (!source || !target) return;
+    const barIndexById = new Map(project.bars.map((bar, index) => [bar.id, index]));
 
-    const moved = source.chords.find(c => c.id === segmentId)!;
-    const capacity = getBarBeats(target, project.timeSignature);
+    // Drop moves whose block or destination no longer exists rather than failing
+    // the whole gesture: a stale selection is a sloppy state, not an error.
+    const resolved = moves
+      .map(move => ({
+        move,
+        segment: project.bars
+          .flatMap(bar => withStartBeats(bar.chords))
+          .find(c => c.id === move.segmentId),
+      }))
+      .filter(
+        (entry): entry is { move: SegmentMove; segment: ChordSegment } =>
+          entry.segment !== undefined && barIndexById.has(entry.move.targetBarId)
+      );
+    if (resolved.length === 0) return;
 
-    // Lift it out of its old bar first, so a move within one bar does not see a
-    // stale copy of itself to ripple against.
-    const lifted = project.bars.map(bar =>
-      bar.id === source.id
-        ? { ...bar, chords: removeSegmentById(withStartBeats(bar.chords), segmentId) }
-        : bar
+    const movedIds = new Set(resolved.map(entry => entry.move.segmentId));
+    let bars = project.bars.map(bar => ({
+      ...bar,
+      chords: withStartBeats(bar.chords).filter(c => !movedIds.has(c.id)),
+    }));
+
+    const ordered = [...resolved].sort(
+      (a, b) =>
+        barIndexById.get(a.move.targetBarId)! - barIndexById.get(b.move.targetBarId)! ||
+        a.move.startBeat - b.move.startBeat
     );
 
-    const bars = mapBar(lifted, targetBarId, bar =>
-      placedIn(bar, moved, startBeat, capacity)
-    );
+    for (const { move, segment } of ordered) {
+      const target = bars.find(bar => bar.id === move.targetBarId)!;
+      const capacity = getBarBeats(target, project.timeSignature);
+      bars = mapBar(bars, move.targetBarId, bar =>
+        placedIn(bar, segment, move.startBeat, capacity)
+      );
+    }
+
     set({ project: applyBars(project, bars) });
   },
 
@@ -405,32 +455,45 @@ export const projectStore = create<ProjectState>((set, get) => ({
     set({ project: applyBars(project, bars) });
   },
 
-  /** Move the segment one step along its bar's scale — the up and down arrows. */
-  stepSegmentPitch: (segmentId: string, direction: -1 | 1) => {
+  /** Move every named segment one step along its own bar's scale — the up and down arrows. */
+  stepSegmentsPitch: (segmentIds: string[], direction: -1 | 1) => {
     const project = get().project;
     if (!project) return;
-    const next = withTransformedSegment(project, segmentId, (segment, scale) =>
+    const next = withTransformedSegments(project, segmentIds, (segment, scale) =>
       stepSegmentInScale(segment, scale, direction)
     );
     if (next) set({ project: next });
   },
 
-  /** Move the segment a whole octave — the + and - keys. */
-  shiftSegmentOctave: (segmentId: string, direction: -1 | 1) => {
+  /** Move every named segment a whole octave — the + and - keys. */
+  shiftSegmentsOctave: (segmentIds: string[], direction: -1 | 1) => {
     const project = get().project;
     if (!project) return;
-    const next = withTransformedSegment(project, segmentId, segment =>
+    const next = withTransformedSegments(project, segmentIds, segment =>
       shiftSegmentOctave(segment, direction)
     );
     if (next) set({ project: next });
   },
 
-  /** Advance a chord to its next inversion, wrapping to root position — the `i` key. */
-  cycleSegmentInversion: (segmentId: string) => {
+  /** Advance each chord to its next inversion, wrapping to root position — the `i` key. */
+  cycleSegmentsInversion: (segmentIds: string[]) => {
     const project = get().project;
     if (!project) return;
-    const next = withTransformedSegment(project, segmentId, cycleSegmentInversion);
+    const next = withTransformedSegments(project, segmentIds, cycleSegmentInversion);
     if (next) set({ project: next });
+  },
+
+  // The single-segment forms, kept because plenty of callers only ever have one.
+  stepSegmentPitch: (segmentId: string, direction: -1 | 1) => {
+    get().stepSegmentsPitch([segmentId], direction);
+  },
+
+  shiftSegmentOctave: (segmentId: string, direction: -1 | 1) => {
+    get().shiftSegmentsOctave([segmentId], direction);
+  },
+
+  cycleSegmentInversion: (segmentId: string) => {
+    get().cycleSegmentsInversion([segmentId]);
   },
 
   resetProject: () => {

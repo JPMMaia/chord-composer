@@ -79,6 +79,24 @@ function dragBlock(segmentId: string, toBarId: string, fromBeat: number, toBeat:
   fireEvent.pointerUp(window, { clientX: toBeat * PIXELS_PER_BEAT, pointerId: 1 });
 }
 
+/** The ids currently selected, in selection order. */
+function selected(): string[] {
+  return selectionStore.getState().selectedSegmentIds;
+}
+
+/**
+ * Press a block, the gesture that selects it. Selection happens on pointerdown, not
+ * on click, so that no re-render can move the node out from under the gesture.
+ */
+function press(segmentId: string, modifiers: Partial<PointerEventInit> = {}) {
+  fireEvent.pointerDown(screen.getByTestId(`chord-block-${segmentId}`), {
+    clientX: 0,
+    pointerId: 1,
+    ...modifiers,
+  });
+  fireEvent.pointerUp(window, { clientX: 0, pointerId: 1 });
+}
+
 describe('ChordTimeline', () => {
   const originalElementFromPoint = document.elementFromPoint;
 
@@ -284,19 +302,19 @@ describe('ChordTimeline', () => {
       expect(segments()[0].startBeat).toBe(2);
     });
 
-    it('does not select the block when the gesture was a drag', () => {
+    it('selects the block it grabbed, so the drag and the selection agree', () => {
       render(<ChordTimeline />);
       dropAt(bars()[0].id, cMajorChords()[0], 0);
       const id = segments()[0].id;
       selectionStore.getState().clearSelection();
 
       dragBlock(id, bars()[0].id, 0, 2);
-      fireEvent.click(screen.getByTestId(`chord-block-${id}`));
 
-      expect(selectionStore.getState().selectedSegmentId).toBeNull();
+      expect(selected()).toEqual([id]);
+      expect(segments()[0].startBeat).toBe(2);
     });
 
-    it('still selects on a click that never moved', () => {
+    it('selects on a press that never moved', () => {
       render(<ChordTimeline />);
       dropAt(bars()[0].id, cMajorChords()[0], 0);
       const id = segments()[0].id;
@@ -304,9 +322,176 @@ describe('ChordTimeline', () => {
       const block = screen.getByTestId(`chord-block-${id}`);
       fireEvent.pointerDown(block, { clientX: 0, pointerId: 1 });
       fireEvent.pointerUp(window, { clientX: 0, pointerId: 1 });
-      fireEvent.click(block);
 
-      expect(selectionStore.getState().selectedSegmentId).toBe(id);
+      expect(selected()).toEqual([id]);
+    });
+
+    it('moves every selected block by the same delta', () => {
+      render(<ChordTimeline />);
+      const items = cMajorChords();
+      dropAt(bars()[0].id, items[0], 0);
+      dropAt(bars()[0].id, items[4], 2);
+      const [first, second] = segments().map(s => s.id);
+      selectionStore.getState().setSelectedSegments([first, second]);
+
+      // Grab the first and pull it one beat right; the second must follow.
+      dragBlock(first, bars()[0].id, 0, 1);
+
+      expect(layout(0)).toEqual([`${first}@1`, `${second}@3`]);
+    });
+
+    it('carries a whole selection across a bar line', () => {
+      render(<ChordTimeline />);
+      const items = cMajorChords();
+      dropAt(bars()[0].id, items[0], 1);
+      dropAt(bars()[0].id, items[4], 2);
+      const [first, second] = segments().map(s => s.id);
+      selectionStore.getState().setSelectedSegments([first, second]);
+
+      dragBlock(first, bars()[1].id, 1, 0);
+
+      expect(bars()[0].chords).toHaveLength(0);
+      expect(layout(1)).toEqual([`${first}@0`, `${second}@1`]);
+    });
+
+    /** Four blocks filling bar 1, one per beat. */
+    function fullBar(): string[] {
+      const items = cMajorChords();
+      for (let beat = 0; beat < 4; beat++) dropAt(bars()[0].id, items[beat], beat);
+      return segments().map(s => s.id);
+    }
+
+    // Clamping each block's landing separately used to pile them onto the same beat,
+    // and the commit then rippled them apart in reverse: C D E F came back F E D C.
+    // The delta is what gets clamped, so the selection keeps its shape or stays put.
+    it('does not reverse a selection dragged into the bar line', () => {
+      render(<ChordTimeline />);
+      const ids = fullBar();
+      selectionStore.getState().setSelectedSegments(ids);
+
+      // Far past the end of the bar: the last block already sits against the line,
+      // so the whole selection has nowhere to go.
+      dragBlock(ids[0], bars()[0].id, 0, 6);
+
+      expect(layout(0)).toEqual(ids.map((id, beat) => `${id}@${beat}`));
+    });
+
+    it('keeps the order of a selection dragged past the start of the bar', () => {
+      render(<ChordTimeline />);
+      const items = cMajorChords();
+      dropAt(bars()[0].id, items[0], 1);
+      dropAt(bars()[0].id, items[1], 2);
+      dropAt(bars()[0].id, items[2], 3);
+      const ids = segments().map(s => s.id);
+      selectionStore.getState().setSelectedSegments(ids);
+
+      // Three beats left, but the leftmost block only has one to give.
+      dragBlock(ids[0], bars()[0].id, 1, -2);
+
+      expect(layout(0)).toEqual([`${ids[0]}@0`, `${ids[1]}@1`, `${ids[2]}@2`]);
+    });
+  });
+
+  describe('selecting several blocks', () => {
+    /** Three blocks in bar 1, at beats 0, 1 and 2. */
+    function threeBlocks(): string[] {
+      const items = cMajorChords();
+      dropAt(bars()[0].id, items[0], 0);
+      dropAt(bars()[0].id, items[1], 1);
+      dropAt(bars()[0].id, items[2], 2);
+      return segments().map(s => s.id);
+    }
+
+    // The reported bug: a press on any block but the last did nothing, because the
+    // drag preview reordered the lane and the browser retargeted the click to it.
+    // Selection now happens on pointerdown, which no re-render can move out from
+    // under the gesture.
+    it('selects any block in a bar, not only the last', () => {
+      render(<ChordTimeline />);
+      const [first, middle, last] = threeBlocks();
+
+      press(first);
+      expect(selected()).toEqual([first]);
+
+      press(middle);
+      expect(selected()).toEqual([middle]);
+
+      press(last);
+      expect(selected()).toEqual([last]);
+    });
+
+    it('adds and removes a block with Ctrl+click', () => {
+      render(<ChordTimeline />);
+      const [first, middle, last] = threeBlocks();
+
+      press(first);
+      press(last, { ctrlKey: true });
+      expect(selected()).toEqual([first, last]);
+
+      press(middle, { metaKey: true });
+      expect(selected()).toEqual([first, last, middle]);
+
+      press(last, { ctrlKey: true });
+      expect(selected()).toEqual([first, middle]);
+    });
+
+    it('selects an inclusive range with Shift+click, across bars', () => {
+      render(<ChordTimeline />);
+      const [first, middle, last] = threeBlocks();
+      dropAt(bars()[1].id, cMajorChords()[3], 0);
+      const fourth = segments()[3].id;
+
+      press(middle);
+      press(fourth, { shiftKey: true });
+
+      expect(selected()).toEqual([middle, last, fourth]);
+    });
+
+    it('keeps a multi-selection when one of its blocks is pressed', () => {
+      render(<ChordTimeline />);
+      const [first, middle, last] = threeBlocks();
+      selectionStore.getState().setSelectedSegments([first, last]);
+
+      press(last);
+      expect(selected()).toEqual([first, last]);
+
+      // A press on a block outside the selection replaces it.
+      press(middle);
+      expect(selected()).toEqual([middle]);
+    });
+
+    it('re-anchors a range on the last block pressed, selected or not', () => {
+      render(<ChordTimeline />);
+      const [first, middle, last] = threeBlocks();
+
+      // A press on a block that is already the whole selection changes nothing
+      // about it — but it is still where the next Shift range starts.
+      press(last);
+      press(last);
+      press(first, { shiftKey: true });
+
+      expect(selected()).toEqual([first, middle, last]);
+    });
+
+    it('clears the block selection on a press in empty lane space', () => {
+      render(<ChordTimeline />);
+      const [first, , last] = threeBlocks();
+      selectionStore.getState().setSelectedSegments([first, last]);
+
+      fireEvent.pointerDown(screen.getByTestId(`timeline-lane-${bars()[1].id}`));
+
+      expect(selected()).toEqual([]);
+      expect(selectionStore.getState().selectedBarId).toBe(bars()[1].id);
+    });
+
+    it('drops a deleted block from the selection', () => {
+      render(<ChordTimeline />);
+      const [first, middle, last] = threeBlocks();
+      selectionStore.getState().setSelectedSegments([first, middle, last]);
+
+      fireEvent.click(screen.getAllByLabelText('Remove segment')[1]);
+
+      expect(selected()).toEqual([first, last]);
     });
   });
 
@@ -374,20 +559,20 @@ describe('ChordTimeline', () => {
     );
   });
 
-  it('selects a bar when it is clicked', () => {
+  it('selects a bar when its lane is pressed', () => {
     render(<ChordTimeline />);
-    fireEvent.click(screen.getByTestId(`timeline-lane-${bars()[1].id}`));
+    fireEvent.pointerDown(screen.getByTestId(`timeline-lane-${bars()[1].id}`));
     expect(selectionStore.getState().selectedBarId).toBe(bars()[1].id);
   });
 
-  it('selects a segment when it is clicked', () => {
+  it('selects a segment when it is pressed, along with its bar', () => {
     render(<ChordTimeline />);
     dropAt(bars()[0].id, cMajorChords()[0], 0);
     const id = segments()[0].id;
 
-    fireEvent.click(screen.getByTestId(`chord-block-${id}`));
+    press(id);
 
-    expect(selectionStore.getState().selectedSegmentId).toBe(id);
+    expect(selected()).toEqual([id]);
     expect(selectionStore.getState().selectedBarId).toBe(bars()[0].id);
   });
 

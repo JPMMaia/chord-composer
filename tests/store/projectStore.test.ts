@@ -565,6 +565,145 @@ describe('projectStore', () => {
     });
   });
 
+  describe('moveSegments', () => {
+    const bars = () => projectStore.getState().project!.bars;
+
+    beforeEach(() => {
+      projectStore.getState().createProject();
+      projectStore.getState().addBar();
+      projectStore.getState().addBar();
+      appendSegment(chordSegment({ id: 'a' }));
+      appendSegment(chordSegment({ id: 'b' }));
+      appendSegment(chordSegment({ id: 'c' }));
+    });
+
+    it('moves several blocks in one call', () => {
+      projectStore.getState().moveSegments([
+        { segmentId: 'a', targetBarId: bars()[0].id, startBeat: 1 },
+        { segmentId: 'b', targetBarId: bars()[0].id, startBeat: 2 },
+      ]);
+      expect(layout(bars()[0])).toEqual(['a@1', 'b@2', 'c@3']);
+    });
+
+    it('swaps two blocks without either rippling the other', () => {
+      // Each lands where the other was. Lifting both out first is what makes this
+      // work: placed one at a time, the first would push the second aside.
+      projectStore.getState().moveSegments([
+        { segmentId: 'a', targetBarId: bars()[0].id, startBeat: 1 },
+        { segmentId: 'b', targetBarId: bars()[0].id, startBeat: 0 },
+      ]);
+      expect(layout(bars()[0])).toEqual(['b@0', 'a@1', 'c@2']);
+    });
+
+    it('is order-independent: the destinations decide the ripple', () => {
+      const listedBackwards = () => {
+        projectStore.getState().createProject();
+        projectStore.getState().addBar();
+        appendSegment(chordSegment({ id: 'a' }));
+        appendSegment(chordSegment({ id: 'b' }));
+        projectStore.getState().moveSegments([
+          { segmentId: 'b', targetBarId: bars()[0].id, startBeat: 3 },
+          { segmentId: 'a', targetBarId: bars()[0].id, startBeat: 2 },
+        ]);
+        return layout(bars()[0]);
+      };
+      expect(listedBackwards()).toEqual(['a@2', 'b@3']);
+    });
+
+    it('carries a selection into another bar together', () => {
+      projectStore.getState().moveSegments([
+        { segmentId: 'a', targetBarId: bars()[1].id, startBeat: 0 },
+        { segmentId: 'b', targetBarId: bars()[1].id, startBeat: 1 },
+      ]);
+      expect(layout(bars()[0])).toEqual(['c@2']);
+      expect(layout(bars()[1])).toEqual(['a@0', 'b@1']);
+    });
+
+    it('clamps each block inside its own destination bar', () => {
+      projectStore.getState().resizeSegmentDuration('a', 2);
+      projectStore.getState().moveSegments([
+        { segmentId: 'a', targetBarId: bars()[1].id, startBeat: 3.5 },
+      ]);
+      expect(layout(bars()[1])).toEqual(['a@2']);
+    });
+
+    it('regenerates notes once, for every bar the batch touched', () => {
+      projectStore.getState().moveSegments([
+        { segmentId: 'a', targetBarId: bars()[1].id, startBeat: 2 },
+      ]);
+      expect(bars()[1].notes.every(n => n.startBeat === 2)).toBe(true);
+      expect(bars()[0].notes.some(n => n.startBeat === 0)).toBe(false);
+    });
+
+    it('skips unknown ids rather than failing the whole gesture', () => {
+      projectStore.getState().moveSegments([
+        { segmentId: 'nope', targetBarId: bars()[0].id, startBeat: 3 },
+        { segmentId: 'a', targetBarId: 'no-such-bar', startBeat: 3 },
+        { segmentId: 'c', targetBarId: bars()[1].id, startBeat: 0 },
+      ]);
+      expect(layout(bars()[0])).toEqual(['a@0', 'b@1']);
+      expect(layout(bars()[1])).toEqual(['c@0']);
+    });
+
+    it('leaves the project untouched when nothing resolves', () => {
+      const before = projectStore.getState().project;
+      projectStore.getState().moveSegments([]);
+      projectStore
+        .getState()
+        .moveSegments([{ segmentId: 'nope', targetBarId: bars()[0].id, startBeat: 1 }]);
+      expect(projectStore.getState().project).toBe(before);
+    });
+  });
+
+  describe('multi-segment pitch edits', () => {
+    const bars = () => projectStore.getState().project!.bars;
+    const segmentOf = (id: string) =>
+      bars()
+        .flatMap(b => b.chords)
+        .find(c => c.id === id)!;
+
+    beforeEach(() => {
+      projectStore.getState().createProject();
+      projectStore.getState().addBar();
+      projectStore.getState().addBar();
+      appendSegment(chordSegment({ id: 'a' }));
+      projectStore.getState().updateBarScale(bars()[1].id, { root: 'G', type: 'major' });
+      projectStore
+        .getState()
+        .insertSegment(bars()[1].id, 0, chordSegment({ id: 'b', root: 'G', chordSymbol: 'G' }));
+    });
+
+    it('steps each segment within its own bar’s scale', () => {
+      projectStore.getState().stepSegmentsPitch(['a', 'b'], 1);
+      expect(segmentOf('a').root).toBe('D');
+      expect(segmentOf('b').root).toBe('A');
+    });
+
+    it('shifts every named segment an octave', () => {
+      projectStore.getState().shiftSegmentsOctave(['a', 'b'], 1);
+      expect(segmentOf('a').octave).toBe(5);
+      expect(segmentOf('b').octave).toBe(5);
+    });
+
+    it('cycles every named segment’s inversion', () => {
+      projectStore.getState().cycleSegmentsInversion(['a', 'b']);
+      expect(segmentOf('a').inversion).toBe(1);
+      expect(segmentOf('b').inversion).toBe(1);
+    });
+
+    it('ignores unknown ids, editing the ones it recognizes', () => {
+      projectStore.getState().stepSegmentsPitch(['nope', 'a'], 1);
+      expect(segmentOf('a').root).toBe('D');
+    });
+
+    it('leaves the project untouched when no id matches', () => {
+      const before = projectStore.getState().project;
+      projectStore.getState().stepSegmentsPitch(['nope'], 1);
+      projectStore.getState().stepSegmentsPitch([], 1);
+      expect(projectStore.getState().project).toBe(before);
+    });
+  });
+
   describe('resizeSegmentDuration', () => {
     beforeEach(() => {
       projectStore.getState().createProject();

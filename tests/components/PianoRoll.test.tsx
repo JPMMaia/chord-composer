@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render } from '@testing-library/react';
+import { render, fireEvent } from '@testing-library/react';
 import { PianoRoll } from '@/components/PianoRoll';
+import { pitchToPixel } from '@/engine/quantize';
 import { Bar } from '@/types/music';
 
 const mockBars: Bar[] = [
@@ -406,4 +407,174 @@ describe('PianoRoll', () => {
       );
     });
   });
+
+  describe('note placement across bars', () => {
+    const PIANO_KEYS_WIDTH = 80;
+    const ACTIVE_FILL = '#3b82f6';
+    const PIXELS_PER_BEAT = 10;
+
+    /** One note per bar, all on beat 0 of their own bar and all on the same pitch. */
+    const bars: Bar[] = [
+      { id: 'b0', barIndex: 0, scale: { root: 'C', type: 'major' }, chords: [],
+        notes: [{ id: 'n0', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }] },
+      { id: 'b1', barIndex: 1, scale: { root: 'C', type: 'major' }, chords: [],
+        notes: [{ id: 'n1', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }] },
+      { id: 'b2', barIndex: 2, scale: { root: 'C', type: 'major' }, chords: [],
+        notes: [{ id: 'n2', pitch: 60, startBeat: 1, duration: 1, velocity: 100 }] },
+    ];
+
+    interface Filled { color: string; x: number; w: number }
+
+    /**
+     * Record `fillRect` calls. Notes are the only thing drawn with a note colour, so
+     * filtering on fill style isolates them from the key bed and bar highlight.
+     */
+    function recordFills(): Filled[] {
+      const fills: Filled[] = [];
+      const ctx = {
+        strokeStyle: '',
+        fillStyle: '',
+        lineWidth: 0,
+        font: '',
+        clearRect: vi.fn(),
+        strokeRect: vi.fn(),
+        fillText: vi.fn(),
+        beginPath: vi.fn(),
+        moveTo: vi.fn(),
+        lineTo: vi.fn(),
+        stroke: vi.fn(),
+        fillRect: vi.fn((x: number, _y: number, w: number) => {
+          fills.push({ color: String(ctx.fillStyle), x, w });
+        }),
+      };
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+        ctx as unknown as CanvasRenderingContext2D
+      );
+      return fills;
+    }
+
+    function noteFills(selectedBarId: string, barsToRender = bars): Filled[] {
+      const fills = recordFills();
+      render(
+        <PianoRoll
+          bars={barsToRender}
+          selectedBarId={selectedBarId}
+          playheadBeat={0}
+          pixelsPerBeat={PIXELS_PER_BEAT}
+          pixelsPerOctave={120}
+          gridSize={0.25}
+          timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
+        />
+      );
+      // The key bed uses white/grey fills and the active bar a translucent blue; only
+      // notes use the two note colours.
+      return fills.filter(f => f.color.startsWith('#3b82f6') || f.color.startsWith('rgba(59, 130, 246, 0.3)'));
+    }
+
+    it('keeps other bars’ notes visible when a later bar is selected', () => {
+      // The reported bug: selecting bar 2 hid bar 1's notes entirely.
+      expect(noteFills('b1')).toHaveLength(3);
+      expect(noteFills('b0')).toHaveLength(3);
+    });
+
+    it('places each note in its own bar rather than all in bar 1', () => {
+      // Notes are stored bar-relative, so bar 1 beat 0, bar 2 beat 0 and bar 3 beat 1
+      // must land at absolute beats 0, 4 and 9 — the second bug was all three at 0.
+      const xs = noteFills('b0').map(f => f.x).sort((a, b) => a - b);
+      expect(xs).toEqual([0, 4, 9].map(b => PIANO_KEYS_WIDTH + b * PIXELS_PER_BEAT));
+    });
+
+    it('draws the selected bar’s notes in the active colour and the rest muted', () => {
+      const fills = noteFills('b1');
+      const active = fills.filter(f => f.color === ACTIVE_FILL);
+
+      expect(active).toHaveLength(1);
+      // Bar 2 starts at absolute beat 4.
+      expect(active[0].x).toBe(PIANO_KEYS_WIDTH + 4 * PIXELS_PER_BEAT);
+      expect(fills.filter(f => f.color !== ACTIVE_FILL)).toHaveLength(2);
+    });
+
+    it('draws the selected bar last so its notes are not covered', () => {
+      const fills = noteFills('b0');
+      expect(fills[fills.length - 1].color).toBe(ACTIVE_FILL);
+    });
+
+    it('accumulates bar starts across mixed meters', () => {
+      const mixed: Bar[] = [
+        { id: 'm0', barIndex: 0, timeSignature: { beatsPerMeasure: 3, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, chords: [],
+          notes: [{ id: 'x0', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }] },
+        { id: 'm1', barIndex: 1, timeSignature: { beatsPerMeasure: 4, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, chords: [],
+          notes: [{ id: 'x1', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }] },
+      ];
+      // Bar 2 starts on beat 3, not beat 4, because bar 1 is in 3/4.
+      const xs = noteFills('m0', mixed).map(f => f.x).sort((a, b) => a - b);
+      expect(xs).toEqual([0, 3].map(b => PIANO_KEYS_WIDTH + b * PIXELS_PER_BEAT));
+    });
+
+    it('scales note width with duration', () => {
+      const twoBeats: Bar[] = [
+        { id: 'd0', barIndex: 0, scale: { root: 'C', type: 'major' }, chords: [],
+          notes: [{ id: 'y0', pitch: 60, startBeat: 0, duration: 2, velocity: 100 }] },
+      ];
+      expect(noteFills('d0', twoBeats)[0].w).toBe(2 * PIXELS_PER_BEAT);
+    });
+  });
+
+  describe('note creation coordinates', () => {
+    const PIANO_KEYS_WIDTH = 80;
+    const PIXELS_PER_BEAT = 10;
+
+    const bars: Bar[] = [
+      { id: 'b0', barIndex: 0, scale: { root: 'C', type: 'major' }, chords: [], notes: [] },
+      { id: 'b1', barIndex: 1, scale: { root: 'C', type: 'major' }, chords: [], notes: [] },
+    ];
+
+    function clickAt(selectedBarId: string, beat: number, onNoteClick: () => void) {
+      const { container } = render(
+        <PianoRoll
+          bars={bars}
+          selectedBarId={selectedBarId}
+          playheadBeat={0}
+          pixelsPerBeat={PIXELS_PER_BEAT}
+          pixelsPerOctave={120}
+          gridSize={0.25}
+          timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
+          onNoteClick={onNoteClick}
+        />
+      );
+      const canvas = container.querySelector('canvas') as HTMLCanvasElement;
+      // Pitch 60 sits at a y the scale check accepts (C is in C major).
+      fireEvent.click(canvas, {
+        clientX: PIANO_KEYS_WIDTH + beat * PIXELS_PER_BEAT,
+        clientY: pitchToPixel(60, 120) + 1,
+      });
+    }
+
+    it('reports a beat relative to the selected bar, not the project', () => {
+      // Clicking absolute beat 5 with bar 2 selected is beat 1 *of that bar*, since a
+      // Note stores its position relative to its own bar.
+      const onNoteClick = vi.fn();
+      clickAt('b1', 5, onNoteClick);
+      expect(onNoteClick).toHaveBeenCalledWith('b1', 60, 1);
+    });
+
+    it('reports beat 0 for a click at the start of the selected bar', () => {
+      const onNoteClick = vi.fn();
+      clickAt('b1', 4, onNoteClick);
+      expect(onNoteClick).toHaveBeenCalledWith('b1', 60, 0);
+    });
+
+    it('ignores a click outside the selected bar instead of misplacing the note', () => {
+      const onNoteClick = vi.fn();
+      clickAt('b1', 1, onNoteClick);
+      expect(onNoteClick).not.toHaveBeenCalled();
+    });
+
+    it('ignores a click past the end of the selected bar', () => {
+      const onNoteClick = vi.fn();
+      clickAt('b0', 4, onNoteClick);
+      expect(onNoteClick).not.toHaveBeenCalled();
+    });
+  });
+
 });

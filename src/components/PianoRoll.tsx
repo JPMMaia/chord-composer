@@ -1,5 +1,5 @@
 import { useRef, useEffect, useCallback, useMemo } from 'react';
-import type { Bar, TimeSignature } from '@/types/music';
+import type { Bar, Note, TimeSignature } from '@/types/music';
 import {
   snapToGrid,
   beatToPixel,
@@ -25,6 +25,22 @@ export interface PianoRollProps {
   onNoteDrag?: (noteId: string, durationDelta: number) => void;
 }
 
+/**
+ * A note placed on the roll's timeline.
+ *
+ * `Note.startBeat` is measured from the start of its own bar, but the roll's x axis
+ * is the whole project — the same absolute-beat space the grid, bar lines and
+ * playhead use. Resolving that offset once here keeps drawing and hit-testing from
+ * disagreeing about where a note is.
+ */
+interface PositionedNote {
+  note: Note;
+  barId: string;
+  /** Beats from the start of the project. */
+  absoluteBeat: number;
+  isInSelectedBar: boolean;
+}
+
 interface DragState {
   isDragging: boolean;
   startX: number;
@@ -40,6 +56,10 @@ const DEFAULT_COLORS = {
   activeBar: 'rgba(59, 130, 246, 0.1)',
   noteFill: '#3b82f6',
   noteStroke: '#2563eb',
+  // Notes outside the selected bar stay visible for context but are muted, so it is
+  // still obvious which bar an edit would land in.
+  inactiveNoteFill: 'rgba(59, 130, 246, 0.3)',
+  inactiveNoteStroke: 'rgba(37, 99, 235, 0.45)',
   playhead: '#ef4444',
   blackKey: '#f0f0f0',
   whiteKey: '#ffffff',
@@ -74,10 +94,31 @@ export function PianoRoll({
     [bars, selectedBarId]
   );
 
-  const selectedBarNotes = useMemo(() => {
-    if (!selectedBar) return [];
-    return selectedBar.notes;
-  }, [selectedBar]);
+  /** Every note in the project, placed on the shared absolute-beat axis. */
+  const positionedNotes = useMemo<PositionedNote[]>(
+    () =>
+      bars.flatMap((bar, index) => {
+        const barStartBeat = getBarStartBeat(bars, index, timeSignature);
+        return bar.notes.map((note) => ({
+          note,
+          barId: bar.id,
+          absoluteBeat: barStartBeat + note.startBeat,
+          isInSelectedBar: bar.id === selectedBarId,
+        }));
+      }),
+    [bars, selectedBarId, timeSignature]
+  );
+
+  /** Only the selected bar's notes respond to clicks and drags. */
+  const selectedBarNotes = useMemo(
+    () => positionedNotes.filter((p) => p.isInSelectedBar),
+    [positionedNotes]
+  );
+
+  const selectedBarStartBeat = useMemo(() => {
+    if (!selectedBar) return 0;
+    return getBarStartBeat(bars, bars.indexOf(selectedBar), timeSignature);
+  }, [bars, selectedBar, timeSignature]);
 
   const scale = useMemo(() => {
     if (!selectedBar) return null;
@@ -156,18 +197,31 @@ export function PianoRoll({
         ctx.fillRect(x, 0, barWidth, height);
       }
 
-      for (const note of selectedBarNotes) {
-        const x = timelineStart + beatToPixel(note.startBeat, pixelsPerBeat);
+      // Every bar's notes are drawn, not just the selected one's. The selected bar
+      // goes last so its notes sit above any that overlap them.
+      const drawNote = ({ note, absoluteBeat, isInSelectedBar }: PositionedNote) => {
+        const x = timelineStart + beatToPixel(absoluteBeat, pixelsPerBeat);
         const y = pitchToPixel(note.pitch, pixelsPerOctave);
-        const noteWidth = beatToPixel(note.duration, pixelsPerBeat);
+        const noteWidth = Math.max(beatToPixel(note.duration, pixelsPerBeat), 2);
         const noteHeight = pixelsPerOctave / 12;
 
-        ctx.fillStyle = DEFAULT_COLORS.noteFill;
-        ctx.fillRect(x, y, Math.max(noteWidth, 2), noteHeight - 1);
+        ctx.fillStyle = isInSelectedBar
+          ? DEFAULT_COLORS.noteFill
+          : DEFAULT_COLORS.inactiveNoteFill;
+        ctx.fillRect(x, y, noteWidth, noteHeight - 1);
 
-        ctx.strokeStyle = DEFAULT_COLORS.noteStroke;
+        ctx.strokeStyle = isInSelectedBar
+          ? DEFAULT_COLORS.noteStroke
+          : DEFAULT_COLORS.inactiveNoteStroke;
         ctx.lineWidth = 1;
-        ctx.strokeRect(x, y, Math.max(noteWidth, 2), noteHeight - 1);
+        ctx.strokeRect(x, y, noteWidth, noteHeight - 1);
+      };
+
+      for (const positioned of positionedNotes) {
+        if (!positioned.isInSelectedBar) drawNote(positioned);
+      }
+      for (const positioned of positionedNotes) {
+        if (positioned.isInSelectedBar) drawNote(positioned);
       }
 
       const playheadX = timelineStart + beatToPixel(playheadBeat, pixelsPerBeat);
@@ -178,7 +232,7 @@ export function PianoRoll({
       ctx.lineTo(playheadX, height);
       ctx.stroke();
     },
-    [bars, selectedBar, selectedBarNotes, pixelsPerBeat, pixelsPerOctave, playheadBeat, timeSignature]
+    [bars, selectedBar, positionedNotes, pixelsPerBeat, pixelsPerOctave, playheadBeat, timeSignature]
   );
 
   useEffect(() => {
@@ -237,6 +291,33 @@ export function PianoRoll({
     };
   }, [render]);
 
+  /** The selected bar's note under a canvas point, if any. */
+  const noteAt = useCallback(
+    (x: number, y: number): PositionedNote | undefined =>
+      selectedBarNotes.find(({ note, absoluteBeat }) => {
+        const noteX = PIANO_KEYS_WIDTH + beatToPixel(absoluteBeat, pixelsPerBeat);
+        const noteY = pitchToPixel(note.pitch, pixelsPerOctave);
+        const noteWidth = beatToPixel(note.duration, pixelsPerBeat);
+        const noteHeight = pixelsPerOctave / 12;
+
+        return (
+          x >= noteX && x <= noteX + noteWidth && y >= noteY && y <= noteY + noteHeight
+        );
+      }),
+    [selectedBarNotes, pixelsPerBeat, pixelsPerOctave]
+  );
+
+  const beginDrag = useCallback((hit: PositionedNote, x: number, y: number) => {
+    dragStateRef.current = {
+      isDragging: true,
+      startX: x,
+      startY: y,
+      initialBeat: hit.note.startBeat,
+      initialPitch: hit.note.pitch,
+      noteId: hit.note.id,
+    };
+  }, []);
+
   const handleCanvasClick = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       const canvas = canvasRef.current;
@@ -252,28 +333,10 @@ export function PianoRoll({
       const snappedBeat = snapToGrid(beat, gridSize);
       const pitch = Math.round(pixelToPitch(y, pixelsPerOctave));
 
-      for (const note of selectedBarNotes) {
-        const noteX = PIANO_KEYS_WIDTH + beatToPixel(note.startBeat, pixelsPerBeat);
-        const noteY = pitchToPixel(note.pitch, pixelsPerOctave);
-        const noteWidth = beatToPixel(note.duration, pixelsPerBeat);
-        const noteHeight = pixelsPerOctave / 12;
-
-        if (
-          x >= noteX &&
-          x <= noteX + noteWidth &&
-          y >= noteY &&
-          y <= noteY + noteHeight
-        ) {
-          dragStateRef.current = {
-            isDragging: true,
-            startX: x,
-            startY: y,
-            initialBeat: note.startBeat,
-            initialPitch: note.pitch,
-            noteId: note.id,
-          };
-          return;
-        }
+      const hit = noteAt(x, y);
+      if (hit) {
+        beginDrag(hit, x, y);
+        return;
       }
 
       if (scale) {
@@ -283,11 +346,29 @@ export function PianoRoll({
         }
       }
 
-      if (selectedBarId) {
-        onNoteClick?.(selectedBarId, pitch, snappedBeat);
-      }
+      if (!selectedBar || !selectedBarId) return;
+
+      // The click arrives in absolute beats but a Note stores its position relative
+      // to its own bar, so convert before handing it over. A click outside the
+      // selected bar is dropped rather than folded into it as an out-of-range beat.
+      const beatInBar = snappedBeat - selectedBarStartBeat;
+      if (beatInBar < 0 || beatInBar >= getBarBeats(selectedBar, timeSignature)) return;
+
+      onNoteClick?.(selectedBarId, pitch, beatInBar);
     },
-    [pixelsPerBeat, pixelsPerOctave, gridSize, scale, selectedBarId, selectedBarNotes, onNoteClick]
+    [
+      pixelsPerBeat,
+      pixelsPerOctave,
+      gridSize,
+      scale,
+      selectedBar,
+      selectedBarId,
+      selectedBarStartBeat,
+      timeSignature,
+      noteAt,
+      beginDrag,
+      onNoteClick,
+    ]
   );
 
   const handleMouseDown = useCallback(
@@ -301,31 +382,12 @@ export function PianoRoll({
 
       if (x < PIANO_KEYS_WIDTH) return;
 
-      for (const note of selectedBarNotes) {
-        const noteX = PIANO_KEYS_WIDTH + beatToPixel(note.startBeat, pixelsPerBeat);
-        const noteY = pitchToPixel(note.pitch, pixelsPerOctave);
-        const noteWidth = beatToPixel(note.duration, pixelsPerBeat);
-        const noteHeight = pixelsPerOctave / 12;
-
-        if (
-          x >= noteX &&
-          x <= noteX + noteWidth &&
-          y >= noteY &&
-          y <= noteY + noteHeight
-        ) {
-          dragStateRef.current = {
-            isDragging: true,
-            startX: x,
-            startY: y,
-            initialBeat: note.startBeat,
-            initialPitch: note.pitch,
-            noteId: note.id,
-          };
-          return;
-        }
+      const hit = noteAt(x, y);
+      if (hit) {
+        beginDrag(hit, x, y);
       }
     },
-    [pixelsPerBeat, pixelsPerOctave, selectedBarNotes]
+    [noteAt, beginDrag]
   );
 
   const handleMouseMove = useCallback(

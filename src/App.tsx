@@ -7,12 +7,41 @@ import { InstrumentsPanel } from '@/components/InstrumentsPanel';
 import { ScalePalette } from '@/components/ScalePalette';
 import { ChordTimeline } from '@/components/ChordTimeline';
 import { PianoRoll } from '@/components/PianoRoll';
+import { HorizontalScrollbar } from '@/components/HorizontalScrollbar';
 import { usePlayback } from '@/hooks/usePlayback';
+import { useSegmentShortcuts } from '@/hooks/useSegmentShortcuts';
+import { useFollowPlayhead } from '@/hooks/useFollowPlayhead';
+import { editorStore } from '@/store/editorStore';
 import { songTimeToBeat } from '@/engine/scheduler';
-import { getTotalBeats } from '@/engine/timeline';
+import { getBarIndexAtBeat, getTotalBeats, MIN_SEGMENT_BEATS } from '@/engine/timeline';
 import { midiToNoteLabel } from '@/engine/chords';
-import type { NoteName, ScaleType } from '@/types/music';
-import { NOTE_NAMES, SCALE_TYPES } from '@/utils/constants';
+import type { Bar, NoteName, ScaleType, TimeSignature } from '@/types/music';
+import {
+  NOTE_NAMES,
+  PIANO_KEYS_WIDTH,
+  PIXELS_PER_BEAT,
+  SCALE_TYPES,
+} from '@/utils/constants';
+
+/** Inversion names by index; root position is left out because it says nothing. */
+const INVERSION_NAMES = ['', '1st', '2nd', '3rd'];
+
+/**
+ * The bars a play range covers, as "2–4" or just "2" for a range inside one bar.
+ *
+ * The end is nudged back before being resolved so a range ending exactly on a bar
+ * line does not claim the bar it stops at the door of.
+ */
+function barRangeLabel(
+  bars: Bar[],
+  projectTs: TimeSignature,
+  loopStart: number,
+  loopEnd: number
+): string {
+  const first = getBarIndexAtBeat(bars, projectTs, loopStart) + 1;
+  const last = getBarIndexAtBeat(bars, projectTs, Math.max(loopStart, loopEnd - MIN_SEGMENT_BEATS)) + 1;
+  return first === last ? `${first}` : `${first}–${last}`;
+}
 
 function App() {
   const project = projectStore(s => s.project);
@@ -26,8 +55,13 @@ function App() {
   const selectedSegmentId = selectionStore(s => s.selectedSegmentId);
   const selectBar = selectionStore(s => s.selectBar);
 
+  const toggleLoopEnabled = projectStore(s => s.toggleLoopEnabled);
+
+  // One offset for the chord timeline, the piano roll and the scrollbar under them.
+  const scrollX = editorStore(s => s.scrollX);
+  const setScrollX = editorStore(s => s.setScrollX);
+
   const [, setMetronomeOn] = useState(false);
-  const [hasLoopRegion, setHasLoopRegion] = useState(false);
 
   // Initialize project on mount
   useEffect(() => {
@@ -59,10 +93,17 @@ function App() {
         timeSignature: project.timeSignature,
         bars: project.bars,
         tracks: ['main'],
-        loopStart: hasLoopRegion ? 0 : null,
-        loopEnd: hasLoopRegion ? getTotalBeats(project.bars, project.timeSignature) : null,
+        loopStart: project.loopStart ?? null,
+        loopEnd: project.loopEnd ?? null,
+        loopEnabled: project.loopEnabled ?? false,
       }
     : null;
+
+  // The range reads as bar numbers rather than beats: that is how it was drawn.
+  const loopRangeLabel =
+    project && project.loopStart !== undefined && project.loopEnd !== undefined
+      ? barRangeLabel(project.bars, project.timeSignature, project.loopStart, project.loopEnd)
+      : null;
 
   // Playback state lives in the hook, which is the only thing that knows when sound
   // actually starts — a local copy would claim "playing" during the sample load.
@@ -70,6 +111,13 @@ function App() {
     usePlayback(playbackConfig!);
 
   const playheadBeat = songTimeToBeat(currentTime, project?.bpm ?? 120);
+
+  // ↑/↓ step the selected block through its bar's scale, +/- move it an octave,
+  // and `i` cycles a chord's inversion.
+  useSegmentShortcuts();
+
+  // Page the view along during playback so the playhead never runs off screen.
+  useFollowPlayhead(playheadBeat, isPlaying);
 
   // Handlers
   const handlePlay = useCallback(() => {
@@ -84,9 +132,6 @@ function App() {
     setMetronomeOn(prev => !prev);
   }, []);
 
-  const handleLoopToggle = useCallback(() => {
-    setHasLoopRegion(prev => !prev);
-  }, []);
 
   if (!project) return null;
 
@@ -105,14 +150,15 @@ function App() {
         timeSignature={project.timeSignature}
         musicalKey={project.key}
         keyMode={project.keyMode}
-        hasLoopRegion={hasLoopRegion}
+        loopEnabled={project.loopEnabled ?? false}
+        loopRangeLabel={loopRangeLabel}
         isLoading={isLoading}
         onPlay={handlePlay}
         onPause={pause}
         onStop={stop}
         onBpmChange={handleBpmChange}
         onMetronomeToggle={handleMetronomeToggle}
-        onLoopToggle={handleLoopToggle}
+        onLoopToggle={toggleLoopEnabled}
       />
 
       {/* Main Content */}
@@ -131,13 +177,24 @@ function App() {
                 bars={project.bars}
                 selectedBarId={selectedBar.id}
                 playheadBeat={playheadBeat}
-                pixelsPerBeat={80}
+                pixelsPerBeat={PIXELS_PER_BEAT}
                 pixelsPerOctave={120}
                 gridSize={0.25}
                 timeSignature={project.timeSignature}
+                scrollLeft={scrollX}
+                onScrollLeftChange={setScrollX}
               />
             )}
           </div>
+
+          {/* The editor's one horizontal scrollbar. Its content spans the key
+              column as well, so its range matches what the panes can scroll. */}
+          <HorizontalScrollbar
+            contentWidth={
+              PIANO_KEYS_WIDTH +
+              getTotalBeats(project.bars, project.timeSignature) * PIXELS_PER_BEAT
+            }
+          />
         </div>
 
         {/* Right Sidebar - Properties */}
@@ -208,6 +265,11 @@ function App() {
                         ? midiToNoteLabel(selectedSegment.pitch)
                         : `Octave ${selectedSegment.octave ?? 4}`}
                     </div>
+                    {selectedSegment.kind !== 'note' && !!selectedSegment.inversion && (
+                      <div className="text-xs text-gray-500">
+                        {INVERSION_NAMES[selectedSegment.inversion]} inversion
+                      </div>
+                    )}
                     <div className="text-xs text-gray-500">
                       {selectedSegment.duration} beat{selectedSegment.duration !== 1 ? 's' : ''}
                     </div>

@@ -114,6 +114,14 @@ export interface Project {
   keyMode: 'major' | 'minor';
   tracks: Track[];
   bars: Bar[];
+  /**
+   * Play range, in absolute beats from the start of the project. Absent means the
+   * whole project plays; when present, playback is confined to it.
+   */
+  loopStart?: number;
+  loopEnd?: number;
+  /** When true, playback wraps to `loopStart` at `loopEnd` instead of stopping. */
+  loopEnabled?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }

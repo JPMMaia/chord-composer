@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import type { Scale } from '@/types/music';
 import { getPaletteItems, type PaletteItem, type PaletteMode } from '@/engine/palette';
 import { getScaleName } from '@/engine/scales';
+import { MAX_SEGMENT_OCTAVE, MIN_SEGMENT_OCTAVE } from '@/utils/constants';
 
 /** MIME type carrying the full palette item across a drag. */
 export const PALETTE_DRAG_TYPE = 'application/x-palette-item';
@@ -17,14 +18,11 @@ const MODE_LABELS: Record<PaletteMode, string> = {
   sevenths: 'Seventh Chords',
 };
 
-/**
- * Octaves offered for new blocks.
- *
- * Bounded so every block stays inside the piano roll's A0–C8 window: octave 1
- * puts the lowest note at MIDI 24, and octave 7 leaves a seventh chord's top
- * note at MIDI 107.
- */
-const OCTAVES = [1, 2, 3, 4, 5, 6, 7];
+/** Octaves offered for new blocks — the same registers a segment may be moved to. */
+const OCTAVES = Array.from(
+  { length: MAX_SEGMENT_OCTAVE - MIN_SEGMENT_OCTAVE + 1 },
+  (_, i) => MIN_SEGMENT_OCTAVE + i
+);
 const DEFAULT_PALETTE_OCTAVE = 4;
 
 /**

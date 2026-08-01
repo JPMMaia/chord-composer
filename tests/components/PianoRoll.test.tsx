@@ -324,6 +324,7 @@ describe('PianoRoll', () => {
 
   describe('per-bar time signatures', () => {
     const PIANO_KEYS_WIDTH = 80;
+    const BAR_LINE_WIDTH = 2;
     const BAR_LINE_COLOR = '#cccccc';
 
     /**
@@ -339,8 +340,16 @@ describe('PianoRoll', () => {
         fillStyle: '',
         lineWidth: 0,
         font: '',
+        save: vi.fn(),
+        restore: vi.fn(),
+        rect: vi.fn(),
+        clip: vi.fn(),
         clearRect: vi.fn(),
-        fillRect: vi.fn(),
+        // Bar lines are filled, not stroked, so they land on the same pixels as
+        // the timeline's; they are recorded alongside the stroked gridlines.
+        fillRect: vi.fn((x: number) => {
+          strokes.push({ color: String(ctx.fillStyle), x });
+        }),
         strokeRect: vi.fn(),
         fillText: vi.fn(),
         beginPath: vi.fn(),
@@ -377,8 +386,15 @@ describe('PianoRoll', () => {
       );
 
       const barLines = strokes.filter(s => s.color === BAR_LINE_COLOR).map(s => s.x);
-      // Starts at beats 0, 3, 7 plus the closing line at beat 9.
-      expect(barLines).toEqual([0, 3, 7, 9].map(b => PIANO_KEYS_WIDTH + b * 10));
+      // Starts at beats 0, 3 and 7, plus the closing line at beat 9 — pulled two
+      // pixels inside, as the timeline's closing line is, so the project still
+      // ends exactly at beat 9.
+      expect(barLines).toEqual([
+        PIANO_KEYS_WIDTH + 0,
+        PIANO_KEYS_WIDTH + 30,
+        PIANO_KEYS_WIDTH + 70,
+        PIANO_KEYS_WIDTH + 90 - BAR_LINE_WIDTH,
+      ]);
     });
 
     it('draws one gridline per beat of the whole project', () => {
@@ -436,6 +452,10 @@ describe('PianoRoll', () => {
         fillStyle: '',
         lineWidth: 0,
         font: '',
+        save: vi.fn(),
+        restore: vi.fn(),
+        rect: vi.fn(),
+        clip: vi.fn(),
         clearRect: vi.fn(),
         strokeRect: vi.fn(),
         fillText: vi.fn(),
@@ -529,6 +549,10 @@ describe('PianoRoll', () => {
         fillStyle: '',
         lineWidth: 0,
         font: '',
+        save: vi.fn(),
+        restore: vi.fn(),
+        rect: vi.fn(),
+        clip: vi.fn(),
         clearRect: vi.fn(),
         fillRect: vi.fn(),
         strokeRect: vi.fn(),
@@ -662,6 +686,161 @@ describe('PianoRoll', () => {
       const onNoteClick = vi.fn();
       clickAt('b0', 4, onNoteClick);
       expect(onNoteClick).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('shared horizontal scroll', () => {
+    const PIANO_KEYS_WIDTH = 80;
+    const PIXELS_PER_BEAT = 10;
+    const SCROLL_LEFT = 60;
+    const ACTIVE_FILL = '#3b82f6';
+
+    const bars: Bar[] = [
+      { id: 'b0', barIndex: 0, scale: { root: 'C', type: 'major' }, chords: [],
+        notes: [{ id: 'n0', pitch: 60, startBeat: 2, duration: 1, velocity: 100 }] },
+      { id: 'b1', barIndex: 1, scale: { root: 'C', type: 'major' }, chords: [], notes: [] },
+    ];
+
+    interface Drawn { color: string; x: number }
+
+    /** Records both stroke origins (grid and bar lines) and fills (keys and notes). */
+    function recordDrawing(): { strokes: Drawn[]; fills: Drawn[] } {
+      const strokes: Drawn[] = [];
+      const fills: Drawn[] = [];
+      const ctx = {
+        strokeStyle: '',
+        fillStyle: '',
+        lineWidth: 0,
+        font: '',
+        save: vi.fn(),
+        restore: vi.fn(),
+        rect: vi.fn(),
+        clip: vi.fn(),
+        clearRect: vi.fn(),
+        strokeRect: vi.fn(),
+        fillText: vi.fn(),
+        beginPath: vi.fn(),
+        lineTo: vi.fn(),
+        stroke: vi.fn(),
+        moveTo: vi.fn((x: number) => {
+          strokes.push({ color: String(ctx.strokeStyle), x });
+        }),
+        fillRect: vi.fn((x: number) => {
+          fills.push({ color: String(ctx.fillStyle), x });
+        }),
+      };
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+        ctx as unknown as CanvasRenderingContext2D
+      );
+      return { strokes, fills };
+    }
+
+    function renderAt(scrollLeft: number, extra: Partial<React.ComponentProps<typeof PianoRoll>> = {}) {
+      return render(
+        <PianoRoll
+          bars={bars}
+          selectedBarId="b0"
+          playheadBeat={0}
+          pixelsPerBeat={PIXELS_PER_BEAT}
+          pixelsPerOctave={120}
+          gridSize={0.25}
+          timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
+          scrollLeft={scrollLeft}
+          {...extra}
+        />
+      );
+    }
+
+    it('slides the beat axis left by the shared offset', () => {
+      const { fills } = recordDrawing();
+      renderAt(SCROLL_LEFT);
+
+      // Bar lines are the only #cccccc fills; bars 1 and 2 start on beats 0 and 4,
+      // and the closing line sits just inside beat 8.
+      const barLines = fills.filter(f => f.color === '#cccccc').map(f => f.x);
+      const axis = PIANO_KEYS_WIDTH - SCROLL_LEFT;
+      expect(barLines).toEqual([
+        axis + 0,
+        axis + 4 * PIXELS_PER_BEAT,
+        axis + 8 * PIXELS_PER_BEAT - 2,
+      ]);
+    });
+
+    it('moves notes with the axis', () => {
+      const { fills } = recordDrawing();
+      renderAt(SCROLL_LEFT);
+
+      const note = fills.find(f => f.color === ACTIVE_FILL)!;
+      expect(note.x).toBe(PIANO_KEYS_WIDTH - SCROLL_LEFT + 2 * PIXELS_PER_BEAT);
+    });
+
+    it('leaves the key column where it is', () => {
+      const { fills } = recordDrawing();
+      renderAt(SCROLL_LEFT);
+
+      // The keys are painted into this canvas, so they must be exempt from the
+      // offset or the keyboard would scroll off the left edge.
+      const keys = fills.filter(f => f.color === '#fafafa' || f.color === '#2b2b2b');
+      expect(keys.length).toBeGreaterThan(0);
+      expect(keys.every(k => k.x === 0)).toBe(true);
+    });
+
+    it('clips the scrolled axis so it cannot paint over the keys', () => {
+      const ctx = {
+        strokeStyle: '', fillStyle: '', lineWidth: 0, font: '',
+        save: vi.fn(), restore: vi.fn(), clip: vi.fn(),
+        rect: vi.fn(),
+        clearRect: vi.fn(), fillRect: vi.fn(), strokeRect: vi.fn(), fillText: vi.fn(),
+        beginPath: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), stroke: vi.fn(),
+      };
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+        ctx as unknown as CanvasRenderingContext2D
+      );
+      renderAt(SCROLL_LEFT);
+
+      expect(ctx.clip).toHaveBeenCalled();
+      expect(ctx.rect).toHaveBeenCalledWith(PIANO_KEYS_WIDTH, 0, expect.any(Number), expect.any(Number));
+      const [x] = ctx.rect.mock.calls[0] as number[];
+      expect(x).toBe(PIANO_KEYS_WIDTH);
+    });
+
+    it('resolves a click against the scrolled axis', () => {
+      const onNoteClick = vi.fn();
+      const { container } = renderAt(SCROLL_LEFT, { selectedBarId: 'b1', onNoteClick });
+
+      // Bar 2 starts at absolute beat 4 — at x 40 unscrolled, so at x 40 − 60 = −20
+      // once scrolled. Clicking the very first grid pixel therefore lands on beat 2
+      // of bar 2, not beat 0.
+      fireEvent.click(container.querySelector('canvas')!, {
+        clientX: PIANO_KEYS_WIDTH,
+        clientY: pitchToPixel(60, 120) + 1,
+      });
+
+      expect(onNoteClick).toHaveBeenCalledWith('b1', 60, 2);
+    });
+
+    it('forwards a horizontal wheel gesture to the shared offset', () => {
+      const onScrollLeftChange = vi.fn();
+      const { getByTestId } = renderAt(SCROLL_LEFT, { onScrollLeftChange });
+
+      fireEvent.wheel(getByTestId('piano-roll-scroll'), { deltaX: 40, deltaY: 0 });
+      expect(onScrollLeftChange).toHaveBeenCalledWith(SCROLL_LEFT + 40);
+    });
+
+    it('reads a shift-wheel as horizontal too', () => {
+      const onScrollLeftChange = vi.fn();
+      const { getByTestId } = renderAt(SCROLL_LEFT, { onScrollLeftChange });
+
+      fireEvent.wheel(getByTestId('piano-roll-scroll'), { deltaX: 0, deltaY: 25, shiftKey: true });
+      expect(onScrollLeftChange).toHaveBeenCalledWith(SCROLL_LEFT + 25);
+    });
+
+    it('leaves a plain vertical wheel to the pitch axis', () => {
+      const onScrollLeftChange = vi.fn();
+      const { getByTestId } = renderAt(SCROLL_LEFT, { onScrollLeftChange });
+
+      fireEvent.wheel(getByTestId('piano-roll-scroll'), { deltaX: 0, deltaY: 25 });
+      expect(onScrollLeftChange).not.toHaveBeenCalled();
     });
   });
 

@@ -9,7 +9,10 @@ interface TransportProps {
   /** Musical key readout. Named around React's reserved `key` prop. */
   musicalKey: string;
   keyMode: 'major' | 'minor';
-  hasLoopRegion: boolean;
+  /** Whether reaching the end of the play range wraps back to its start. */
+  loopEnabled: boolean;
+  /** Human-readable play range, e.g. "2–4". Null when the whole project plays. */
+  loopRangeLabel: string | null;
   /** True while the instrument's samples are still downloading. */
   isLoading?: boolean;
   onPlay: () => void;
@@ -30,7 +33,8 @@ export const Transport: React.FC<TransportProps> = ({
   timeSignature,
   musicalKey,
   keyMode,
-  hasLoopRegion,
+  loopEnabled,
+  loopRangeLabel,
   isLoading = false,
   onPlay,
   onPause,
@@ -136,16 +140,25 @@ export const Transport: React.FC<TransportProps> = ({
         🎵 Metro
       </button>
 
-      {/* Loop toggle */}
-      {hasLoopRegion && (
-        <button
-          onClick={onLoopToggle}
-          className="px-3 py-1.5 text-sm bg-gray-600 text-gray-200 rounded hover:bg-gray-500 transition-colors"
-          aria-label="Loop"
-        >
-          🔁 Loop
-        </button>
-      )}
+      {/* Repeat toggle. Always shown: gating it on a range being set would hide the
+          only control that can turn it back on. */}
+      <button
+        onClick={onLoopToggle}
+        aria-label="Loop"
+        aria-pressed={loopEnabled}
+        className={`px-3 py-1.5 text-sm rounded transition-colors ${
+          loopEnabled
+            ? 'bg-indigo-600 text-white'
+            : 'bg-gray-600 text-gray-200 hover:bg-gray-500'
+        }`}
+      >
+        🔁 Repeat
+      </button>
+
+      {/* Play range readout */}
+      <div className="text-xs text-gray-400" data-testid="loop-range-readout">
+        Range {loopRangeLabel ?? '—'}
+      </div>
     </div>
   );
 };

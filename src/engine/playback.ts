@@ -14,8 +14,11 @@ export interface PlaybackConfig {
   timeSignature: TimeSignature;
   bars: Bar[];
   tracks: string[];
+  /** Play range bounds, in beats. Null means "the whole project". */
   loopStart: number | null;
   loopEnd: number | null;
+  /** Whether reaching the end of the range wraps back to its start. */
+  loopEnabled: boolean;
 }
 
 /**

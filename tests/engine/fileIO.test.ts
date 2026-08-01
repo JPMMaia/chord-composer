@@ -430,9 +430,46 @@ describe('fileIO', () => {
       });
     }
 
-    it('declares schema version 1.3', () => {
+    it('declares schema version 1.4', () => {
       const parsed = JSON.parse(serializeProject(createTestProject()));
-      expect(parsed.version).toBe('1.3');
+      expect(parsed.version).toBe('1.4');
+    });
+
+    it('round-trips the play range and repeat flag', () => {
+      const project = createTestProject({ loopStart: 4, loopEnd: 12, loopEnabled: true });
+      const restored = deserializeProject(serializeProject(project));
+
+      expect(restored.loopStart).toBe(4);
+      expect(restored.loopEnd).toBe(12);
+      expect(restored.loopEnabled).toBe(true);
+    });
+
+    it('reads a pre-1.4 file as having no range and no repeat', () => {
+      const json = JSON.parse(serializeProject(createTestProject()));
+      delete json.loopEnabled;
+
+      const restored = deserializeProject(JSON.stringify({ ...json, version: '1.3' }));
+
+      expect(restored.loopStart).toBeUndefined();
+      expect(restored.loopEnd).toBeUndefined();
+      expect(restored.loopEnabled).toBe(false);
+    });
+
+    it('discards a range missing one of its bounds', () => {
+      const json = JSON.parse(serializeProject(createTestProject({ loopStart: 4, loopEnd: 12 })));
+      delete json.loopEnd;
+
+      const restored = deserializeProject(JSON.stringify(json));
+
+      expect(restored.loopStart).toBeUndefined();
+      expect(restored.loopEnd).toBeUndefined();
+    });
+
+    it('rejects a backwards play range', () => {
+      const result = validateProject(createTestProject({ loopStart: 8, loopEnd: 4 }));
+
+      expect(result.valid).toBe(false);
+      expect(result.errors.join(' ')).toContain('must be before its end');
     });
 
     it('round-trips a segment octave', () => {

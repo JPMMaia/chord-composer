@@ -696,4 +696,164 @@ describe('projectStore', () => {
       expect(saved).toBeNull();
     });
   });
+
+  describe('play range', () => {
+    const state = () => projectStore.getState();
+    const project = () => state().project!;
+
+    beforeEach(() => {
+      state().createProject();
+      state().addBar();
+      state().addBar(); // two 4/4 bars: eight beats of song
+    });
+
+    it('starts with no range and repeat off', () => {
+      expect(project().loopStart).toBeUndefined();
+      expect(project().loopEnd).toBeUndefined();
+      expect(project().loopEnabled).toBeFalsy();
+    });
+
+    it('stores a range', () => {
+      state().setLoopRegion(1, 5);
+      expect([project().loopStart, project().loopEnd]).toEqual([1, 5]);
+    });
+
+    it('orders a backwards range', () => {
+      state().setLoopRegion(6, 2);
+      expect([project().loopStart, project().loopEnd]).toEqual([2, 6]);
+    });
+
+    it('clamps a range to the length of the song', () => {
+      state().setLoopRegion(-3, 99);
+      expect([project().loopStart, project().loopEnd]).toEqual([0, 8]);
+    });
+
+    it('ignores a range too short to hear, keeping the previous one', () => {
+      state().setLoopRegion(1, 5);
+      state().setLoopRegion(2, 2);
+      expect([project().loopStart, project().loopEnd]).toEqual([1, 5]);
+    });
+
+    it('clears the range when a bound is null', () => {
+      state().setLoopRegion(1, 5);
+      state().setLoopRegion(null, null);
+      expect([project().loopStart, project().loopEnd]).toEqual([undefined, undefined]);
+    });
+
+    it('toggles repeat without touching the range', () => {
+      state().setLoopRegion(1, 5);
+
+      state().toggleLoopEnabled();
+      expect(project().loopEnabled).toBe(true);
+      expect([project().loopStart, project().loopEnd]).toEqual([1, 5]);
+
+      state().toggleLoopEnabled();
+      expect(project().loopEnabled).toBe(false);
+    });
+  });
+
+  describe('segment pitch editing', () => {
+    const state = () => projectStore.getState();
+
+    /** The segment with this id, wherever in the project it lives. */
+    const segmentOf = (id: string): ChordSegment =>
+      state().project!.bars.flatMap(b => b.chords).find(c => c.id === id)!;
+
+    beforeEach(() => {
+      state().createProject();
+      state().addBar();
+      state().addBar();
+    });
+
+    describe('stepSegmentPitch', () => {
+      it('moves a chord to the next degree of its own bar\'s scale', () => {
+        const segment = chordSegment({ romanNumeral: 'I', chordSymbol: 'C', octave: 4 });
+        appendSegment(segment);
+
+        state().stepSegmentPitch(segment.id, 1);
+
+        expect(segmentOf(segment.id)).toMatchObject({ root: 'D', romanNumeral: 'ii' });
+      });
+
+      it('reads the scale of the bar the segment is actually in', () => {
+        const bars = state().project!.bars;
+        state().updateBarScale(bars[1].id, { root: 'A', type: 'naturalMinor' });
+
+        const segment = chordSegment({ root: 'G', romanNumeral: 'VII', chordSymbol: 'G' });
+        state().insertSegment(state().project!.bars[1].id, 0, segment);
+
+        state().stepSegmentPitch(segment.id, 1);
+
+        // A minor's VII steps up to i without changing register.
+        expect(segmentOf(segment.id)).toMatchObject({ root: 'A', octave: 4 });
+      });
+
+      it('regenerates the bar\'s notes so the roll follows', () => {
+        const segment = chordSegment({ romanNumeral: 'I', chordSymbol: 'C', octave: 4 });
+        appendSegment(segment);
+        expect(barOf(segment.id)!.notes.map(n => n.pitch)).toEqual([60, 64, 67]);
+
+        state().stepSegmentPitch(segment.id, 1);
+
+        // Dm at octave 4.
+        expect(barOf(segment.id)!.notes.map(n => n.pitch)).toEqual([62, 65, 69]);
+      });
+
+      it('ignores an unknown segment id', () => {
+        const before = state().project;
+        state().stepSegmentPitch('nope', 1);
+        expect(state().project).toBe(before);
+      });
+    });
+
+    describe('shiftSegmentOctave', () => {
+      it('moves a note a full octave and resyncs its note', () => {
+        const segment = chordSegment({ kind: 'note', pitch: 60, quality: undefined });
+        appendSegment(segment);
+
+        state().shiftSegmentOctave(segment.id, 1);
+
+        expect(segmentOf(segment.id).pitch).toBe(72);
+        expect(barOf(segment.id)!.notes.map(n => n.pitch)).toEqual([72]);
+      });
+
+      it('moves a chord down a register', () => {
+        const segment = chordSegment({ octave: 4 });
+        appendSegment(segment);
+
+        state().shiftSegmentOctave(segment.id, -1);
+
+        expect(segmentOf(segment.id).octave).toBe(3);
+        expect(barOf(segment.id)!.notes.map(n => n.pitch)).toEqual([48, 52, 55]);
+      });
+
+      it('ignores an unknown segment id', () => {
+        const before = state().project;
+        state().shiftSegmentOctave('nope', 1);
+        expect(state().project).toBe(before);
+      });
+    });
+
+    describe('cycleSegmentInversion', () => {
+      it('rotates the voicing and cycles back to root position', () => {
+        const segment = chordSegment({ octave: 4 });
+        appendSegment(segment);
+
+        state().cycleSegmentInversion(segment.id);
+        expect(segmentOf(segment.id).inversion).toBe(1);
+        expect(barOf(segment.id)!.notes.map(n => n.pitch)).toEqual([64, 67, 72]);
+
+        state().cycleSegmentInversion(segment.id);
+        state().cycleSegmentInversion(segment.id);
+        expect(segmentOf(segment.id).inversion).toBe(0);
+        expect(barOf(segment.id)!.notes.map(n => n.pitch)).toEqual([60, 64, 67]);
+      });
+
+      it('ignores an unknown segment id', () => {
+        const before = state().project;
+        state().cycleSegmentInversion('nope');
+        expect(state().project).toBe(before);
+      });
+    });
+  });
 });

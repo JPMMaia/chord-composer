@@ -6,6 +6,9 @@ import {
   mergeAdjacentChords,
   getChordDuration,
   retuneSegmentsToScale,
+  stepSegmentInScale,
+  shiftSegmentOctave,
+  cycleSegmentInversion,
 } from "@/engine/chordOperations";
 import { Bar, Scale, ChordSegment, Note, TimeSignature } from "@/types/music";
 import { generateId } from "@/utils/id";
@@ -515,6 +518,269 @@ describe("chordOperations", () => {
     it("handles dotted note durations", () => {
       const chord = makeChord("I", 1.5);
       expect(getChordDuration(chord, 4)).toBe(1.5);
+    });
+  });
+
+  describe("stepSegmentInScale", () => {
+    const C_MAJOR: Scale = { root: "C", type: "major" };
+    const A_MINOR: Scale = { root: "A", type: "naturalMinor" };
+
+    /** A note segment sitting on `pitch`, labelled as the palette would label it. */
+    const note = (pitch: number, romanNumeral?: string): ChordSegment => ({
+      id: generateId(),
+      kind: "note",
+      pitch,
+      romanNumeral,
+      duration: 1,
+    });
+
+    /** A chord segment as the palette builds one. */
+    const chord = (
+      overrides: Partial<ChordSegment> & Pick<ChordSegment, "root">
+    ): ChordSegment => ({
+      id: generateId(),
+      kind: "chord",
+      quality: "major",
+      octave: 4,
+      duration: 1,
+      ...overrides,
+    });
+
+    it("moves a note to the next note of the scale", () => {
+      // C4 -> D4: a tone, because there is no C# in C major.
+      expect(stepSegmentInScale(note(60), C_MAJOR, 1).pitch).toBe(62);
+    });
+
+    it("moves a note down to the previous note of the scale", () => {
+      // C4 -> B3: a semitone, and across the octave boundary.
+      expect(stepSegmentInScale(note(60), C_MAJOR, -1).pitch).toBe(59);
+    });
+
+    it("carries a note across the octave line: B4 -> C5", () => {
+      expect(stepSegmentInScale(note(71), C_MAJOR, 1).pitch).toBe(72);
+    });
+
+    it("relabels a stepped note with the degree it landed on", () => {
+      const stepped = stepSegmentInScale(note(60, "I"), C_MAJOR, 1);
+      expect(stepped.root).toBe("D");
+      expect(stepped.romanNumeral).toBe("ii");
+    });
+
+    it("snaps an off-scale note onto the scale rather than sticking", () => {
+      // C#4 is not in C major; stepping up lands on the next scale note, D4.
+      expect(stepSegmentInScale(note(61), C_MAJOR, 1).pitch).toBe(62);
+    });
+
+    it("refuses to step a note past the ends of the roll", () => {
+      const top = note(108); // C8
+      expect(stepSegmentInScale(top, C_MAJOR, 1)).toEqual(top);
+      const bottom = note(21); // A0
+      expect(stepSegmentInScale(bottom, C_MAJOR, -1)).toEqual(bottom);
+    });
+
+    it("moves a chord to the next scale degree", () => {
+      const stepped = stepSegmentInScale(
+        chord({ root: "C", romanNumeral: "I", chordSymbol: "C" }),
+        C_MAJOR,
+        1
+      );
+      expect(stepped).toMatchObject({
+        root: "D",
+        quality: "minor",
+        romanNumeral: "ii",
+        chordSymbol: "Dm",
+        octave: 4,
+      });
+    });
+
+    it("wraps vii° up to I an octave higher", () => {
+      // B -> C ascends past the octave line, so the register has to follow.
+      const stepped = stepSegmentInScale(
+        chord({ root: "B", quality: "diminished", romanNumeral: "vii°", chordSymbol: "B°" }),
+        C_MAJOR,
+        1
+      );
+      expect(stepped).toMatchObject({ root: "C", romanNumeral: "I", octave: 5 });
+    });
+
+    it("drops I down to vii° an octave lower", () => {
+      const stepped = stepSegmentInScale(
+        chord({ root: "C", romanNumeral: "I", chordSymbol: "C" }),
+        C_MAJOR,
+        -1
+      );
+      expect(stepped).toMatchObject({ root: "B", romanNumeral: "vii°", octave: 3 });
+    });
+
+    it("keeps the register when the degree wraps but the pitch does not", () => {
+      // A minor's last degree is VII (G); the tonic i (A) sits a tone *above* it,
+      // so wrapping the degree index must not drag the octave with it.
+      const stepped = stepSegmentInScale(
+        chord({ root: "G", romanNumeral: "VII", chordSymbol: "G" }),
+        A_MINOR,
+        1
+      );
+      expect(stepped).toMatchObject({ root: "A", romanNumeral: "i", octave: 4 });
+    });
+
+    it("keeps a seventh a seventh", () => {
+      const stepped = stepSegmentInScale(
+        chord({ root: "C", quality: "maj7", romanNumeral: "I", chordSymbol: "Cmaj7" }),
+        C_MAJOR,
+        1
+      );
+      expect(stepped).toMatchObject({ root: "D", quality: "min7", chordSymbol: "Dm7" });
+    });
+
+    it("wraps over a pentatonic scale's five degrees", () => {
+      const pentatonic: Scale = { root: "C", type: "pentatonicMajor" };
+      let segment = chord({ root: "C", romanNumeral: "I", chordSymbol: "C" });
+      for (let i = 0; i < 5; i++) {
+        segment = stepSegmentInScale(segment, pentatonic, 1);
+      }
+      // Five degrees is a full turn: same chord, one octave up.
+      expect(segment).toMatchObject({ root: "C", romanNumeral: "I", octave: 5 });
+    });
+
+    it("finds the degree from the root when a chord carries no numeral", () => {
+      const stepped = stepSegmentInScale(chord({ root: "F", chordSymbol: "F" }), C_MAJOR, 1);
+      expect(stepped).toMatchObject({ root: "G", romanNumeral: "V" });
+    });
+
+    it("leaves a chromatic chord alone", () => {
+      // Ab is in neither the numerals nor the pitches of C major.
+      const borrowed = chord({ root: "G#", chordSymbol: "G#" });
+      expect(stepSegmentInScale(borrowed, C_MAJOR, 1)).toEqual(borrowed);
+    });
+
+    it("refuses to step a chord past the top register", () => {
+      const top = chord({
+        root: "B",
+        quality: "diminished",
+        romanNumeral: "vii°",
+        chordSymbol: "B°",
+        octave: 7,
+      });
+      expect(stepSegmentInScale(top, C_MAJOR, 1)).toEqual(top);
+    });
+  });
+
+  describe("shiftSegmentOctave", () => {
+    const note = (pitch: number): ChordSegment => ({
+      id: generateId(),
+      kind: "note",
+      pitch,
+      duration: 1,
+    });
+    const chord = (octave: number): ChordSegment => ({
+      id: generateId(),
+      kind: "chord",
+      root: "C",
+      quality: "major",
+      octave,
+      duration: 1,
+    });
+
+    it("moves a note a full octave", () => {
+      expect(shiftSegmentOctave(note(60), 1).pitch).toBe(72);
+      expect(shiftSegmentOctave(note(60), -1).pitch).toBe(48);
+    });
+
+    it("moves a chord's register by one", () => {
+      expect(shiftSegmentOctave(chord(4), 1).octave).toBe(5);
+      expect(shiftSegmentOctave(chord(4), -1).octave).toBe(3);
+    });
+
+    it("treats a chord with no register as octave 4", () => {
+      const legacy: ChordSegment = { id: generateId(), root: "C", duration: 1 };
+      expect(shiftSegmentOctave(legacy, 1).octave).toBe(5);
+    });
+
+    it("refuses to push a note off the roll", () => {
+      const high = note(100); // +12 would be 112, past C8
+      expect(shiftSegmentOctave(high, 1)).toEqual(high);
+      const low = note(30);
+      expect(shiftSegmentOctave(low, -1)).toEqual(low);
+    });
+
+    it("refuses to push a chord past its register bounds", () => {
+      const top = chord(7);
+      expect(shiftSegmentOctave(top, 1)).toEqual(top);
+      const bottom = chord(1);
+      expect(shiftSegmentOctave(bottom, -1)).toEqual(bottom);
+    });
+  });
+
+  describe("cycleSegmentInversion", () => {
+    const triad: ChordSegment = {
+      id: "t",
+      kind: "chord",
+      root: "C",
+      quality: "major",
+      octave: 4,
+      duration: 1,
+    };
+
+    it("cycles a triad root -> 1st -> 2nd -> root", () => {
+      const first = cycleSegmentInversion(triad);
+      expect(first.inversion).toBe(1);
+      const second = cycleSegmentInversion(first);
+      expect(second.inversion).toBe(2);
+      expect(cycleSegmentInversion(second).inversion).toBe(0);
+    });
+
+    it("gives a seventh chord a third inversion before wrapping", () => {
+      const seventh = { ...triad, quality: "maj7" as const };
+      const inversions = [1, 2, 3, 0];
+      let segment = seventh as ChordSegment;
+      for (const expected of inversions) {
+        segment = cycleSegmentInversion(segment);
+        expect(segment.inversion).toBe(expected);
+      }
+    });
+
+    it("leaves a note segment alone — a single pitch has no voicing", () => {
+      const single: ChordSegment = { id: "n", kind: "note", pitch: 60, duration: 1 };
+      expect(cycleSegmentInversion(single)).toEqual(single);
+    });
+
+    it("leaves a chord with no resolvable quality alone", () => {
+      const vague: ChordSegment = { id: "v", kind: "chord", duration: 1 };
+      expect(cycleSegmentInversion(vague)).toEqual(vague);
+    });
+  });
+
+  describe("generateNotesFromSegments — inversions", () => {
+    it("voices an inverted chord with the root on top", () => {
+      const bar = barWith([
+        {
+          id: generateId(),
+          kind: "chord",
+          root: "C",
+          quality: "major",
+          octave: 4,
+          inversion: 1,
+          startBeat: 0,
+          duration: 1,
+        },
+      ]);
+      // E4 G4 C5 rather than C4 E4 G4.
+      expect(generateNotesFromSegments(bar, TS_4_4).map((n) => n.pitch)).toEqual([64, 67, 72]);
+    });
+
+    it("keeps root position when a segment carries no inversion", () => {
+      const bar = barWith([
+        {
+          id: generateId(),
+          kind: "chord",
+          root: "C",
+          quality: "major",
+          octave: 4,
+          startBeat: 0,
+          duration: 1,
+        },
+      ]);
+      expect(generateNotesFromSegments(bar, TS_4_4).map((n) => n.pitch)).toEqual([60, 64, 67]);
     });
   });
 });

@@ -1,15 +1,23 @@
-import type { Bar, ChordSegment, Note, Scale, TimeSignature } from '@/types/music';
+import type { Bar, ChordSegment, Note, NoteName, Scale, TimeSignature } from '@/types/music';
 import { generateId } from '@/utils/id';
 import {
   CHORD_INTERVALS,
   getDiatonicChords,
   getDiatonicSevenths,
+  invertIntervals,
   SEMITONE_TO_NOTE,
 } from '@/engine/chords';
 import { getScalePitches } from '@/engine/scales';
 import { getBarBeats, withStartBeats } from '@/engine/timeline';
 import { formatChordSymbol } from '@/engine/palette';
-import { DEFAULT_TIME_SIGNATURE, NOTE_NAMES } from '@/utils/constants';
+import {
+  DEFAULT_TIME_SIGNATURE,
+  MAX_SEGMENT_OCTAVE,
+  MIN_SEGMENT_OCTAVE,
+  NOTE_NAMES,
+  PIANO_ROLL_MAX_MIDI,
+  PIANO_ROLL_MIN_MIDI,
+} from '@/utils/constants';
 
 /**
  * Split a bar into equal-duration chord segments with diatonic chords.
@@ -90,9 +98,10 @@ export function reorderChords(
  *
  * This is the sync engine behind the chord panel: `bar.notes` is derived state,
  * regenerated whenever segments change, so the piano roll always mirrors the
- * timeline. A chord segment expands to its stacked intervals; a note segment
- * yields a single pitch. Segments sit where they were placed, so the gaps between
- * them come out as silence with no further work.
+ * timeline. A chord segment expands to its stacked intervals, voiced in whatever
+ * inversion it carries; a note segment yields a single pitch. Segments sit where
+ * they were placed, so the gaps between them come out as silence with no further
+ * work.
  *
  * Deliberately total — it never throws — because it runs on every edit, including
  * transient states like a bar whose last segment was just deleted.
@@ -138,7 +147,7 @@ export function generateNotesFromSegments(
     // segments written before the palette could choose an octave.
     const baseMidi = ((segment.octave ?? octave) + 1) * 12 + rootSemitone;
 
-    for (const interval of CHORD_INTERVALS[quality]) {
+    for (const interval of invertIntervals(CHORD_INTERVALS[quality], segment.inversion ?? 0)) {
       notes.push({
         id: generateId(),
         pitch: baseMidi + interval,
@@ -223,10 +232,9 @@ export function retuneSegmentsToScale(
 
     // Keep a seventh a seventh: the note count is what the user chose, the scale
     // only decides which notes.
-    const isSeventh = segment.quality
-      ? CHORD_INTERVALS[segment.quality as ChordQualityKey].length === 4
-      : false;
-    const target = isSeventh ? getDiatonicSevenths(toScale) : getDiatonicChords(toScale);
+    const target = isSeventhChord(segment)
+      ? getDiatonicSevenths(toScale)
+      : getDiatonicChords(toScale);
 
     // A shorter scale (pentatonic, blues) may simply not have this degree.
     const chord = target[degree];
@@ -267,6 +275,154 @@ function retuneNote(
     pitch: segment.pitch + delta,
     root: SEMITONE_TO_NOTE[toPitches[degree]],
   };
+}
+
+/** True when a segment's quality has four notes, so a step must keep it a seventh. */
+function isSeventhChord(segment: ChordSegment): boolean {
+  return segment.quality
+    ? CHORD_INTERVALS[segment.quality as ChordQualityKey].length === 4
+    : false;
+}
+
+/**
+ * Which degree of `scale` a chord segment sits on, or -1.
+ *
+ * The roman numeral is the authority — it is what the user wrote — but a segment
+ * dropped without one still names a degree through its root, so fall back to that
+ * before giving up and calling the chord chromatic.
+ */
+function degreeOfChord(segment: ChordSegment, scale: Scale): number {
+  if (segment.romanNumeral) {
+    const byNumeral = degreeOfNumeral(scale, segment.romanNumeral);
+    if (byNumeral !== -1) return byNumeral;
+  }
+  if (!segment.root) return -1;
+  return getScalePitches(scale.root, scale.type).indexOf(NOTE_NAMES.indexOf(segment.root));
+}
+
+/**
+ * Moves a segment one step along the bar's scale — the meaning of the up and down
+ * arrow keys.
+ *
+ * A note moves to the neighbouring pitch of the scale; a chord moves to the
+ * neighbouring scale degree, keeping its size (a seventh stays a seventh) and its
+ * inversion. Either way the result stays inside the scale, so stepping never
+ * introduces a note the bar's key does not contain.
+ *
+ * A step that would leave the roll's range, or a chromatic chord that sits on no
+ * degree at all, returns the segment unchanged rather than clamping — holding the
+ * key down stops at the edge instead of piling up against it.
+ *
+ * @param segment - The segment to move.
+ * @param scale - The scale of the bar the segment lives in.
+ * @param direction - 1 for up, -1 for down.
+ */
+export function stepSegmentInScale(
+  segment: ChordSegment,
+  scale: Scale,
+  direction: -1 | 1
+): ChordSegment {
+  const pitches = getScalePitches(scale.root, scale.type);
+
+  if (segment.kind === 'note') {
+    if (segment.pitch === undefined) return segment;
+
+    // Walk semitone by semitone rather than by degree: that is what makes B4 step
+    // to C5 across the octave line, and what snaps an off-scale pitch back on.
+    let midi = segment.pitch;
+    for (let i = 0; i < 12; i++) {
+      midi += direction;
+      if (pitches.includes(((midi % 12) + 12) % 12)) break;
+    }
+    if (midi < PIANO_ROLL_MIN_MIDI || midi > PIANO_ROLL_MAX_MIDI) return segment;
+
+    const degree = pitches.indexOf(((midi % 12) + 12) % 12);
+    return {
+      ...segment,
+      pitch: midi,
+      root: SEMITONE_TO_NOTE[((midi % 12) + 12) % 12],
+      // The numeral names the degree the note now sits on; leaving the old one
+      // would label a D as the tonic.
+      romanNumeral: getDiatonicChords(scale)[degree]?.romanNumeral,
+    };
+  }
+
+  const degree = degreeOfChord(segment, scale);
+  if (degree === -1) return segment;
+
+  const target = isSeventhChord(segment) ? getDiatonicSevenths(scale) : getDiatonicChords(scale);
+  const next = target[(degree + direction + target.length) % target.length];
+  if (!next) return segment;
+
+  const octave = (segment.octave ?? 4) + registerShift(segment.root, next.root, direction);
+  if (octave < MIN_SEGMENT_OCTAVE || octave > MAX_SEGMENT_OCTAVE) return segment;
+
+  return {
+    ...segment,
+    root: next.root,
+    quality: next.quality,
+    romanNumeral: next.romanNumeral,
+    chordSymbol: formatChordSymbol(next.root, next.quality),
+    octave,
+  };
+}
+
+/**
+ * Whether a step from one chord root to the next crosses the octave line, as -1,
+ * 0 or 1.
+ *
+ * Wrapping the *degree index* is not enough to decide this. In C major, vii° (B)
+ * to I (C) has to rise a register; but in A minor, VII (G) to i (A) must not —
+ * A already sits a tone above G. What both cases share is that the root ascends
+ * monotonically, so the register moves exactly when the pitch class crosses C.
+ */
+function registerShift(
+  from: NoteName | undefined,
+  to: NoteName,
+  direction: -1 | 1
+): number {
+  if (!from) return 0;
+  const fromSemitone = NOTE_NAMES.indexOf(from);
+  const toSemitone = NOTE_NAMES.indexOf(to);
+  if (direction === 1) return toSemitone <= fromSemitone ? 1 : 0;
+  return toSemitone >= fromSemitone ? -1 : 0;
+}
+
+/**
+ * Moves a segment a whole octave — the meaning of the + and - keys.
+ *
+ * A note carries an absolute pitch, so it moves by 12 semitones and is bounded by
+ * the roll; a chord carries a register, so it moves by one and is bounded by the
+ * registers the palette offers. A shift past either bound is refused.
+ *
+ * @param segment - The segment to move.
+ * @param direction - 1 for up, -1 for down.
+ */
+export function shiftSegmentOctave(segment: ChordSegment, direction: -1 | 1): ChordSegment {
+  if (segment.kind === 'note') {
+    if (segment.pitch === undefined) return segment;
+    const pitch = segment.pitch + direction * 12;
+    if (pitch < PIANO_ROLL_MIN_MIDI || pitch > PIANO_ROLL_MAX_MIDI) return segment;
+    return { ...segment, pitch };
+  }
+
+  const octave = (segment.octave ?? 4) + direction;
+  if (octave < MIN_SEGMENT_OCTAVE || octave > MAX_SEGMENT_OCTAVE) return segment;
+  return { ...segment, octave };
+}
+
+/**
+ * Advances a chord to its next inversion, wrapping back to root position — the
+ * meaning of the `i` key.
+ *
+ * The cycle is as long as the chord has notes, so a triad returns to root position
+ * on the third press and a seventh on the fourth. Note segments have no voicing to
+ * rotate and come back untouched.
+ */
+export function cycleSegmentInversion(segment: ChordSegment): ChordSegment {
+  if (segment.kind === 'note' || !segment.quality) return segment;
+  const size = CHORD_INTERVALS[segment.quality as ChordQualityKey].length;
+  return { ...segment, inversion: ((segment.inversion ?? 0) + 1) % size };
 }
 
 /**

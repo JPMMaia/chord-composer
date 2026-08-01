@@ -36,6 +36,24 @@ export const DEFAULT_TIME_SIGNATURE: TimeSignature = {
 export const PIANO_KEYS_WIDTH = 80;
 
 /**
+ * Horizontal zoom of the beat axis, in pixels per beat.
+ *
+ * Shared by the chord timeline and the piano roll: they scroll from a single
+ * offset, so a difference here would show up directly as misalignment.
+ */
+export const PIXELS_PER_BEAT = 80;
+
+/**
+ * Width of a bar line, in pixels.
+ *
+ * The timeline draws its bar lines in the DOM and the piano roll paints its own on
+ * canvas, so both follow one rule: a bar line covers the two pixels *starting* at
+ * its beat, except the closing line, which is pulled inside so the project still
+ * ends exactly at `totalBeats * PIXELS_PER_BEAT`.
+ */
+export const BAR_LINE_WIDTH = 2;
+
+/**
  * Pitch range the piano roll draws, as MIDI note numbers: a standard 88-key
  * piano, A0 to C8. The roll scrolls vertically over the whole span.
  */
@@ -44,6 +62,17 @@ export const PIANO_ROLL_MAX_MIDI = 108;
 
 /** Number of key rows on the roll — 88. */
 export const PIANO_ROLL_KEY_COUNT = PIANO_ROLL_MAX_MIDI - PIANO_ROLL_MIN_MIDI + 1;
+
+/**
+ * Registers a chord segment may be voiced in.
+ *
+ * Bounded so every chord stays inside the roll's A0–C8 window: octave 1 puts the
+ * lowest root at MIDI 24, and octave 7 leaves a seventh chord's top note at MIDI
+ * 107. Both the palette dropdown and the octave shortcut read these, so a chord
+ * cannot be pushed somewhere the roll could not show it.
+ */
+export const MIN_SEGMENT_OCTAVE = 1;
+export const MAX_SEGMENT_OCTAVE = 7;
 
 /** Default BPM */
 export const DEFAULT_BPM = 120;

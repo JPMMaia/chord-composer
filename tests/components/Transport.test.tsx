@@ -17,7 +17,8 @@ describe('Transport', () => {
     timeSignature: { beatsPerMeasure: 4, beatUnit: 4 },
     musicalKey: 'C',
     keyMode: 'major' as const,
-    hasLoopRegion: false,
+    loopEnabled: false,
+    loopRangeLabel: null,
     onPlay: mockOnPlay,
     onPause: mockOnPause,
     onStop: mockOnStop,
@@ -70,10 +71,34 @@ describe('Transport', () => {
     expect(mockOnStop).toHaveBeenCalled();
   });
 
-  it('shows loop region controls when loop is enabled', () => {
-    render(<Transport {...defaultProps} hasLoopRegion />);
+  // The repeat toggle is always available: hiding it while repeat is off would hide
+  // the only control that can turn it back on.
+  it('shows the repeat toggle even with repeat off and no range', () => {
+    render(<Transport {...defaultProps} />);
     const loopToggle = screen.getByRole('button', { name: /loop/i });
     expect(loopToggle).toBeInTheDocument();
+    expect(loopToggle).not.toHaveClass('bg-indigo-600');
+  });
+
+  it('marks the repeat toggle active when repeat is on', () => {
+    render(<Transport {...defaultProps} loopEnabled />);
+    const loopToggle = screen.getByRole('button', { name: /loop/i });
+    expect(loopToggle).toHaveClass('bg-indigo-600');
+    expect(loopToggle).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('calls onLoopToggle when the repeat button is clicked', () => {
+    render(<Transport {...defaultProps} />);
+    fireEvent.click(screen.getByRole('button', { name: /loop/i }));
+    expect(mockOnLoopToggle).toHaveBeenCalled();
+  });
+
+  it('shows the play range, or a dash when there is none', () => {
+    const { rerender } = render(<Transport {...defaultProps} />);
+    expect(screen.getByTestId('loop-range-readout')).toHaveTextContent('Range —');
+
+    rerender(<Transport {...defaultProps} loopRangeLabel="2–3" />);
+    expect(screen.getByTestId('loop-range-readout')).toHaveTextContent('Range 2–3');
   });
 
   it('toggles metronome on click', () => {

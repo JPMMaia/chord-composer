@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, fireEvent, createEvent, within } from '@testing-library/react';
-import { ChordTimeline, PIXELS_PER_BEAT } from '@/components/ChordTimeline';
+import { render, screen, fireEvent, createEvent, within, act } from '@testing-library/react';
+import { ChordTimeline } from '@/components/ChordTimeline';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { editorStore } from '@/store/editorStore';
@@ -8,7 +8,7 @@ import { getPaletteItems } from '@/engine/palette';
 import type { PaletteItem } from '@/engine/palette';
 import type { ChordSegment } from '@/types/music';
 import { DEFAULT_SNAP_BEATS } from '@/engine/timeline';
-import { PIANO_KEYS_WIDTH } from '@/utils/constants';
+import { PIANO_KEYS_WIDTH, PIXELS_PER_BEAT } from '@/utils/constants';
 
 /** Minimal stand-in for the DataTransfer jsdom does not implement. */
 function makeDataTransfer(item: PaletteItem) {
@@ -84,7 +84,12 @@ describe('ChordTimeline', () => {
 
   beforeEach(() => {
     selectionStore.getState().clearSelection();
-    editorStore.setState({ snapBeats: DEFAULT_SNAP_BEATS });
+    editorStore.setState({
+      snapBeats: DEFAULT_SNAP_BEATS,
+      scrollX: 0,
+      maxScrollX: 0,
+      viewportWidth: 0,
+    });
     projectStore.getState().createProject();
     projectStore.getState().addBar();
     projectStore.getState().addBar();
@@ -110,6 +115,23 @@ describe('ChordTimeline', () => {
 
     expect(within(el).getAllByTestId('beat-line')).toHaveLength(4);
     expect(el).toHaveStyle({ width: `${4 * PIXELS_PER_BEAT}px` });
+  });
+
+  it('draws bar lines as overlays, so a lane starts on its bar’s beat', () => {
+    render(<ChordTimeline />);
+    const all = bars();
+
+    // A CSS border would sit *inside* the bar's box, pushing the lane — and every
+    // beat line, block and drop position in it — two pixels right of the beat the
+    // piano roll draws below. One line per bar, plus the closing one.
+    for (const bar of all) {
+      const el = screen.getByTestId(`timeline-bar-${bar.id}`);
+      expect(el.className).not.toMatch(/border-[lr]-2/);
+      // Tailwind's stylesheet is not loaded under jsdom, so the class is the
+      // observable proof that the line is taken out of the flow.
+      expect(within(el).getAllByTestId('bar-line')[0].className).toMatch(/\babsolute\b/);
+    }
+    expect(screen.getAllByTestId('bar-line')).toHaveLength(all.length + 1);
   });
 
   it('narrows a bar and drops its gridlines when its time signature changes', () => {
@@ -331,6 +353,27 @@ describe('ChordTimeline', () => {
     expect(pitches.slice(3)).toEqual(pitches.slice(0, 3).map(p => p + 36));
   });
 
+  it('marks an inverted chord beside its octave, and says nothing in root position', () => {
+    render(<ChordTimeline />);
+    dropAt(bars()[0].id, cMajorChords()[0], 0);
+    const chord = segments()[0];
+
+    expect(screen.getByTestId(`octave-badge-${chord.id}`)).toHaveTextContent(/^oct 4$/);
+
+    act(() => projectStore.getState().cycleSegmentInversion(chord.id));
+    expect(screen.getByTestId(`octave-badge-${chord.id}`)).toHaveTextContent('oct 4 · 1st');
+
+    act(() => projectStore.getState().cycleSegmentInversion(chord.id));
+    expect(screen.getByTestId(`octave-badge-${chord.id}`)).toHaveTextContent('oct 4 · 2nd');
+
+    // The badge is a visual shorthand, so the voicing has to be spelt out for
+    // anyone reading the block through the accessible name instead.
+    expect(screen.getByTestId(`chord-block-${chord.id}`)).toHaveAttribute(
+      'aria-label',
+      'Chord C octave 4 2nd inversion'
+    );
+  });
+
   it('selects a bar when it is clicked', () => {
     render(<ChordTimeline />);
     fireEvent.click(screen.getByTestId(`timeline-lane-${bars()[1].id}`));
@@ -434,6 +477,124 @@ describe('ChordTimeline', () => {
     // The gutter must sit outside the scrolling lanes, as the piano roll's key
     // column does, or scrolling would slide bar 1 out from under the grid.
     expect(gutter.parentElement).not.toBe(screen.getByTestId('timeline-scroll'));
+  });
+
+  describe('shared horizontal scroll', () => {
+    /** jsdom has no layout, so `scrollLeft` needs a backing store to be observable. */
+    function stubScrollLeft(element: HTMLElement) {
+      let value = 0;
+      Object.defineProperty(element, 'scrollLeft', {
+        configurable: true,
+        get: () => value,
+        set: (next: number) => {
+          value = next;
+        },
+      });
+    }
+
+    it('publishes its scroll position to the shared offset', () => {
+      editorStore.getState().setScrollExtent(2000, 800);
+      render(<ChordTimeline />);
+
+      const scroller = screen.getByTestId('timeline-scroll');
+      stubScrollLeft(scroller);
+      scroller.scrollLeft = 240;
+      fireEvent.scroll(scroller);
+
+      expect(editorStore.getState().scrollX).toBe(240);
+    });
+
+    it('follows the shared offset when the piano roll or the scrollbar moves it', () => {
+      editorStore.getState().setScrollExtent(2000, 800);
+      render(<ChordTimeline />);
+
+      const scroller = screen.getByTestId('timeline-scroll');
+      stubScrollLeft(scroller);
+
+      act(() => {
+        editorStore.getState().setScrollX(600);
+      });
+
+      expect(scroller.scrollLeft).toBe(600);
+    });
+
+    it('draws no scrollbar of its own — the editor has one at the bottom', () => {
+      render(<ChordTimeline />);
+      const scroller = screen.getByTestId('timeline-scroll');
+      // Still scrollable, so wheel and trackpad keep working over the lanes.
+      expect(scroller.className).toContain('overflow-x-auto');
+      expect(scroller.className).toContain('scrollbar-hidden');
+    });
+  });
+
+  describe('play range', () => {
+    const loop = () => {
+      const { loopStart, loopEnd } = projectStore.getState().project!;
+      return [loopStart, loopEnd];
+    };
+
+    /** Drag across the ruler. jsdom zeroes the rect, so clientX reads as beats. */
+    function dragRuler(fromBeat: number, toBeat: number) {
+      const ruler = screen.getByTestId('timeline-ruler');
+      fireEvent.pointerDown(ruler, { clientX: fromBeat * PIXELS_PER_BEAT, pointerId: 1 });
+      fireEvent.pointerMove(window, { clientX: toBeat * PIXELS_PER_BEAT, pointerId: 1 });
+      fireEvent.pointerUp(window, { clientX: toBeat * PIXELS_PER_BEAT, pointerId: 1 });
+    }
+
+    it('sets the range from a drag across the ruler', () => {
+      render(<ChordTimeline />);
+      dragRuler(1, 5);
+
+      expect(loop()).toEqual([1, 5]);
+      expect(screen.getByTestId('loop-range')).toHaveStyle({
+        left: `${1 * PIXELS_PER_BEAT}px`,
+        width: `${4 * PIXELS_PER_BEAT}px`,
+      });
+    });
+
+    it('reads a backwards drag as the same range', () => {
+      render(<ChordTimeline />);
+      dragRuler(6, 2);
+
+      expect(loop()).toEqual([2, 6]);
+    });
+
+    it('snaps the range to the grid', () => {
+      editorStore.getState().setSnapBeats(0.5);
+      render(<ChordTimeline />);
+      dragRuler(0.9, 3.4);
+
+      expect(loop()).toEqual([1, 3.5]);
+    });
+
+    it('clears the range on a click that never moved', () => {
+      render(<ChordTimeline />);
+      dragRuler(1, 5);
+
+      const ruler = screen.getByTestId('timeline-ruler');
+      fireEvent.pointerDown(ruler, { clientX: 3 * PIXELS_PER_BEAT, pointerId: 1 });
+      fireEvent.pointerUp(window, { clientX: 3 * PIXELS_PER_BEAT, pointerId: 1 });
+
+      expect(loop()).toEqual([undefined, undefined]);
+      expect(screen.queryByTestId('loop-range')).not.toBeInTheDocument();
+    });
+
+    it('resizes the range by its end handle, leaving the start put', () => {
+      render(<ChordTimeline />);
+      dragRuler(1, 5);
+
+      const handle = screen.getByRole('button', { name: 'Loop end' });
+      fireEvent.pointerDown(handle, { clientX: 5 * PIXELS_PER_BEAT, pointerId: 1 });
+      fireEvent.pointerMove(window, { clientX: 7 * PIXELS_PER_BEAT, pointerId: 1 });
+      fireEvent.pointerUp(window, { clientX: 7 * PIXELS_PER_BEAT, pointerId: 1 });
+
+      expect(loop()).toEqual([1, 7]);
+    });
+
+    it('renders no range until one is drawn', () => {
+      render(<ChordTimeline />);
+      expect(screen.queryByTestId('loop-range')).not.toBeInTheDocument();
+    });
   });
 
   it('offers no Add Chord, chord-symbol field or Auto-Fill control', () => {

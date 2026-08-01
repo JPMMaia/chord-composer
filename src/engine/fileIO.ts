@@ -15,8 +15,11 @@ import { isValidTimeSignature } from '@/engine/timeline';
  * 1.3 added a per-segment octave, so chords can be voiced in any register. An
  * absent octave is read as 4, the octave every pre-1.3 chord was generated in,
  * so older files sound identical.
+ *
+ * 1.4 added the play range and the repeat flag. Absent fields mean "no range, no
+ * repeat" — play the whole project once — which is all a pre-1.4 file could mean.
  */
-export const SCHEMA_VERSION = '1.3';
+export const SCHEMA_VERSION = '1.4';
 
 /**
  * Validation error returned by validateProject.
@@ -68,6 +71,10 @@ export function serializeProject(project: Project): string {
     timeSignature: project.timeSignature,
     key: project.key,
     keyMode: project.keyMode,
+    // Undefined bounds drop out of the JSON, which is exactly "no range".
+    loopStart: project.loopStart,
+    loopEnd: project.loopEnd,
+    loopEnabled: project.loopEnabled ?? false,
     tracks: project.tracks.map(t => ({
       id: t.id,
       name: t.name,
@@ -202,6 +209,14 @@ export function deserializeProject(json: string): Project {
       }))
     : [];
 
+  // A range needs both bounds to mean anything; a half-written one is discarded
+  // rather than half-applied.
+  const hasRange =
+    typeof p.loopStart === 'number' &&
+    typeof p.loopEnd === 'number' &&
+    p.loopStart >= 0 &&
+    p.loopEnd > p.loopStart;
+
   return {
     id: p.id as string,
     name,
@@ -211,6 +226,9 @@ export function deserializeProject(json: string): Project {
     keyMode,
     tracks,
     bars,
+    loopStart: hasRange ? (p.loopStart as number) : undefined,
+    loopEnd: hasRange ? (p.loopEnd as number) : undefined,
+    loopEnabled: p.loopEnabled === true,
     createdAt: new Date(p.createdAt as string),
     updatedAt: new Date(p.updatedAt as string),
   };
@@ -249,6 +267,18 @@ export function validateProject(project: Project): ValidationResult {
 
   if (project.keyMode !== 'major' && project.keyMode !== 'minor') {
     errors.push(`Invalid keyMode: ${project.keyMode}. Must be "major" or "minor".`);
+  }
+
+  // Validate the play range: both bounds together, non-negative, non-empty.
+  const { loopStart, loopEnd } = project;
+  if ((loopStart === undefined) !== (loopEnd === undefined)) {
+    errors.push('Play range needs both a start and an end.');
+  } else if (loopStart !== undefined && loopEnd !== undefined) {
+    if (loopStart < 0 || loopEnd < 0) {
+      errors.push(`Play range bounds must be >= 0. Got: ${loopStart}, ${loopEnd}.`);
+    } else if (loopStart >= loopEnd) {
+      errors.push(`Play range start (${loopStart}) must be before its end (${loopEnd}).`);
+    }
   }
 
   // Validate tracks

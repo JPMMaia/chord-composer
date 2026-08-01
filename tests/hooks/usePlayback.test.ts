@@ -83,6 +83,7 @@ const config: PlaybackConfig = {
   tracks: [],
   loopStart: null,
   loopEnd: null,
+  loopEnabled: false,
 };
 
 /** Advance the audio clock and let the scheduling interval catch up. */
@@ -281,7 +282,7 @@ describe('usePlayback', () => {
   });
 
   it('wraps without a gap when looping', async () => {
-    const looped: PlaybackConfig = { ...config, loopStart: 0, loopEnd: 4 };
+    const looped: PlaybackConfig = { ...config, loopStart: 0, loopEnd: 4, loopEnabled: true };
     const { result } = renderHook(() => usePlayback(looped));
     await startPlayback(result);
     await advance(6);
@@ -290,6 +291,78 @@ describe('usePlayback', () => {
     expect(result.current.isPlaying).toBe(true);
     expect(scheduled.length).toBeGreaterThan(4);
     expect(scheduled.filter(n => n.midiNote === 60).length).toBeGreaterThan(1);
+  });
+
+  describe('play range', () => {
+    /** Two bars, so a range over the second one has something before it to skip. */
+    const twoBars: PlaybackConfig = {
+      ...config,
+      bars: [
+        makeBar(0, [makeNote(60, 0), makeNote(62, 1), makeNote(64, 2), makeNote(65, 3)]),
+        makeBar(1, [makeNote(67, 0), makeNote(69, 1), makeNote(71, 2), makeNote(72, 3)]),
+      ],
+    };
+    /** Beats 4–8: the whole of the second bar. */
+    const ranged: PlaybackConfig = { ...twoBars, loopStart: 4, loopEnd: 8 };
+
+    it('starts at the range rather than the top of the song', async () => {
+      const { result } = renderHook(() => usePlayback(ranged));
+      await startPlayback(result);
+
+      expect(result.current.currentTime).toBeCloseTo(4, 5);
+      expect(scheduled.map(n => n.midiNote)).toEqual([67]);
+    });
+
+    it('stops at the end of the range when repeat is off', async () => {
+      const { result } = renderHook(() => usePlayback(ranged));
+      await startPlayback(result);
+      await advance(5);
+
+      expect(result.current.isPlaying).toBe(false);
+      // Back to the range start, ready to hear the same passage again.
+      expect(result.current.currentTime).toBeCloseTo(4, 5);
+      expect(scheduled.map(n => n.midiNote)).not.toContain(60);
+    });
+
+    it('repeats the range instead of stopping when repeat is on', async () => {
+      const { result } = renderHook(() => usePlayback({ ...ranged, loopEnabled: true }));
+      await startPlayback(result);
+      await advance(6);
+
+      expect(result.current.isPlaying).toBe(true);
+      expect(scheduled.filter(n => n.midiNote === 67).length).toBeGreaterThan(1);
+      expect(scheduled.map(n => n.midiNote)).not.toContain(60);
+    });
+
+    it('wraps in beats, not seconds, when a beat is not a second', async () => {
+      // At 120 BPM beats 4–8 are seconds 2–4. Reading the bounds as seconds would
+      // put the wrap at 6s and the playhead outside the range entirely.
+      const { result } = renderHook(() =>
+        usePlayback({ ...ranged, bpm: 120, loopEnabled: true })
+      );
+      await startPlayback(result);
+      expect(result.current.currentTime).toBeCloseTo(2, 5);
+
+      await advance(5);
+
+      expect(result.current.isPlaying).toBe(true);
+      expect(result.current.currentTime).toBeGreaterThanOrEqual(2);
+      expect(result.current.currentTime).toBeLessThanOrEqual(4);
+    });
+
+    it('returns to the range start after a stop', async () => {
+      const { result } = renderHook(() => usePlayback(ranged));
+      await startPlayback(result);
+      await advance(1);
+      act(() => result.current.stop());
+
+      scheduled.length = 0;
+      await act(async () => {
+        await result.current.play();
+      });
+
+      expect(scheduled.map(n => n.midiNote)).toEqual([67]);
+    });
   });
 
   it('ignores a second Play while the first is still loading', async () => {

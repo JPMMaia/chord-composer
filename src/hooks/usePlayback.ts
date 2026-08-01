@@ -6,9 +6,22 @@ import type { NoteTiming, PlaybackConfig } from '@/engine/playback';
 import {
   LOOKAHEAD_SECONDS,
   TICK_MS,
+  beatToSongTime,
   notesInWindow,
   toClockTime,
 } from '@/engine/scheduler';
+
+/**
+ * Where the play range begins, in song time.
+ *
+ * The config states the range in beats while everything the scheduler does is in
+ * seconds, so the conversion belongs here rather than at each use.
+ */
+function rangeStart(config: PlaybackConfig): number {
+  return config.loopStart === null || config.loopEnd === null
+    ? 0
+    : beatToSongTime(config.loopStart, config.bpm);
+}
 
 /**
  * Drives playback: owns the AudioContext, the instrument, and the look-ahead
@@ -63,12 +76,11 @@ export function usePlayback(config: PlaybackConfig) {
       const cfg = configRef.current;
       const elapsed = instrument.now() - songStartClockRef.current;
       const loopDuration = getLoopDuration(cfg);
-      const isLooping = cfg.loopStart !== null && cfg.loopEnd !== null;
-      const loopFrom = cfg.loopStart ?? 0;
+      const loopFrom = rangeStart(cfg);
 
       const horizon = elapsed + LOOKAHEAD_SECONDS;
       /** Song time at which playback ends or wraps. */
-      const endSong = isLooping ? loopFrom + loopDuration : loopDuration;
+      const endSong = loopFrom + loopDuration;
 
       const due = notesInWindow({
         timings,
@@ -91,7 +103,7 @@ export function usePlayback(config: PlaybackConfig) {
       // frame of reference forward by one loop length rather than resetting it to
       // `now`, so the wrap lands on the beat instead of wherever the tick fired.
       if (elapsed >= endSong) {
-        if (isLooping) {
+        if (cfg.loopEnabled) {
           songStartClockRef.current += loopDuration;
           scheduledUpToRef.current = loopFrom;
           setCurrentTime(loopFrom);
@@ -101,7 +113,9 @@ export function usePlayback(config: PlaybackConfig) {
         clearTimer();
         instrument.stopAll();
         setIsPlaying(false);
-        setCurrentTime(0);
+        // Back to the start of the range rather than of the song, so pressing Play
+        // again repeats what was just heard.
+        setCurrentTime(loopFrom);
         resumeFromRef.current = 0;
         return;
       }
@@ -147,7 +161,9 @@ export function usePlayback(config: PlaybackConfig) {
       }
 
       const timings = calculateNoteTiming(configRef.current);
-      const resumeFrom = resumeFromRef.current;
+      // A range confines playback whether or not repeat is on, so a Play from a
+      // stopped transport starts at the range rather than at the top of the song.
+      const resumeFrom = Math.max(resumeFromRef.current, rangeStart(configRef.current));
 
       // Anchoring the reference *behind* `now` by the resume offset is what makes a
       // paused project pick up where it left off with the same arithmetic.

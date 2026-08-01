@@ -234,6 +234,25 @@ export function getTotalBeats(bars: Bar[], projectTs: TimeSignature): number {
   return bars.reduce((sum, bar) => sum + getBarBeats(bar, projectTs), 0);
 }
 
+/**
+ * Index of the bar containing an absolute beat, clamped to the project's range.
+ *
+ * Bar lengths vary, so this walks rather than divides. A beat sitting exactly on a
+ * bar line belongs to the bar it opens.
+ */
+export function getBarIndexAtBeat(
+  bars: Bar[],
+  projectTs: TimeSignature,
+  beat: number
+): number {
+  let start = 0;
+  for (let i = 0; i < bars.length; i++) {
+    start += getBarBeats(bars[i], projectTs);
+    if (beat < start) return i;
+  }
+  return Math.max(0, bars.length - 1);
+}
+
 /** Concatenate every bar's segments into one ordered list. */
 export function flattenSegments(bars: Bar[]): ChordSegment[] {
   return bars.flatMap(bar => bar.chords);

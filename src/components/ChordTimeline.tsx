@@ -1,16 +1,19 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { Bar, ChordSegment, TimeSignature } from '@/types/music';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { editorStore } from '@/store/editorStore';
-import { getBarBeats, snapBeat, SNAP_OPTIONS } from '@/engine/timeline';
+import {
+  getBarBeats,
+  getBarStartBeat,
+  getTotalBeats,
+  snapBeat,
+  SNAP_OPTIONS,
+} from '@/engine/timeline';
 import { paletteItemToSegment, type PaletteItem } from '@/engine/palette';
 import { PALETTE_DRAG_TYPE } from '@/components/ScalePalette';
 import { ChordSegmentBlock } from '@/components/ChordSegmentBlock';
-import { PIANO_KEYS_WIDTH } from '@/utils/constants';
-
-/** Horizontal zoom of the timeline. A beat is this many pixels wide. */
-export const PIXELS_PER_BEAT = 80;
+import { BAR_LINE_WIDTH, PIANO_KEYS_WIDTH, PIXELS_PER_BEAT } from '@/utils/constants';
 
 /** Beats a freshly dropped block occupies before the user resizes it. */
 const DROP_DURATION_BEATS = 1;
@@ -49,6 +52,22 @@ interface DragState {
 /** How far the pointer may wander before the gesture counts as a drag, in pixels. */
 const DRAG_THRESHOLD_PX = 3;
 
+/** A play-range drag in flight, in absolute beats from the start of the project. */
+interface RangeDragState {
+  /** The edge that stays put: the pointer's origin, or the far edge when resizing. */
+  anchorBeat: number;
+  /** Where the pointer went down. Only used to tell a click from a drag. */
+  originBeat: number;
+  /** The edge that follows the pointer. */
+  beat: number;
+  moved: boolean;
+  /** True when the gesture began on an existing edge handle rather than open ruler. */
+  fromHandle: boolean;
+}
+
+/** Width of the grab strips at the play range's edges, in pixels. */
+const RANGE_HANDLE_PX = 8;
+
 /** Attribute the drag hit-test looks for; a lane carries its bar's id. */
 const LANE_ATTRIBUTE = 'data-timeline-lane';
 
@@ -66,6 +85,7 @@ export const ChordTimeline: React.FC = () => {
   const moveSegment = projectStore(s => s.moveSegment);
   const resizeSegmentDuration = projectStore(s => s.resizeSegmentDuration);
   const setBarTimeSignature = projectStore(s => s.setBarTimeSignature);
+  const setLoopRegion = projectStore(s => s.setLoopRegion);
 
   const selectedBarId = selectionStore(s => s.selectedBarId);
   const selectedSegmentId = selectionStore(s => s.selectedSegmentId);
@@ -74,10 +94,18 @@ export const ChordTimeline: React.FC = () => {
 
   const snapBeats = editorStore(s => s.snapBeats);
   const setSnapBeats = editorStore(s => s.setSnapBeats);
+  const scrollX = editorStore(s => s.scrollX);
+  const setScrollX = editorStore(s => s.setScrollX);
 
   /** Where the insertion caret sits while a palette block hovers. */
   const [dropIndicator, setDropIndicator] = useState<{ barId: string; beat: number } | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
+  const [rangeDrag, setRangeDrag] = useState<RangeDragState | null>(null);
+
+  const rulerRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const rangeDragRef = useRef<RangeDragState | null>(null);
+  rangeDragRef.current = rangeDrag;
 
   // Read by the click handler to tell a drag from a click. A ref, not state,
   // because the click arrives after the gesture has already been committed.
@@ -133,9 +161,101 @@ export const ChordTimeline: React.FC = () => {
     };
   }, [snapBeats, moveSegment]);
 
+  /** Absolute beat under a viewport x coordinate, snapped to the editing grid. */
+  const rulerBeatAt = useCallback(
+    (clientX: number): number => {
+      const ruler = rulerRef.current;
+      if (!ruler) return 0;
+      const beat = (clientX - ruler.getBoundingClientRect().left) / PIXELS_PER_BEAT;
+      return snapBeat(Number.isFinite(beat) ? beat : 0, snapBeats);
+    },
+    [snapBeats]
+  );
+
+  // The play-range drag, on the same window-listener pattern as the segment drag
+  // above so a gesture survives the pointer leaving the ruler.
+  useEffect(() => {
+    const handleMove = (e: PointerEvent) => {
+      const state = rangeDragRef.current;
+      if (!state) return;
+
+      const beat = rulerBeatAt(e.clientX);
+      setRangeDrag({
+        ...state,
+        beat,
+        moved:
+          state.moved ||
+          Math.abs(beat - state.originBeat) * PIXELS_PER_BEAT > DRAG_THRESHOLD_PX,
+      });
+    };
+
+    const handleUp = () => {
+      const state = rangeDragRef.current;
+      setRangeDrag(null);
+      if (!state) return;
+
+      if (!state.moved) {
+        // A click on open ruler clears the range — the discoverable way to get the
+        // whole project playing again. A click on a handle just misses; leave it be.
+        if (!state.fromHandle) setLoopRegion(null, null);
+        return;
+      }
+
+      setLoopRegion(
+        Math.min(state.anchorBeat, state.beat),
+        Math.max(state.anchorBeat, state.beat)
+      );
+    };
+
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+    return () => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+    };
+  }, [rulerBeatAt, setLoopRegion]);
+
+  // The lanes follow the shared offset, so scrolling the piano roll or the bar at
+  // the bottom of the editor moves them too. Writing only on a real difference is
+  // what keeps this from looping against the scroll handler that publishes it.
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (element && Math.abs(element.scrollLeft - scrollX) > 1) {
+      element.scrollLeft = scrollX;
+    }
+  }, [scrollX]);
+
   if (!project) return null;
 
   const { bars, timeSignature: projectTs } = project;
+  const totalBeats = getTotalBeats(bars, projectTs);
+
+  /** The range to draw: the one being dragged if there is one, else the stored one. */
+  const shownRange = rangeDrag
+    ? {
+        start: Math.min(rangeDrag.anchorBeat, rangeDrag.beat),
+        end: Math.max(rangeDrag.anchorBeat, rangeDrag.beat),
+      }
+    : project.loopStart !== undefined && project.loopEnd !== undefined
+      ? { start: project.loopStart, end: project.loopEnd }
+      : null;
+
+  /**
+   * Begin a range gesture. `anchorBeat` is the edge that stays put — for a handle
+   * that is the range's opposite edge, which is what makes resizing fall out of the
+   * same code path as drawing.
+   */
+  const startRangeDrag = (e: React.PointerEvent, anchorBeat?: number) => {
+    e.stopPropagation();
+    const originBeat = rulerBeatAt(e.clientX);
+    setRangeDrag({
+      anchorBeat: anchorBeat ?? originBeat,
+      originBeat,
+      beat: originBeat,
+      moved: false,
+      fromHandle: anchorBeat !== undefined,
+    });
+  };
 
   /** Beats from the start of a lane to the pointer. */
   const beatAt = (e: React.DragEvent<HTMLDivElement>): number => {
@@ -253,8 +373,64 @@ export const ChordTimeline: React.FC = () => {
         className="shrink-0 bg-gray-800 border-r border-gray-700"
       />
 
-      <div data-testid="timeline-scroll" className="flex-1 overflow-x-auto">
-        <div className="flex items-stretch min-w-max">
+      {/* Still a scroll container, so wheel and trackpad work over the lanes, but
+          it draws no bar of its own: the editor has one, under the piano roll. */}
+      <div
+        ref={scrollRef}
+        data-testid="timeline-scroll"
+        onScroll={e => setScrollX(e.currentTarget.scrollLeft)}
+        className="flex-1 overflow-x-auto scrollbar-hidden"
+      >
+        <div className="min-w-max">
+        {/* Play-range ruler. One continuous strip rather than one piece per bar, so
+            pointer positions read as absolute beats with no per-bar arithmetic. */}
+        <div
+          ref={rulerRef}
+          data-testid="timeline-ruler"
+          onPointerDown={e => startRangeDrag(e)}
+          style={{ width: `${totalBeats * PIXELS_PER_BEAT}px` }}
+          title="Drag to set the play range, click to clear it"
+          className="relative h-5 bg-gray-800 border-b border-gray-700 cursor-ew-resize select-none"
+        >
+          {/* Bar ticks, lining up with the bar lines below */}
+          {bars.map((bar, barIndex) => (
+            <div
+              key={bar.id}
+              data-testid="ruler-tick"
+              style={{ left: `${getBarStartBeat(bars, barIndex, projectTs) * PIXELS_PER_BEAT}px` }}
+              className="absolute top-0 bottom-0 w-px bg-gray-600"
+            />
+          ))}
+
+          {shownRange && (
+            <div
+              data-testid="loop-range"
+              style={{
+                left: `${shownRange.start * PIXELS_PER_BEAT}px`,
+                width: `${(shownRange.end - shownRange.start) * PIXELS_PER_BEAT}px`,
+              }}
+              className="absolute top-0 bottom-0 bg-indigo-500/30 border-x-2 border-indigo-400"
+            >
+              {/* Edge handles. Each drags against the opposite edge as its anchor. */}
+              <div
+                role="button"
+                aria-label="Loop start"
+                onPointerDown={e => startRangeDrag(e, shownRange.end)}
+                style={{ width: `${RANGE_HANDLE_PX}px`, left: `${-RANGE_HANDLE_PX / 2}px` }}
+                className="absolute top-0 bottom-0 cursor-ew-resize"
+              />
+              <div
+                role="button"
+                aria-label="Loop end"
+                onPointerDown={e => startRangeDrag(e, shownRange.start)}
+                style={{ width: `${RANGE_HANDLE_PX}px`, right: `${-RANGE_HANDLE_PX / 2}px` }}
+                className="absolute top-0 bottom-0 cursor-ew-resize"
+              />
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-stretch">
         {bars.map((bar, barIndex) => {
           const beats = getBarBeats(bar, projectTs);
           const width = beats * PIXELS_PER_BEAT;
@@ -274,11 +450,7 @@ export const ChordTimeline: React.FC = () => {
               key={bar.id}
               data-testid={`timeline-bar-${bar.id}`}
               style={{ width: `${width}px` }}
-              // The heavy left rule is the bar line; the last bar closes with a
-              // second one on its right.
-              className={`shrink-0 border-l-2 border-gray-400 ${
-                barIndex === bars.length - 1 ? 'border-r-2' : ''
-              }`}
+              className="relative shrink-0"
             >
               {/* Bar header */}
               <div
@@ -373,9 +545,29 @@ export const ChordTimeline: React.FC = () => {
                   );
                 })}
               </div>
+
+              {/* The bar line, and on the last bar the closing one. An overlay
+                  rather than a border on the bar: a border sits inside the box, so
+                  it would push the lane — and every beat line, block and drop
+                  position in it — two pixels right of the beat the piano roll
+                  draws below. Last in the bar so it paints over the lane's own
+                  background, which would otherwise hide it. */}
+              <div
+                data-testid="bar-line"
+                style={{ left: 0, width: `${BAR_LINE_WIDTH}px` }}
+                className="absolute top-0 bottom-0 bg-gray-400 pointer-events-none"
+              />
+              {barIndex === bars.length - 1 && (
+                <div
+                  data-testid="bar-line"
+                  style={{ right: 0, width: `${BAR_LINE_WIDTH}px` }}
+                  className="absolute top-0 bottom-0 bg-gray-400 pointer-events-none"
+                />
+              )}
             </div>
           );
         })}
+        </div>
         </div>
       </div>
       </div>

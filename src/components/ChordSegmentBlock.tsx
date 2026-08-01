@@ -42,6 +42,14 @@ function chordOctave(segment: ChordSegment): number {
   return segment.octave ?? 4;
 }
 
+/** Inversion names by index; root position is unnamed because it is the default. */
+const INVERSION_LABELS = ['', '1st', '2nd', '3rd'];
+
+/** What the badge says about a chord's voicing, or '' in root position. */
+function inversionLabel(segment: ChordSegment): string {
+  return INVERSION_LABELS[segment.inversion ?? 0] ?? '';
+}
+
 /**
  * One segment on the chord timeline: a chord or a single note, sized by its
  * duration and resizable from its right edge.
@@ -123,7 +131,9 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
       aria-label={
         isNote
           ? `Note ${primaryLabel(segment)}`
-          : `Chord ${primaryLabel(segment)} octave ${chordOctave(segment)}`
+          : `Chord ${primaryLabel(segment)} octave ${chordOctave(segment)}${
+              inversionLabel(segment) ? ` ${inversionLabel(segment)} inversion` : ''
+            }`
       }
       onClick={e => {
         e.stopPropagation();
@@ -154,14 +164,16 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
         <span className="text-[10px] opacity-70 leading-tight">{segment.romanNumeral}</span>
       )}
 
-      {/* One bar can hold blocks from several registers, so a chord states its
-          own. A note needs no badge — its label already ends in the octave. */}
+      {/* One bar can hold blocks from several registers and voicings, so a chord
+          states its own. A note needs no badge — its label already ends in the
+          octave, and a single pitch has no inversion. */}
       {!isNote && (
         <span
           data-testid={`octave-badge-${segment.id}`}
           className="absolute bottom-0 left-1 text-[9px] opacity-60 leading-none pb-0.5"
         >
           oct {chordOctave(segment)}
+          {inversionLabel(segment) && ` · ${inversionLabel(segment)}`}
         </span>
       )}
 

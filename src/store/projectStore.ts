@@ -4,6 +4,7 @@ import type {
   Bar,
   ChordSegment,
   NoteName,
+  Scale,
   ScaleType,
   TimeSignature,
 } from '@/types/music';
@@ -11,14 +12,22 @@ import { generateId } from '@/utils/id';
 import {
   clampToBar,
   getBarBeats,
+  getTotalBeats,
   isValidTimeSignature,
+  MIN_SEGMENT_BEATS,
   placeSegmentInBar,
   refitBars,
   removeSegmentById,
   resizeSegment,
   withStartBeats,
 } from '@/engine/timeline';
-import { generateNotesFromSegments, retuneSegmentsToScale } from '@/engine/chordOperations';
+import {
+  cycleSegmentInversion,
+  generateNotesFromSegments,
+  retuneSegmentsToScale,
+  shiftSegmentOctave,
+  stepSegmentInScale,
+} from '@/engine/chordOperations';
 import {
   DEFAULT_BPM,
   DEFAULT_TIME_SIGNATURE,
@@ -41,6 +50,11 @@ interface ProjectState {
   removeSegment: (segmentId: string) => void;
   moveSegment: (segmentId: string, targetBarId: string, startBeat: number) => void;
   resizeSegmentDuration: (segmentId: string, duration: number) => void;
+  stepSegmentPitch: (segmentId: string, direction: -1 | 1) => void;
+  shiftSegmentOctave: (segmentId: string, direction: -1 | 1) => void;
+  cycleSegmentInversion: (segmentId: string) => void;
+  setLoopRegion: (start: number | null, end: number | null) => void;
+  toggleLoopEnabled: () => void;
   resetProject: () => void;
 }
 
@@ -99,6 +113,42 @@ function placedIn(bar: Bar, segment: ChordSegment, startBeat: number, capacity: 
   return [...kept, ...overflow.map(s => ({ ...s, startBeat: capacity }))];
 }
 
+/**
+ * Rewrite a single segment in place, leaving where it sits alone.
+ *
+ * The transform is handed the scale of the bar the segment actually lives in,
+ * which is what lets "the next note of the scale" mean the right thing in a
+ * project whose bars are in different keys. Only the derived notes are resynced:
+ * none of these edits moves a block along the timeline, so unlike `applyBars`
+ * there is nothing here for `refitBars` to refit.
+ *
+ * Returns null when no bar holds the segment, so the caller can leave the store
+ * untouched rather than publishing an identical project.
+ */
+function withTransformedSegment(
+  project: Project,
+  segmentId: string,
+  transform: (segment: ChordSegment, scale: Scale) => ChordSegment
+): Project | null {
+  const owner = project.bars.find(b => b.chords.some(c => c.id === segmentId));
+  if (!owner) return null;
+
+  const bars = project.bars.map(bar =>
+    bar.id === owner.id
+      ? {
+          ...bar,
+          chords: bar.chords.map(c => (c.id === segmentId ? transform(c, bar.scale) : c)),
+        }
+      : bar
+  );
+
+  return {
+    ...project,
+    bars: withGeneratedNotes(bars, project.timeSignature),
+    updatedAt: new Date(),
+  };
+}
+
 const createInitialProject = (): Project => ({
   id: generateId(),
   name: 'Untitled',
@@ -143,6 +193,42 @@ export const projectStore = create<ProjectState>((set, get) => ({
         bpm,
         updatedAt: new Date(),
       },
+    });
+  },
+
+  /**
+   * Set — or, with a null bound, clear — the play range.
+   *
+   * Unlike the other setters this never throws: it is driven by a pointer drag, which
+   * can legitimately produce a backwards or zero-width range on the way to a good one.
+   * A range too short to hear is simply ignored, leaving the previous one in place.
+   */
+  setLoopRegion: (start: number | null, end: number | null) => {
+    const project = get().project;
+    if (!project) return;
+
+    if (start === null || end === null) {
+      set({
+        project: { ...project, loopStart: undefined, loopEnd: undefined, updatedAt: new Date() },
+      });
+      return;
+    }
+
+    const songEnd = getTotalBeats(project.bars, project.timeSignature);
+    const clamp = (beat: number) => Math.max(0, Math.min(beat, songEnd));
+    const loopStart = clamp(Math.min(start, end));
+    const loopEnd = clamp(Math.max(start, end));
+
+    if (loopEnd - loopStart < MIN_SEGMENT_BEATS) return;
+
+    set({ project: { ...project, loopStart, loopEnd, updatedAt: new Date() } });
+  },
+
+  toggleLoopEnabled: () => {
+    const project = get().project;
+    if (!project) return;
+    set({
+      project: { ...project, loopEnabled: !project.loopEnabled, updatedAt: new Date() },
     });
   },
 
@@ -317,6 +403,34 @@ export const projectStore = create<ProjectState>((set, get) => ({
       resizeSegment(chords, segmentId, duration, maxBeats)
     );
     set({ project: applyBars(project, bars) });
+  },
+
+  /** Move the segment one step along its bar's scale — the up and down arrows. */
+  stepSegmentPitch: (segmentId: string, direction: -1 | 1) => {
+    const project = get().project;
+    if (!project) return;
+    const next = withTransformedSegment(project, segmentId, (segment, scale) =>
+      stepSegmentInScale(segment, scale, direction)
+    );
+    if (next) set({ project: next });
+  },
+
+  /** Move the segment a whole octave — the + and - keys. */
+  shiftSegmentOctave: (segmentId: string, direction: -1 | 1) => {
+    const project = get().project;
+    if (!project) return;
+    const next = withTransformedSegment(project, segmentId, segment =>
+      shiftSegmentOctave(segment, direction)
+    );
+    if (next) set({ project: next });
+  },
+
+  /** Advance a chord to its next inversion, wrapping to root position — the `i` key. */
+  cycleSegmentInversion: (segmentId: string) => {
+    const project = get().project;
+    if (!project) return;
+    const next = withTransformedSegment(project, segmentId, cycleSegmentInversion);
+    if (next) set({ project: next });
   },
 
   resetProject: () => {

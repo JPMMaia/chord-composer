@@ -9,6 +9,7 @@ import {
   chordFromRomanNumeral,
   chordFromSymbol,
   chordToNotes,
+  invertIntervals,
   midiToOctave,
   midiToNoteLabel,
 } from '@/engine/chords';
@@ -268,6 +269,34 @@ describe('chords', () => {
 
     it("throws for invalid quality", () => {
       expect(() => chordToNotes({ root: 'C', intervals: [0, 3] }, 4)).toThrow('Invalid chord intervals');
+    });
+  });
+
+  describe('invertIntervals', () => {
+    it("leaves a chord in root position alone", () => {
+      expect(invertIntervals([0, 4, 7], 0)).toEqual([0, 4, 7]);
+    });
+
+    it("lifts the root an octave for the first inversion", () => {
+      expect(invertIntervals([0, 4, 7], 1)).toEqual([4, 7, 12]);
+    });
+
+    it("lifts the root and third for the second inversion", () => {
+      expect(invertIntervals([0, 4, 7], 2)).toEqual([7, 12, 16]);
+    });
+
+    it("takes a seventh chord through its third inversion", () => {
+      expect(invertIntervals([0, 4, 7, 10], 3)).toEqual([10, 12, 16, 19]);
+    });
+
+    it("returns to root position after a full cycle, an octave up", () => {
+      expect(invertIntervals([0, 4, 7], 3)).toEqual([12, 16, 19]);
+    });
+
+    it("does not mutate the intervals it is given", () => {
+      const intervals = [0, 4, 7];
+      invertIntervals(intervals, 2);
+      expect(intervals).toEqual([0, 4, 7]);
     });
   });
 

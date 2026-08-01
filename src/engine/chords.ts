@@ -74,6 +74,27 @@ export function midiToNoteLabel(midi: number): string {
   return `${SEMITONE_TO_NOTE[pitchClass]}${midiToOctave(midi)}`;
 }
 
+/**
+ * Rotates a chord's intervals into an inversion: the lowest `inversion` notes
+ * each move up an octave, so `[0,4,7]` at inversion 1 becomes `[4,7,12]` — the
+ * third in the bass, the root on top.
+ *
+ * Kept separate from any particular octave so both the chord builder and the
+ * timeline's note generator can voice a segment the same way.
+ *
+ * @param intervals - Ascending semitone offsets from the chord root.
+ * @param inversion - How many notes to lift; values past the chord size keep
+ *   rotating, which simply stacks the whole chord an octave higher.
+ * @returns A new array; the input is left alone.
+ */
+export function invertIntervals(intervals: number[], inversion: number): number[] {
+  const shifted = [...intervals];
+  for (let i = 0; i < inversion; i++) {
+    shifted.push(shifted.shift()! + 12);
+  }
+  return shifted;
+}
+
 /** Roman numeral labels for major scale degrees (case varies by quality). */
 const ROMAN_NUMERAL_BASES_MAJOR = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII'];
 
@@ -340,14 +361,9 @@ export function chordToNotes(chord: ChordData, octave: number, inversion: number
   const rootSemitone = NOTE_TO_SEMITONE[chord.root];
   const baseMidi = (octave + 1) * 12;
 
-  // Apply inversion: rotate the first `inversion` elements to the end, adding 12
-  const shifted = [...intervals];
-  for (let i = 0; i < inversion && i < shifted.length; i++) {
-    const moved = shifted.shift()!;
-    shifted.push(moved + 12);
-  }
-
-  return shifted.map(interval => baseMidi + rootSemitone + interval);
+  return invertIntervals(intervals, inversion).map(
+    interval => baseMidi + rootSemitone + interval
+  );
 }
 
 /**

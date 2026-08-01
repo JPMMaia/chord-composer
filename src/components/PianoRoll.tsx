@@ -12,6 +12,7 @@ import { midiToNoteLabel } from '@/engine/chords';
 import { isNoteInScale } from '@/engine/scales';
 import { getBarBeats, getBarStartBeat, getTotalBeats } from '@/engine/timeline';
 import {
+  BAR_LINE_WIDTH,
   PIANO_KEYS_WIDTH,
   PIANO_ROLL_MAX_MIDI,
   PIANO_ROLL_MIN_MIDI,
@@ -26,6 +27,17 @@ export interface PianoRollProps {
   gridSize: number;
   /** Project meter, used for any bar that does not carry one of its own. */
   timeSignature: TimeSignature;
+  /**
+   * Shared horizontal scroll offset in pixels, from the editor's one scrollbar.
+   *
+   * The keyboard is painted into this canvas rather than being a DOM element, so
+   * the roll cannot live in a DOM scroller without the keys sliding away. It draws
+   * at an offset instead, which also keeps the canvas viewport-sized rather than
+   * as wide as the whole project.
+   */
+  scrollLeft?: number;
+  /** Called when a horizontal wheel gesture over the grid should move the shared offset. */
+  onScrollLeftChange?: (scrollLeft: number) => void;
   /** Optional: the roll is a read-only view of the derived notes unless supplied. */
   onNoteClick?: (barId: string, pitch: number, beat: number) => void;
   onNoteDrag?: (noteId: string, durationDelta: number) => void;
@@ -88,6 +100,8 @@ export function PianoRoll({
   pixelsPerOctave,
   gridSize,
   timeSignature,
+  scrollLeft = 0,
+  onScrollLeftChange,
   onNoteClick,
   onNoteDrag,
 }: PianoRollProps): React.ReactElement {
@@ -103,6 +117,10 @@ export function PianoRoll({
   });
   const animationFrameRef = useRef<number>(0);
   const hasCentredRef = useRef(false);
+  // The wheel listener is installed once, so it reads the live offset from a ref
+  // rather than closing over a stale one.
+  const scrollLeftRef = useRef(scrollLeft);
+  scrollLeftRef.current = scrollLeft;
 
   /** Height of the full key bed — the canvas is this tall and the container scrolls it. */
   const contentHeight = useMemo(() => pitchRangeHeight(pixelsPerOctave), [pixelsPerOctave]);
@@ -146,7 +164,8 @@ export function PianoRoll({
   const render = useCallback(
     (ctx: CanvasRenderingContext2D, width: number, height: number) => {
       ctx.clearRect(0, 0, width, height);
-      const timelineStart = PIANO_KEYS_WIDTH;
+      // Beat 0 sits just past the key column, pulled left by the shared scroll.
+      const timelineStart = PIANO_KEYS_WIDTH - scrollLeft;
 
       const semitonesPerOctave = 12;
       const pixelsPerSemitone = pixelsPerOctave / semitonesPerOctave;
@@ -180,6 +199,14 @@ export function PianoRoll({
         }
       }
 
+      // Everything from here on is drawn in the scrolled beat axis, so it is
+      // clipped to the area right of the keys — otherwise a bar line scrolled
+      // past beat 0 would paint straight over the keyboard.
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(PIANO_KEYS_WIDTH, 0, Math.max(0, width - PIANO_KEYS_WIDTH), height);
+      ctx.clip();
+
       ctx.strokeStyle = DEFAULT_COLORS.gridLine;
       ctx.lineWidth = 0.5;
 
@@ -201,16 +228,18 @@ export function PianoRoll({
       }
 
       // Bar lines sit at accumulated bar starts — bars need not share a metre —
-      // plus a closing line at the end of the last bar.
-      ctx.strokeStyle = DEFAULT_COLORS.barLine;
-      ctx.lineWidth = 1;
+      // plus a closing line at the end of the last bar. Filled rather than stroked
+      // so they land on the same pixels as the timeline's, which draws its own as
+      // `BAR_LINE_WIDTH` overlays starting at the bar: a centred stroke would
+      // straddle the boundary and read as a pixel of misalignment between the panes.
+      ctx.fillStyle = DEFAULT_COLORS.barLine;
+      const lastX = timelineStart + beatToPixel(totalBeats, pixelsPerBeat) - BAR_LINE_WIDTH;
       for (let barIndex = 0; barIndex <= bars.length; barIndex++) {
         const barStartBeat = getBarStartBeat(bars, barIndex, timeSignature);
         const x = timelineStart + beatToPixel(barStartBeat, pixelsPerBeat);
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, height);
-        ctx.stroke();
+        // The closing line is pulled inside the last bar, exactly as the timeline's
+        // is, so the project still ends at `totalBeats * pixelsPerBeat`.
+        ctx.fillRect(Math.min(x, lastX), 0, BAR_LINE_WIDTH, height);
       }
 
       if (selectedBar) {
@@ -257,8 +286,19 @@ export function PianoRoll({
       ctx.moveTo(playheadX, 0);
       ctx.lineTo(playheadX, height);
       ctx.stroke();
+
+      ctx.restore();
     },
-    [bars, selectedBar, positionedNotes, pixelsPerBeat, pixelsPerOctave, playheadBeat, timeSignature]
+    [
+      bars,
+      selectedBar,
+      positionedNotes,
+      pixelsPerBeat,
+      pixelsPerOctave,
+      playheadBeat,
+      timeSignature,
+      scrollLeft,
+    ]
   );
 
   useEffect(() => {
@@ -302,6 +342,30 @@ export function PianoRoll({
     );
   }, [contentHeight, pixelsPerOctave]);
 
+  /**
+   * Horizontal wheel and trackpad gestures move the shared offset; plain vertical
+   * scrolling is left to the container, which owns the pitch axis.
+   *
+   * A native listener rather than React's `onWheel`, because React registers wheel
+   * handlers passively at the root and `preventDefault` there is ignored — the page
+   * would scroll sideways as well as the roll.
+   */
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !onScrollLeftChange) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      const delta = e.deltaX !== 0 ? e.deltaX : e.shiftKey ? e.deltaY : 0;
+      if (delta === 0) return;
+
+      e.preventDefault();
+      onScrollLeftChange(scrollLeftRef.current + delta);
+    };
+
+    container.addEventListener('wheel', handleWheel, { passive: false });
+    return () => container.removeEventListener('wheel', handleWheel);
+  }, [onScrollLeftChange]);
+
   useEffect(() => {
     let running = true;
 
@@ -334,7 +398,7 @@ export function PianoRoll({
   const noteAt = useCallback(
     (x: number, y: number): PositionedNote | undefined =>
       selectedBarNotes.find(({ note, absoluteBeat }) => {
-        const noteX = PIANO_KEYS_WIDTH + beatToPixel(absoluteBeat, pixelsPerBeat);
+        const noteX = PIANO_KEYS_WIDTH - scrollLeft + beatToPixel(absoluteBeat, pixelsPerBeat);
         const noteY = pitchToPixel(note.pitch, pixelsPerOctave);
         const noteWidth = beatToPixel(note.duration, pixelsPerBeat);
         const noteHeight = pixelsPerOctave / 12;
@@ -343,7 +407,7 @@ export function PianoRoll({
           x >= noteX && x <= noteX + noteWidth && y >= noteY && y <= noteY + noteHeight
         );
       }),
-    [selectedBarNotes, pixelsPerBeat, pixelsPerOctave]
+    [selectedBarNotes, pixelsPerBeat, pixelsPerOctave, scrollLeft]
   );
 
   const beginDrag = useCallback((hit: PositionedNote, x: number, y: number) => {
@@ -368,7 +432,7 @@ export function PianoRoll({
 
       if (x < PIANO_KEYS_WIDTH) return;
 
-      const beat = pixelToBeat(x - PIANO_KEYS_WIDTH, pixelsPerBeat);
+      const beat = pixelToBeat(x - PIANO_KEYS_WIDTH + scrollLeft, pixelsPerBeat);
       const snappedBeat = snapToGrid(beat, gridSize);
       // Ceil, not round: a key row is anchored at its top edge and pitch
       // descends down the screen, so the row a click lands in is the ceiling.
@@ -401,6 +465,7 @@ export function PianoRoll({
       pixelsPerBeat,
       pixelsPerOctave,
       gridSize,
+      scrollLeft,
       scale,
       selectedBar,
       selectedBarId,

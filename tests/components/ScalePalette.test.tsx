@@ -50,14 +50,47 @@ describe('ScalePalette', () => {
     ]);
   });
 
-  it('switches to notes mode', () => {
+  it('switches to notes mode, naming each note with its octave', () => {
     render(<ScalePalette scale={C_MAJOR} />);
 
     fireEvent.change(screen.getByLabelText('Palette mode'), { target: { value: 'notes' } });
 
     expect(blockTexts()).toEqual([
-      'C (I)', 'D (ii)', 'E (iii)', 'F (IV)', 'G (V)', 'A (vi)', 'B (vii°)',
+      'C4 (I)', 'D4 (ii)', 'E4 (iii)', 'F4 (IV)', 'G4 (V)', 'A4 (vi)', 'B4 (vii°)',
     ]);
+  });
+
+  it('defaults to octave 4 and states it beside the blocks', () => {
+    render(<ScalePalette scale={C_MAJOR} />);
+
+    expect((screen.getByLabelText('Octave') as HTMLSelectElement).value).toBe('4');
+    expect(screen.getByText(/octave 4/)).toBeInTheDocument();
+  });
+
+  it('rebuilds note blocks in the chosen octave', () => {
+    render(<ScalePalette scale={C_MAJOR} />);
+    fireEvent.change(screen.getByLabelText('Palette mode'), { target: { value: 'notes' } });
+    fireEvent.change(screen.getByLabelText('Octave'), { target: { value: '6' } });
+
+    expect(blockTexts()).toEqual([
+      'C6 (I)', 'D6 (ii)', 'E6 (iii)', 'F6 (IV)', 'G6 (V)', 'A6 (vi)', 'B6 (vii°)',
+    ]);
+  });
+
+  it('keeps chord symbols bare but carries the chosen octave in the payload', () => {
+    render(<ScalePalette scale={C_MAJOR} />);
+    fireEvent.change(screen.getByLabelText('Octave'), { target: { value: '2' } });
+
+    // The symbol must stay parseable by `chordFromSymbol`, so the octave is not
+    // spliced into it — the strip caption and the timeline badge carry it.
+    expect(blockTexts()[0]).toBe('C (I)');
+
+    const dataTransfer = makeDataTransfer();
+    fireEvent.dragStart(block('C (I)'), { dataTransfer });
+    expect(JSON.parse(dataTransfer.data['application/x-palette-item'])).toMatchObject({
+      kind: 'chord',
+      octave: 2,
+    });
   });
 
   it('switches to seventh chords mode', () => {
@@ -102,9 +135,9 @@ describe('ScalePalette', () => {
     fireEvent.change(screen.getByLabelText('Palette mode'), { target: { value: 'notes' } });
 
     const dataTransfer = makeDataTransfer();
-    fireEvent.dragStart(block('C (I)'), { dataTransfer });
+    fireEvent.dragStart(block('C4 (I)'), { dataTransfer });
 
     const payload = JSON.parse(dataTransfer.data['application/x-palette-item']);
-    expect(payload).toMatchObject({ kind: 'note', pitch: 60 });
+    expect(payload).toMatchObject({ kind: 'note', pitch: 60, octave: 4 });
   });
 });

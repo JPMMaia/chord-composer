@@ -10,6 +10,7 @@ import { PianoRoll } from '@/components/PianoRoll';
 import { usePlayback } from '@/hooks/usePlayback';
 import { songTimeToBeat } from '@/engine/scheduler';
 import { getTotalBeats } from '@/engine/timeline';
+import { midiToNoteLabel } from '@/engine/chords';
 import type { NoteName, ScaleType } from '@/types/music';
 import { NOTE_NAMES, SCALE_TYPES } from '@/utils/constants';
 
@@ -201,6 +202,11 @@ function App() {
                     <div className="text-xs text-gray-500">
                       {selectedSegment.kind === 'note' ? 'Note' : 'Chord'}
                       {selectedSegment.romanNumeral ? ` · ${selectedSegment.romanNumeral}` : ''}
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      {selectedSegment.kind === 'note' && selectedSegment.pitch !== undefined
+                        ? midiToNoteLabel(selectedSegment.pitch)
+                        : `Octave ${selectedSegment.octave ?? 4}`}
                     </div>
                     <div className="text-xs text-gray-500">
                       {selectedSegment.duration} beat{selectedSegment.duration !== 1 ? 's' : ''}

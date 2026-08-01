@@ -97,7 +97,9 @@ export function usePianoRoll({
 
       const beat = pixelToBeat(x - pianoRollWidth, pixelsPerBeat);
       const snappedBeat = snapToGrid(beat, gridSize);
-      const pitch = Math.round(pixelToPitch(y, pixelsPerOctave));
+      // Ceil, not round: `pitchToPixel` anchors a row at its top edge and pitch
+      // descends down the screen, so the row a pixel is inside is the ceiling.
+      const pitch = Math.ceil(pixelToPitch(y, pixelsPerOctave));
 
       // Check if clicking on existing note
       for (const note of notes) {

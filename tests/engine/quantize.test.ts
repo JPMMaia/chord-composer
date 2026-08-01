@@ -5,8 +5,10 @@ import {
   pixelToBeat,
   pitchToPixel,
   pixelToPitch,
+  pitchRangeHeight,
   getVisibleBars,
 } from '@/engine/quantize';
+import { PIANO_ROLL_MAX_MIDI, PIANO_ROLL_MIN_MIDI } from '@/utils/constants';
 
 describe('quantize', () => {
   describe('snapToGrid', () => {
@@ -105,56 +107,75 @@ describe('quantize', () => {
   });
 
   describe('pitchToPixel', () => {
-    it('converts MIDI 60 (C4) to pixel 0 with 100px/octave', () => {
-      expect(pitchToPixel(60, 100)).toBe(0);
+    it('puts the top of the range (C8) at pixel 0', () => {
+      expect(pitchToPixel(PIANO_ROLL_MAX_MIDI, 120)).toBe(0);
     });
 
-    it('converts MIDI 72 (C5) to pixel 100 with 100px/octave', () => {
-      expect(pitchToPixel(72, 100)).toBe(100);
+    it('puts the bottom of the range (A0) at the foot of the bed', () => {
+      expect(pitchToPixel(PIANO_ROLL_MIN_MIDI, 120)).toBe(870);
     });
 
-    it('converts MIDI 48 (C3) to pixel -100 with 100px/octave', () => {
-      expect(pitchToPixel(48, 100)).toBe(-100);
+    it('draws higher pitches above lower ones', () => {
+      expect(pitchToPixel(96, 120)).toBeLessThan(pitchToPixel(60, 120));
     });
 
-    it('converts MIDI 67 (G4) to pixel ~58.33 with 100px/octave', () => {
-      expect(pitchToPixel(67, 100)).toBeCloseTo(58.33, 1);
+    it('places C7 one octave below C8', () => {
+      expect(pitchToPixel(96, 120)).toBe(120);
     });
 
     it('converts with different pixels per octave', () => {
-      expect(pitchToPixel(72, 50)).toBe(50);
-      expect(pitchToPixel(72, 200)).toBe(200);
+      expect(pitchToPixel(96, 50)).toBe(50);
+      expect(pitchToPixel(96, 200)).toBe(200);
+    });
+
+    it('honours an explicit top note', () => {
+      expect(pitchToPixel(60, 100, 60)).toBe(0);
+      expect(pitchToPixel(48, 100, 60)).toBe(100);
     });
 
     it('handles fractional semitones', () => {
-      expect(pitchToPixel(66, 100)).toBeCloseTo(50, 0);
+      expect(pitchToPixel(102, 100)).toBeCloseTo(50, 0);
     });
   });
 
   describe('pixelToPitch', () => {
-    it('converts pixel 0 to MIDI 60 with 100px/octave', () => {
-      expect(pixelToPitch(0, 100)).toBe(60);
+    it('reads pixel 0 as the top of the range', () => {
+      expect(pixelToPitch(0, 120)).toBe(PIANO_ROLL_MAX_MIDI);
     });
 
-    it('converts pixel 100 to MIDI 72 with 100px/octave', () => {
-      expect(pixelToPitch(100, 100)).toBe(72);
+    it('reads the foot of the bed as the bottom of the range', () => {
+      expect(pixelToPitch(870, 120)).toBe(PIANO_ROLL_MIN_MIDI);
     });
 
-    it('converts pixel -100 to MIDI 48 with 100px/octave', () => {
-      expect(pixelToPitch(-100, 100)).toBe(48);
-    });
-
-    it('converts pixel 70 to MIDI ~68.4 with 100px/octave', () => {
-      expect(pixelToPitch(70, 100)).toBeCloseTo(68.4, 1);
+    it('round-trips pitchToPixel', () => {
+      for (const midi of [PIANO_ROLL_MIN_MIDI, 48, 60, 72, PIANO_ROLL_MAX_MIDI]) {
+        expect(pixelToPitch(pitchToPixel(midi, 120), 120)).toBeCloseTo(midi, 6);
+      }
     });
 
     it('converts with different pixels per octave', () => {
-      expect(pixelToPitch(50, 50)).toBe(72);
-      expect(pixelToPitch(200, 200)).toBe(72);
+      expect(pixelToPitch(50, 50)).toBe(96);
+      expect(pixelToPitch(200, 200)).toBe(96);
     });
 
-    it('handles fractional pixels', () => {
-      expect(pixelToPitch(60, 100)).toBeCloseTo(67.2, 1);
+    it('honours an explicit top note', () => {
+      expect(pixelToPitch(100, 100, 60)).toBe(48);
+    });
+
+    it('ceils to the key row a pixel falls inside', () => {
+      // 10px per semitone: 5px down from C8's top edge is still C8.
+      expect(Math.ceil(pixelToPitch(5, 120))).toBe(PIANO_ROLL_MAX_MIDI);
+      expect(Math.ceil(pixelToPitch(11, 120))).toBe(PIANO_ROLL_MAX_MIDI - 1);
+    });
+  });
+
+  describe('pitchRangeHeight', () => {
+    it('is tall enough for all 88 keys', () => {
+      expect(pitchRangeHeight(120)).toBe(880);
+    });
+
+    it('scales with the zoom level', () => {
+      expect(pitchRangeHeight(60)).toBe(440);
     });
   });
 

@@ -430,9 +430,25 @@ describe('fileIO', () => {
       });
     }
 
-    it('declares schema version 1.2', () => {
+    it('declares schema version 1.3', () => {
       const parsed = JSON.parse(serializeProject(createTestProject()));
-      expect(parsed.version).toBe('1.2');
+      expect(parsed.version).toBe('1.3');
+    });
+
+    it('round-trips a segment octave', () => {
+      const project = revampProject();
+      project.bars[0].chords[0].octave = 2;
+      const restored = deserializeProject(serializeProject(project));
+
+      expect(restored.bars[0].chords[0].octave).toBe(2);
+    });
+
+    it('leaves a pre-1.3 segment without an octave, so it reads as 4', () => {
+      const json = JSON.parse(serializeProject(revampProject()));
+      for (const chord of json.bars[0].chords) delete chord.octave;
+
+      const restored = deserializeProject(JSON.stringify({ ...json, version: '1.2' }));
+      expect(restored.bars[0].chords[0].octave).toBeUndefined();
     });
 
     it('round-trips per-bar time signatures', () => {

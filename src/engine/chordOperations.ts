@@ -99,7 +99,7 @@ export function reorderChords(
  *
  * @param bar - The bar whose segments drive the notes.
  * @param projectTs - Project time signature, used when the bar has none.
- * @param octave - Octave for chord roots (e.g. 4 for the middle-C octave).
+ * @param octave - Fallback octave for chord segments that carry none of their own.
  * @returns The notes for this bar, in segment order.
  */
 export function generateNotesFromSegments(
@@ -134,7 +134,9 @@ export function generateNotesFromSegments(
     }
 
     const { quality, rootSemitone } = resolveChord(segment, bar);
-    const baseMidi = (octave + 1) * 12 + rootSemitone;
+    // The segment's own register wins; the parameter is the fallback for
+    // segments written before the palette could choose an octave.
+    const baseMidi = ((segment.octave ?? octave) + 1) * 12 + rootSemitone;
 
     for (const interval of CHORD_INTERVALS[quality]) {
       notes.push({

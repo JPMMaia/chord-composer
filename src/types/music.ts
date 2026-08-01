@@ -59,6 +59,12 @@ export interface ChordSegment {
   kind?: SegmentKind;
   /** MIDI pitch — only meaningful when kind === 'note'. */
   pitch?: number;
+  /**
+   * Register a chord is voiced in, e.g. 4 for the middle-C octave. Chord
+   * segments only — a note segment's register already lives in its absolute
+   * `pitch`. Absent in projects written before octave selection, and read as 4.
+   */
+  octave?: number;
   romanNumeral?: string;
   chordSymbol?: string;
   duration: number;

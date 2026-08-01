@@ -9,6 +9,8 @@ import {
   chordFromRomanNumeral,
   chordFromSymbol,
   chordToNotes,
+  midiToOctave,
+  midiToNoteLabel,
 } from '@/engine/chords';
 import { getScalePitches } from '@/engine/scales';
 import { Scale, NoteName, ChordQuality } from '@/types/music';
@@ -266,6 +268,38 @@ describe('chords', () => {
 
     it("throws for invalid quality", () => {
       expect(() => chordToNotes({ root: 'C', intervals: [0, 3] }, 4)).toThrow('Invalid chord intervals');
+    });
+  });
+
+  describe('midiToOctave', () => {
+    it("puts middle C in octave 4", () => {
+      expect(midiToOctave(60)).toBe(4);
+    });
+
+    it("keeps a whole octave together: B3 is still octave 3", () => {
+      expect(midiToOctave(59)).toBe(3);
+      expect(midiToOctave(48)).toBe(3);
+    });
+
+    it("covers the roll's range ends", () => {
+      expect(midiToOctave(21)).toBe(0);
+      expect(midiToOctave(108)).toBe(8);
+    });
+  });
+
+  describe('midiToNoteLabel', () => {
+    it("names middle C", () => {
+      expect(midiToNoteLabel(60)).toBe('C4');
+    });
+
+    it("spells black keys with sharps", () => {
+      expect(midiToNoteLabel(61)).toBe('C#4');
+      expect(midiToNoteLabel(70)).toBe('A#4');
+    });
+
+    it("names the lowest and highest keys of an 88-key piano", () => {
+      expect(midiToNoteLabel(21)).toBe('A0');
+      expect(midiToNoteLabel(108)).toBe('C8');
     });
   });
 });

@@ -1,3 +1,5 @@
+import { PIANO_ROLL_KEY_COUNT, PIANO_ROLL_MAX_MIDI } from '@/utils/constants';
+
 /**
  * Snap a value to the nearest grid point.
  * @param value - The value to snap.
@@ -30,23 +32,52 @@ export function pixelToBeat(pixel: number, pixelsPerBeat: number): number {
 }
 
 /**
- * Convert a MIDI pitch to pixel Y coordinate (relative to base MIDI 60 = C4).
+ * Y coordinate of the *top edge* of a MIDI note's key row.
+ *
+ * Pitch ascends upward, as on a keyboard, so the range's highest note sits at
+ * y = 0 and the lowest at the bottom of the bed. Anchoring at the top rather
+ * than at middle C is what lets the whole range be drawn into one tall,
+ * scrollable canvas whose height is exactly `pitchRangeHeight`.
+ *
  * @param midiNote - The MIDI note number.
  * @param pixelsPerOctave - Pixels per octave (12 semitones).
- * @returns Pixel Y coordinate (relative to C4).
+ * @param topMidi - Note drawn at y = 0. Defaults to the top of the piano roll.
+ * @returns Pixel Y coordinate of the row's top edge.
  */
-export function pitchToPixel(midiNote: number, pixelsPerOctave: number): number {
-  return (midiNote - 60) * (pixelsPerOctave / 12);
+export function pitchToPixel(
+  midiNote: number,
+  pixelsPerOctave: number,
+  topMidi: number = PIANO_ROLL_MAX_MIDI
+): number {
+  return (topMidi - midiNote) * (pixelsPerOctave / 12);
 }
 
 /**
- * Convert a pixel Y coordinate to MIDI pitch (relative to base MIDI 60 = C4).
+ * Continuous inverse of `pitchToPixel`. Because a row is identified by its top
+ * edge and pitch descends down the screen, the row a pixel falls inside is
+ * `Math.ceil` of this — a point just below C8's top edge is still C8.
+ *
  * @param pixel - The pixel Y coordinate.
  * @param pixelsPerOctave - Pixels per octave (12 semitones).
+ * @param topMidi - Note drawn at y = 0. Defaults to the top of the piano roll.
  * @returns MIDI note number.
  */
-export function pixelToPitch(pixel: number, pixelsPerOctave: number): number {
-  return 60 + pixel * (12 / pixelsPerOctave);
+export function pixelToPitch(
+  pixel: number,
+  pixelsPerOctave: number,
+  topMidi: number = PIANO_ROLL_MAX_MIDI
+): number {
+  return topMidi - pixel * (12 / pixelsPerOctave);
+}
+
+/**
+ * Total height of the piano roll's key bed, i.e. how tall the scrollable canvas
+ * has to be to hold every key.
+ *
+ * @param pixelsPerOctave - Pixels per octave (12 semitones).
+ */
+export function pitchRangeHeight(pixelsPerOctave: number): number {
+  return PIANO_ROLL_KEY_COUNT * (pixelsPerOctave / 12);
 }
 
 /**

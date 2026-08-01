@@ -297,14 +297,38 @@ describe('ChordTimeline', () => {
     expect(within(block).getByText('ii')).toBeInTheDocument();
   });
 
-  it('renders a note segment with its note name', () => {
+  it('renders a note segment with its note name and octave', () => {
     render(<ChordTimeline />);
     const noteItem = getPaletteItems({ root: 'C', type: 'major' }, 'notes')[2]; // E
     dropAt(bars()[0].id, noteItem, 0);
 
     const block = screen.getByTestId(`chord-block-${segments()[0].id}`);
-    expect(within(block).getByText('E')).toBeInTheDocument();
+    expect(within(block).getByText('E4')).toBeInTheDocument();
     expect(bars()[0].notes.map(n => n.pitch)).toEqual([64]);
+  });
+
+  it('badges a chord segment with its octave, but not a note segment', () => {
+    render(<ChordTimeline />);
+    dropAt(bars()[0].id, cMajorChords()[0], 0);
+    dropAt(bars()[0].id, getPaletteItems({ root: 'C', type: 'major' }, 'notes')[0], 2);
+
+    const [chord, note] = segments();
+    expect(screen.getByTestId(`octave-badge-${chord.id}`)).toHaveTextContent('oct 4');
+    expect(screen.queryByTestId(`octave-badge-${note.id}`)).not.toBeInTheDocument();
+  });
+
+  it('shows different badges for chords dropped from different octaves', () => {
+    const scale = { root: 'C', type: 'major' } as const;
+    render(<ChordTimeline />);
+    dropAt(bars()[0].id, getPaletteItems(scale, 'chords', 3)[0], 0);
+    dropAt(bars()[0].id, getPaletteItems(scale, 'chords', 6)[0], 2);
+
+    const [low, high] = segments();
+    expect(screen.getByTestId(`octave-badge-${low.id}`)).toHaveTextContent('oct 3');
+    expect(screen.getByTestId(`octave-badge-${high.id}`)).toHaveTextContent('oct 6');
+    // And the generated notes really are three octaves apart.
+    const pitches = bars()[0].notes.map(n => n.pitch);
+    expect(pitches.slice(3)).toEqual(pitches.slice(0, 3).map(p => p + 36));
   });
 
   it('selects a bar when it is clicked', () => {

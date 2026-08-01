@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import type { ChordSegment } from '@/types/music';
 import { MIN_SEGMENT_BEATS } from '@/engine/timeline';
+import { midiToNoteLabel } from '@/engine/chords';
 
 interface ChordSegmentBlockProps {
   segment: ChordSegment;
@@ -23,9 +24,22 @@ interface ChordSegmentBlockProps {
   isDragging?: boolean;
 }
 
-/** What the block leads with: a chord's symbol, a note's name. */
+/**
+ * What the block leads with: a chord's symbol, a note's name with its octave.
+ *
+ * A note's name is derived from its live pitch rather than the symbol it was
+ * dropped with, so it stays honest after a key change retunes the segment.
+ */
 function primaryLabel(segment: ChordSegment): string {
+  if (segment.kind === 'note' && segment.pitch !== undefined) {
+    return midiToNoteLabel(segment.pitch);
+  }
   return segment.chordSymbol ?? segment.root ?? segment.romanNumeral ?? '?';
+}
+
+/** Register a chord segment is voiced in; segments predating octave selection read as 4. */
+function chordOctave(segment: ChordSegment): number {
+  return segment.octave ?? 4;
 }
 
 /**
@@ -106,7 +120,11 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
       data-testid={`chord-block-${segment.id}`}
       role="button"
       tabIndex={0}
-      aria-label={`${isNote ? 'Note' : 'Chord'} ${primaryLabel(segment)}`}
+      aria-label={
+        isNote
+          ? `Note ${primaryLabel(segment)}`
+          : `Chord ${primaryLabel(segment)} octave ${chordOctave(segment)}`
+      }
       onClick={e => {
         e.stopPropagation();
         onSelect(segment.id);
@@ -134,6 +152,17 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
       </span>
       {segment.romanNumeral && (
         <span className="text-[10px] opacity-70 leading-tight">{segment.romanNumeral}</span>
+      )}
+
+      {/* One bar can hold blocks from several registers, so a chord states its
+          own. A note needs no badge — its label already ends in the octave. */}
+      {!isNote && (
+        <span
+          data-testid={`octave-badge-${segment.id}`}
+          className="absolute bottom-0 left-1 text-[9px] opacity-60 leading-none pb-0.5"
+        >
+          oct {chordOctave(segment)}
+        </span>
       )}
 
       <button

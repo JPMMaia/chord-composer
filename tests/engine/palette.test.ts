@@ -30,9 +30,24 @@ describe("palette", () => {
   describe("getPaletteItems - notes mode", () => {
     const items = getPaletteItems(C_MAJOR, "notes");
 
-    it("lists the seven notes of C major", () => {
+    it("lists the seven notes of C major, named with their octave", () => {
       expect(items.map((i) => i.label)).toEqual([
-        "C", "D", "E", "F", "G", "A", "B",
+        "C4", "D4", "E4", "F4", "G4", "A4", "B4",
+      ]);
+    });
+
+    it("follows the ascending run into the next octave", () => {
+      // A minor at octave 4 starts on A4, so its third degree is C5, not C4.
+      const aMinor = getPaletteItems({ root: "A", type: "naturalMinor" }, "notes");
+      expect(aMinor.map((i) => i.label)).toEqual([
+        "A4", "B4", "C5", "D5", "E5", "F5", "G5",
+      ]);
+      expect(aMinor.map((i) => i.octave)).toEqual([4, 4, 5, 5, 5, 5, 5]);
+    });
+
+    it("renames the blocks when the octave changes", () => {
+      expect(getPaletteItems(C_MAJOR, "notes", 6).map((i) => i.label)).toEqual([
+        "C6", "D6", "E6", "F6", "G6", "A6", "B6",
       ]);
     });
 
@@ -158,7 +173,13 @@ describe("palette", () => {
       expect(segment.kind).toBe("note");
       expect(segment.duration).toBe(2);
       expect(segment.pitch).toBe(64);
-      expect(segment.chordSymbol).toBe("E");
+      expect(segment.chordSymbol).toBe("E4");
+      expect(segment.octave).toBe(4);
+    });
+
+    it("carries the palette's octave onto a chord segment", () => {
+      const item = getPaletteItems(C_MAJOR, "chords", 6)[0];
+      expect(paletteItemToSegment(item, 1).octave).toBe(6);
     });
 
     it("converts a seventh item, preserving the four-note quality", () => {

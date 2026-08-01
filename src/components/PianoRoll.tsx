@@ -6,10 +6,16 @@ import {
   pixelToBeat,
   pitchToPixel,
   pixelToPitch,
+  pitchRangeHeight,
 } from '@/engine/quantize';
+import { midiToNoteLabel } from '@/engine/chords';
 import { isNoteInScale } from '@/engine/scales';
 import { getBarBeats, getBarStartBeat, getTotalBeats } from '@/engine/timeline';
-import { PIANO_KEYS_WIDTH } from '@/utils/constants';
+import {
+  PIANO_KEYS_WIDTH,
+  PIANO_ROLL_MAX_MIDI,
+  PIANO_ROLL_MIN_MIDI,
+} from '@/utils/constants';
 
 export interface PianoRollProps {
   bars: Bar[];
@@ -61,10 +67,18 @@ const DEFAULT_COLORS = {
   inactiveNoteFill: 'rgba(59, 130, 246, 0.3)',
   inactiveNoteStroke: 'rgba(37, 99, 235, 0.45)',
   playhead: '#ef4444',
-  blackKey: '#f0f0f0',
-  whiteKey: '#ffffff',
-  pitchLabel: '#666666',
+  // Dark enough to read as a black key, and to carry a light label — the roll
+  // names every key, so the two key faces need genuinely different contrast.
+  blackKey: '#2b2b2b',
+  blackKeyLabel: '#b0b0b0',
+  whiteKey: '#fafafa',
+  whiteKeyLabel: '#555555',
+  /** C rows, drawn bold so octaves stay findable while scrolling. */
+  octaveLabel: '#1a1a1a',
 };
+
+/** Below this row height a key name would overlap its neighbours, so it is dropped. */
+const MIN_LABEL_ROW_HEIGHT = 8;
 
 export function PianoRoll({
   bars,
@@ -88,6 +102,10 @@ export function PianoRoll({
     noteId: '',
   });
   const animationFrameRef = useRef<number>(0);
+  const hasCentredRef = useRef(false);
+
+  /** Height of the full key bed — the canvas is this tall and the container scrolls it. */
+  const contentHeight = useMemo(() => pitchRangeHeight(pixelsPerOctave), [pixelsPerOctave]);
 
   const selectedBar = useMemo(
     () => bars.find((b) => b.id === selectedBarId),
@@ -132,13 +150,15 @@ export function PianoRoll({
 
       const semitonesPerOctave = 12;
       const pixelsPerSemitone = pixelsPerOctave / semitonesPerOctave;
-      const minMidiNote = 36;
-      const maxMidiNote = 96;
+      const minMidiNote = PIANO_ROLL_MIN_MIDI;
+      const maxMidiNote = PIANO_ROLL_MAX_MIDI;
+      const showLabels = pixelsPerSemitone >= MIN_LABEL_ROW_HEIGHT;
 
       for (let midi = minMidiNote; midi <= maxMidiNote; midi++) {
         const y = pitchToPixel(midi, pixelsPerOctave);
         const noteHeight = pixelsPerSemitone;
         const isBlackKey = [1, 3, 6, 8, 10].includes(midi % 12);
+        const isOctaveStart = midi % 12 === 0;
 
         ctx.fillStyle = isBlackKey ? DEFAULT_COLORS.blackKey : DEFAULT_COLORS.whiteKey;
         ctx.fillRect(0, y, PIANO_KEYS_WIDTH, noteHeight);
@@ -147,10 +167,16 @@ export function PianoRoll({
         ctx.lineWidth = 0.5;
         ctx.strokeRect(0, y, PIANO_KEYS_WIDTH, noteHeight);
 
-        if (midi % 12 === 0) {
-          ctx.fillStyle = DEFAULT_COLORS.pitchLabel;
-          ctx.font = '10px monospace';
-          ctx.fillText(`C${Math.floor(midi / 12) - 1}`, 2, y + 10);
+        // Every key is named, not just the Cs — with 88 rows in view a bare
+        // keyboard gives no way to tell which one you are aiming at.
+        if (showLabels) {
+          ctx.fillStyle = isBlackKey
+            ? DEFAULT_COLORS.blackKeyLabel
+            : isOctaveStart
+              ? DEFAULT_COLORS.octaveLabel
+              : DEFAULT_COLORS.whiteKeyLabel;
+          ctx.font = isOctaveStart ? 'bold 9px monospace' : '8px monospace';
+          ctx.fillText(midiToNoteLabel(midi), 4, y + pixelsPerSemitone - 2);
         }
       }
 
@@ -240,28 +266,41 @@ export function PianoRoll({
     const container = containerRef.current;
     if (!canvas || !container) return;
 
-    const resizeObserver = new ResizeObserver(() => {
+    const sizeAndRender = () => {
       canvas.width = container.clientWidth;
-      canvas.height = container.clientHeight;
+      // The canvas is as tall as the whole 88-key range and the container
+      // scrolls over it, rather than the canvas being cropped to the viewport.
+      canvas.height = contentHeight;
       const ctx = canvas.getContext('2d');
       if (ctx) {
         render(ctx, canvas.width, canvas.height);
       }
-    });
+    };
 
+    const resizeObserver = new ResizeObserver(sizeAndRender);
     resizeObserver.observe(container);
-
-    canvas.width = container.clientWidth;
-    canvas.height = container.clientHeight;
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      render(ctx, canvas.width, canvas.height);
-    }
+    sizeAndRender();
 
     return () => {
       resizeObserver.disconnect();
     };
-  }, [render]);
+  }, [render, contentHeight]);
+
+  // Open on the register people actually write in. Runs once: after that the
+  // scroll position is the user's, and re-centring would fight them.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || hasCentredRef.current) return;
+    if (container.clientHeight === 0) return;
+
+    hasCentredRef.current = true;
+    const middleC = pitchToPixel(60, pixelsPerOctave);
+    const maxScroll = Math.max(0, contentHeight - container.clientHeight);
+    container.scrollTop = Math.min(
+      maxScroll,
+      Math.max(0, middleC - container.clientHeight / 2)
+    );
+  }, [contentHeight, pixelsPerOctave]);
 
   useEffect(() => {
     let running = true;
@@ -331,7 +370,9 @@ export function PianoRoll({
 
       const beat = pixelToBeat(x - PIANO_KEYS_WIDTH, pixelsPerBeat);
       const snappedBeat = snapToGrid(beat, gridSize);
-      const pitch = Math.round(pixelToPitch(y, pixelsPerOctave));
+      // Ceil, not round: a key row is anchored at its top edge and pitch
+      // descends down the screen, so the row a click lands in is the ceiling.
+      const pitch = Math.ceil(pixelToPitch(y, pixelsPerOctave));
 
       const hit = noteAt(x, y);
       if (hit) {
@@ -421,7 +462,11 @@ export function PianoRoll({
   );
 
   return (
-    <div ref={containerRef} className="w-full h-full relative">
+    <div
+      ref={containerRef}
+      data-testid="piano-roll-scroll"
+      className="w-full h-full relative overflow-y-auto"
+    >
       <canvas
         ref={canvasRef}
         onClick={handleCanvasClick}
@@ -430,7 +475,7 @@ export function PianoRoll({
         onMouseUp={handleMouseUp}
         style={{
           width: '100%',
-          height: '100%',
+          height: `${contentHeight}px`,
           display: 'block',
           cursor: 'crosshair',
         }}

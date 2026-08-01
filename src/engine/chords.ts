@@ -53,6 +53,27 @@ export const SEMITONE_TO_NOTE: Record<number, NoteName> = {
   6: 'F#', 7: 'G', 8: 'G#', 9: 'A', 10: 'A#', 11: 'B',
 };
 
+/**
+ * Scientific-pitch octave of a MIDI note: 60 -> 4, so middle C reads C4.
+ * @param midi - MIDI note number.
+ */
+export function midiToOctave(midi: number): number {
+  return Math.floor(midi / 12) - 1;
+}
+
+/**
+ * Full key name for a MIDI note: 60 -> 'C4', 61 -> 'C#4'.
+ *
+ * Spelled with sharps, matching `NoteName`. The MusicXML exporter keeps its own
+ * speller because it also has to choose flats for the key it is writing in.
+ *
+ * @param midi - MIDI note number.
+ */
+export function midiToNoteLabel(midi: number): string {
+  const pitchClass = ((midi % 12) + 12) % 12;
+  return `${SEMITONE_TO_NOTE[pitchClass]}${midiToOctave(midi)}`;
+}
+
 /** Roman numeral labels for major scale degrees (case varies by quality). */
 const ROMAN_NUMERAL_BASES_MAJOR = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII'];
 

@@ -11,8 +11,12 @@ import { isValidTimeSignature } from '@/engine/timeline';
  * 1.2 added segment start beats, so blocks can sit anywhere in a bar with silence
  * between them. Older files carry no positions, and the store packs those segments
  * end to end on load — which is exactly what having no position used to mean.
+ *
+ * 1.3 added a per-segment octave, so chords can be voiced in any register. An
+ * absent octave is read as 4, the octave every pre-1.3 chord was generated in,
+ * so older files sound identical.
  */
-export const SCHEMA_VERSION = '1.2';
+export const SCHEMA_VERSION = '1.3';
 
 /**
  * Validation error returned by validateProject.
@@ -88,6 +92,7 @@ export function serializeProject(project: Project): string {
         chordSymbol: c.chordSymbol,
         duration: c.duration,
         pitch: c.pitch,
+        octave: c.octave,
         root: c.root,
         inversion: c.inversion,
         quality: c.quality,
@@ -177,6 +182,9 @@ export function deserializeProject(json: string): Project {
               chordSymbol: typeof c.chordSymbol === 'string' ? c.chordSymbol : undefined,
               duration: typeof c.duration === 'number' ? c.duration : 4,
               pitch: typeof c.pitch === 'number' ? c.pitch : undefined,
+              // Schema 1.2 and earlier had no register; note generation reads an
+              // absent octave as 4, which is the only one those files could mean.
+              octave: typeof c.octave === 'number' ? c.octave : undefined,
               root: typeof c.root === 'string' ? (c.root as NoteName) : undefined,
               inversion: typeof c.inversion === 'number' ? c.inversion : 0,
               quality: typeof c.quality === 'string' ? (c.quality as ChordQuality) : undefined,

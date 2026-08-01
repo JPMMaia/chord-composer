@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, fireEvent } from '@testing-library/react';
 import { PianoRoll } from '@/components/PianoRoll';
-import { pitchToPixel } from '@/engine/quantize';
+import { pitchToPixel, pitchRangeHeight } from '@/engine/quantize';
 import { Bar } from '@/types/music';
 
 const mockBars: Bar[] = [
@@ -517,6 +517,94 @@ describe('PianoRoll', () => {
           notes: [{ id: 'y0', pitch: 60, startBeat: 0, duration: 2, velocity: 100 }] },
       ];
       expect(noteFills('d0', twoBeats)[0].w).toBe(2 * PIXELS_PER_BEAT);
+    });
+  });
+
+  describe('scrollable 88-key bed', () => {
+    /** Records every `fillText`, which is how the key column names its keys. */
+    function recordLabels(): { text: string; y: number; font: string }[] {
+      const labels: { text: string; y: number; font: string }[] = [];
+      const ctx = {
+        strokeStyle: '',
+        fillStyle: '',
+        lineWidth: 0,
+        font: '',
+        clearRect: vi.fn(),
+        fillRect: vi.fn(),
+        strokeRect: vi.fn(),
+        beginPath: vi.fn(),
+        moveTo: vi.fn(),
+        lineTo: vi.fn(),
+        stroke: vi.fn(),
+        fillText: vi.fn((text: string, _x: number, y: number) => {
+          labels.push({ text, y, font: String(ctx.font) });
+        }),
+      };
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+        ctx as unknown as CanvasRenderingContext2D
+      );
+      return labels;
+    }
+
+    function renderRoll(pixelsPerOctave = 120) {
+      return render(
+        <PianoRoll
+          bars={mockBars}
+          selectedBarId="bar-1"
+          playheadBeat={0}
+          pixelsPerBeat={10}
+          pixelsPerOctave={pixelsPerOctave}
+          gridSize={0.25}
+          timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
+        />
+      );
+    }
+
+    it('sizes the canvas to the whole pitch range so it can be scrolled', () => {
+      const { container } = renderRoll();
+      const canvas = container.querySelector('canvas') as HTMLCanvasElement;
+      expect(canvas.height).toBe(pitchRangeHeight(120));
+      expect(canvas.style.height).toBe(`${pitchRangeHeight(120)}px`);
+    });
+
+    it('puts the canvas in a vertically scrolling container', () => {
+      const { getByTestId } = renderRoll();
+      expect(getByTestId('piano-roll-scroll').className).toContain('overflow-y-auto');
+    });
+
+    it('names every key, not just the Cs', () => {
+      const labels = recordLabels();
+      renderRoll();
+      const texts = labels.map(l => l.text);
+      expect(texts).toContain('C4');
+      expect(texts).toContain('C#4');
+      expect(texts).toContain('B3');
+      // A0 to C8 inclusive.
+      expect(texts).toContain('A0');
+      expect(texts).toContain('C8');
+    });
+
+    it('emphasises the C rows', () => {
+      const labels = recordLabels();
+      renderRoll();
+      expect(labels.find(l => l.text === 'C4')?.font).toContain('bold');
+      expect(labels.find(l => l.text === 'D4')?.font).not.toContain('bold');
+    });
+
+    it('drops labels when the rows are too short to hold them', () => {
+      const labels = recordLabels();
+      renderRoll(48); // 4px per semitone
+      expect(labels).toHaveLength(0);
+    });
+
+    it('draws higher pitches above lower ones', () => {
+      const labels = recordLabels();
+      renderRoll();
+      const c4 = labels.find(l => l.text === 'C4')!.y;
+      const c7 = labels.find(l => l.text === 'C7')!.y;
+      const a0 = labels.find(l => l.text === 'A0')!.y;
+      expect(c7).toBeLessThan(c4);
+      expect(c4).toBeLessThan(a0);
     });
   });
 

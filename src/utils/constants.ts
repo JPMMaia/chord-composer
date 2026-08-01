@@ -35,6 +35,16 @@ export const DEFAULT_TIME_SIGNATURE: TimeSignature = {
  */
 export const PIANO_KEYS_WIDTH = 80;
 
+/**
+ * Pitch range the piano roll draws, as MIDI note numbers: a standard 88-key
+ * piano, A0 to C8. The roll scrolls vertically over the whole span.
+ */
+export const PIANO_ROLL_MIN_MIDI = 21;
+export const PIANO_ROLL_MAX_MIDI = 108;
+
+/** Number of key rows on the roll — 88. */
+export const PIANO_ROLL_KEY_COUNT = PIANO_ROLL_MAX_MIDI - PIANO_ROLL_MIN_MIDI + 1;
+
 /** Default BPM */
 export const DEFAULT_BPM = 120;
 

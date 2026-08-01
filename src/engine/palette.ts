@@ -5,7 +5,13 @@ import type {
   Scale,
   SegmentKind,
 } from '@/types/music';
-import { getDiatonicChords, getDiatonicSevenths, SEMITONE_TO_NOTE } from '@/engine/chords';
+import {
+  getDiatonicChords,
+  getDiatonicSevenths,
+  midiToNoteLabel,
+  midiToOctave,
+  SEMITONE_TO_NOTE,
+} from '@/engine/chords';
 import { getScalePitches } from '@/engine/scales';
 import { generateId } from '@/utils/id';
 
@@ -17,13 +23,19 @@ export interface PaletteItem {
   /** Stable within a (scale, mode) pair — safe as a React key and drag payload id. */
   id: string;
   kind: SegmentKind;
-  /** What the block reads, e.g. 'C', 'Dm', 'Cmaj7'. */
+  /** What the block reads, e.g. 'C4', 'Dm', 'Cmaj7'. Notes carry their octave. */
   label: string;
   /** Roman numeral shown in parentheses, e.g. 'I', 'ii', 'V7', 'viiø7'. */
   degreeLabel: string;
   root?: NoteName;
   /** MIDI pitch — notes mode only. */
   pitch?: number;
+  /**
+   * Register the block was built in. For a note this is the octave its `pitch`
+   * actually landed in, which can be one above the requested octave when the
+   * ascending run wraps past B.
+   */
+  octave: number;
   quality?: ChordQuality;
   romanNumeral?: string;
 }
@@ -100,13 +112,19 @@ export function getPaletteItems(
       // Keep the run ascending: a degree whose pitch class wrapped below the
       // tonic belongs in the next octave, so C D E ... B never dips backwards.
       const offset = ((pitch - rootPitch) % 12 + 12) % 12;
+      const midi = baseMidi + rootPitch + offset;
       return {
         id: `note-${index}`,
         kind: 'note' as const,
-        label: SEMITONE_TO_NOTE[pitch],
+        // Named with its register, so dragging from an octave-6 palette is
+        // visibly different from an octave-4 one.
+        label: midiToNoteLabel(midi),
         degreeLabel: triads[index].romanNumeral,
         root: SEMITONE_TO_NOTE[pitch],
-        pitch: baseMidi + rootPitch + offset,
+        pitch: midi,
+        // Read back off the pitch, not the argument — the ascending run pushes
+        // degrees past the tonic into the octave above.
+        octave: midiToOctave(midi),
         romanNumeral: triads[index].romanNumeral,
       };
     });
@@ -124,6 +142,9 @@ export function getPaletteItems(
       : chord.romanNumeral,
     root: chord.root,
     quality: chord.quality,
+    // A chord symbol stays a bare symbol — the octave is shown beside it rather
+    // than spliced into the name, which would break `chordFromSymbol`.
+    octave,
     romanNumeral: chord.romanNumeral,
   }));
 }
@@ -142,6 +163,7 @@ export function paletteItemToSegment(item: PaletteItem, duration: number): Chord
     romanNumeral: item.romanNumeral,
     root: item.root,
     quality: item.quality,
+    octave: item.octave,
     duration,
   };
 }

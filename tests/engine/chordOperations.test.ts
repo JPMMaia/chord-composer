@@ -203,6 +203,33 @@ describe("chordOperations", () => {
       });
     });
 
+    it("voices a chord in the octave its segment carries", () => {
+      const bar = barWith([
+        { id: generateId(), kind: "chord", root: "C", quality: "major", octave: 6, duration: 4 },
+      ]);
+      const result = generateNotesFromSegments(bar, TS_4_4, 4);
+      // C major an octave above the default: C6, E6, G6.
+      expect(result.map((n) => n.pitch).sort((a, b) => a - b)).toEqual([84, 88, 91]);
+    });
+
+    it("puts two segments an octave apart when their octaves differ by one", () => {
+      const bar = barWith([
+        { id: generateId(), kind: "chord", startBeat: 0, root: "C", quality: "major", octave: 5, duration: 2 },
+        { id: generateId(), kind: "chord", startBeat: 2, root: "C", quality: "major", octave: 6, duration: 2 },
+      ]);
+      const result = generateNotesFromSegments(bar, TS_4_4, 4);
+      const low = result.filter((n) => n.startBeat === 0).map((n) => n.pitch).sort((a, b) => a - b);
+      const high = result.filter((n) => n.startBeat === 2).map((n) => n.pitch).sort((a, b) => a - b);
+      expect(high).toEqual(low.map((p) => p + 12));
+    });
+
+    it("falls back to the octave argument for a segment written without one", () => {
+      const bar = barWith([makeChord("I", 4)]);
+      expect(bar.chords[0].octave).toBeUndefined();
+      const result = generateNotesFromSegments(bar, TS_4_4, 4);
+      expect(result.map((n) => n.pitch).sort((a, b) => a - b)).toEqual([60, 64, 67]);
+    });
+
     it("returns an empty array for a bar with no segments", () => {
       expect(generateNotesFromSegments(barWith([]), TS_4_4, 4)).toEqual([]);
     });

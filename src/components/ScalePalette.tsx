@@ -18,6 +18,16 @@ const MODE_LABELS: Record<PaletteMode, string> = {
 };
 
 /**
+ * Octaves offered for new blocks.
+ *
+ * Bounded so every block stays inside the piano roll's A0–C8 window: octave 1
+ * puts the lowest note at MIDI 24, and octave 7 leaves a seventh chord's top
+ * note at MIDI 107.
+ */
+const OCTAVES = [1, 2, 3, 4, 5, 6, 7];
+const DEFAULT_PALETTE_OCTAVE = 4;
+
+/**
  * Horizontal strip of draggable blocks for the current scale.
  *
  * Every block reads `Label (Numeral)` — `C (I)`, `Dm (ii)`, `G7 (V7)` — so the
@@ -25,8 +35,11 @@ const MODE_LABELS: Record<PaletteMode, string> = {
  */
 export const ScalePalette: React.FC<ScalePaletteProps> = ({ scale }) => {
   const [mode, setMode] = useState<PaletteMode>('chords');
+  // Held here, like `mode`: the chosen octave reaches the timeline inside the
+  // dragged item, so nothing outside this strip needs to read it.
+  const [octave, setOctave] = useState<number>(DEFAULT_PALETTE_OCTAVE);
 
-  const items = useMemo(() => getPaletteItems(scale, mode), [scale, mode]);
+  const items = useMemo(() => getPaletteItems(scale, mode, octave), [scale, mode, octave]);
 
   const handleDragStart = (e: React.DragEvent, item: PaletteItem) => {
     e.dataTransfer.setData(PALETTE_DRAG_TYPE, JSON.stringify(item));
@@ -55,7 +68,28 @@ export const ScalePalette: React.FC<ScalePaletteProps> = ({ scale }) => {
           ))}
         </select>
 
-        <span className="text-xs text-gray-400">{getScaleName(scale.root, scale.type)}</span>
+        <label htmlFor="palette-octave" className="sr-only">
+          Octave
+        </label>
+        <select
+          id="palette-octave"
+          aria-label="Octave"
+          value={octave}
+          onChange={e => setOctave(Number(e.target.value))}
+          className="px-2 py-1.5 text-sm bg-gray-700 border border-gray-600 rounded text-gray-200 focus:outline-none focus:border-indigo-500"
+        >
+          {OCTAVES.map(o => (
+            <option key={o} value={o}>
+              Octave {o}
+            </option>
+          ))}
+        </select>
+
+        {/* Chord blocks keep bare symbols, so the strip states their register once
+            here rather than stamping the same badge on every block. */}
+        <span className="text-xs text-gray-400">
+          {getScaleName(scale.root, scale.type)} · octave {octave}
+        </span>
 
         <div className="flex flex-wrap gap-2">
           {items.map(item => (

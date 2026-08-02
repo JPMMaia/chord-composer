@@ -469,9 +469,102 @@ describe('fileIO', () => {
       });
     }
 
-    it('declares schema version 1.5', () => {
+    it('declares schema version 1.6', () => {
       const parsed = JSON.parse(serializeProject(createTestProject()));
-      expect(parsed.version).toBe('1.5');
+      expect(parsed.version).toBe('1.6');
+    });
+
+    describe('voicing', () => {
+      /** A project whose one chord carries every kind of voicing at once. */
+      function voicedProject(voicing: unknown): Project {
+        return createTestProject({
+          bars: [
+            {
+              id: 'bar-a',
+              barIndex: 0,
+              scale: { root: 'C', type: 'major' },
+              content: fixtureContent(
+                [
+                  {
+                    id: 'seg-1',
+                    kind: 'chord',
+                    duration: 4,
+                    root: 'C',
+                    quality: 'major',
+                    voicing,
+                  } as never,
+                ],
+                []
+              ),
+            },
+          ],
+        });
+      }
+
+      const restoredVoicing = (project: Project) =>
+        deserializeProject(serializeProject(project)).bars[0].content[FIXTURE_TRACK_ID]
+          .chords[0].voicing;
+
+      it('round-trips a spacing, offsets, doublings and an arpeggio', () => {
+        const voicing = {
+          spacing: 'drop2' as const,
+          offsets: [0, -1, 0],
+          doublings: [{ tone: 0, octaves: -1 as const }],
+          break: { mode: 'arpeggio' as const, pattern: 'upDown' as const, gate: 0.5 },
+        };
+        expect(restoredVoicing(voicedProject(voicing))).toEqual(voicing);
+      });
+
+      it('round-trips a strum', () => {
+        const voicing = {
+          break: { mode: 'strum' as const, spreadBeats: 0.0625, direction: 'down' as const },
+        };
+        expect(restoredVoicing(voicedProject(voicing))?.break).toEqual(voicing.break);
+      });
+
+      it('reads a pre-1.6 chord as having no voicing at all', () => {
+        const json = JSON.parse(serializeProject(createTestProject()));
+        for (const content of Object.values(json.bars[0].content) as { chords: unknown[] }[]) {
+          for (const chord of content.chords as Record<string, unknown>[]) {
+            delete chord.voicing;
+          }
+        }
+        const restored = deserializeProject(JSON.stringify(json));
+        for (const chord of restored.bars[0].content[FIXTURE_TRACK_ID].chords) {
+          expect(chord.voicing).toBeUndefined();
+        }
+      });
+
+      // A voicing read from garbage would be worse than no voicing: the chord
+      // would sound wrong rather than plain.
+      it('drops nonsense rather than trusting it', () => {
+        expect(
+          restoredVoicing(
+            voicedProject({
+              spacing: 'banana',
+              offsets: ['x', null],
+              doublings: [{ tone: 'root', octaves: 5 }, { tone: 1, octaves: 2 }],
+              break: { mode: 'nope' },
+            })
+          )
+        ).toBeUndefined();
+      });
+
+      it('keeps the sound of a doubtful value inside the engine\'s own limits', () => {
+        const restored = restoredVoicing(
+          voicedProject({ offsets: [99, -99], break: { mode: 'strum', spreadBeats: -1 } })
+        );
+        expect(restored?.offsets).toEqual([3, -3]);
+        // A strum that staggers by nothing is just a block chord.
+        expect(restored?.break).toBeUndefined();
+      });
+
+      it('falls back to a sane arpeggio when the pattern is unknown', () => {
+        const restored = restoredVoicing(
+          voicedProject({ break: { mode: 'arpeggio', pattern: 'sideways', gate: 12 } })
+        );
+        expect(restored?.break).toEqual({ mode: 'arpeggio', pattern: 'up', gate: undefined });
+      });
     });
 
     it('round-trips the play range and repeat flag', () => {

@@ -1,11 +1,15 @@
 import type {
+  ArpeggioPattern,
   ChordQuality,
   ChordSegment,
   Note,
   NoteName,
   Project,
   ScaleType,
+  SegmentBreak,
   SegmentKind,
+  SegmentVoicing,
+  SpacingPreset,
   TimeSignature,
   Track,
   TrackContent,
@@ -46,8 +50,13 @@ const LEGACY_TRACK_ID = 'track-legacy';
  * way to say which instrument played what, so its flat arrays are read into a
  * single Piano track, synthesised if the file listed no tracks at all. That is
  * exactly what those files always meant.
+ *
+ * 1.6 gave each chord segment a voicing: a spacing preset, per-tone octave
+ * offsets, doubled tones, and an arpeggio or strum. An absent voicing is the
+ * plain block chord — every tone in close position, sounded together — which is
+ * the only thing a pre-1.6 chord could be, so older files sound identical.
  */
-export const SCHEMA_VERSION = '1.5';
+export const SCHEMA_VERSION = '1.6';
 
 /**
  * Validation error returned by validateProject.
@@ -140,6 +149,10 @@ export function serializeProject(project: Project): string {
               root: c.root,
               inversion: c.inversion,
               quality: c.quality,
+              // Absent on an unvoiced chord, and an absent key drops out of the
+              // JSON entirely — so a project nobody has voiced still serialises
+              // byte for byte as it did under 1.5.
+              voicing: c.voicing,
             })),
             notes: trackContent.notes.map(n => ({
               id: n.id,
@@ -162,6 +175,91 @@ export function serializeProject(project: Project): string {
 // ---------------------------------------------------------------------------
 // Deserialization
 // ---------------------------------------------------------------------------
+
+const VALID_SPACING_PRESETS: SpacingPreset[] = ['close', 'open', 'drop2', 'drop3'];
+const VALID_ARPEGGIO_PATTERNS: ArpeggioPattern[] = ['up', 'down', 'upDown', 'asPlayed'];
+
+/** How far a file may push a voice from its chord, matching the engine's own limit. */
+const MAX_FILE_OFFSET_OCTAVES = 3;
+
+/**
+ * Read a segment's voicing out of a file, keeping only what makes sense.
+ *
+ * Everything here is dropped rather than repaired when it does not fit: an
+ * unrecognised preset or a doubling of no particular tone says nothing about
+ * what the author meant, and a chord that sounds plainly is a better answer than
+ * one voiced from garbage. Returns undefined when nothing survives, which is
+ * exactly how a pre-1.6 file reads.
+ */
+function readVoicing(raw: unknown): SegmentVoicing | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const v = raw as Record<string, unknown>;
+
+  const spacing = VALID_SPACING_PRESETS.includes(v.spacing as SpacingPreset)
+    ? (v.spacing as SpacingPreset)
+    : undefined;
+
+  const offsets = Array.isArray(v.offsets)
+    ? v.offsets.map(o =>
+        typeof o === 'number' && Number.isFinite(o)
+          ? Math.max(-MAX_FILE_OFFSET_OCTAVES, Math.min(MAX_FILE_OFFSET_OCTAVES, Math.trunc(o)))
+          : 0
+      )
+    : undefined;
+
+  const doublings = Array.isArray(v.doublings)
+    ? (v.doublings as Record<string, unknown>[])
+        .filter(
+          d =>
+            typeof d?.tone === 'number' &&
+            Number.isInteger(d.tone) &&
+            d.tone >= 0 &&
+            (d.octaves === 1 || d.octaves === -1)
+        )
+        .map(d => ({ tone: d.tone as number, octaves: d.octaves as 1 | -1 }))
+    : undefined;
+
+  const brk = readBreak(v.break);
+
+  const keptOffsets = offsets?.some(o => o !== 0) ? offsets : undefined;
+  const keptDoublings = doublings?.length ? doublings : undefined;
+
+  if (!spacing && !keptOffsets && !keptDoublings && !brk) return undefined;
+  return { spacing, offsets: keptOffsets, doublings: keptDoublings, break: brk };
+}
+
+function readBreak(raw: unknown): SegmentBreak | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const b = raw as Record<string, unknown>;
+
+  if (b.mode === 'arpeggio') {
+    const pattern = VALID_ARPEGGIO_PATTERNS.includes(b.pattern as ArpeggioPattern)
+      ? (b.pattern as ArpeggioPattern)
+      : 'up';
+    // A gate outside (0, 1] is not a shorter note, it is a longer one — which is
+    // what the absent default already means.
+    const gate =
+      typeof b.gate === 'number' && b.gate > 0 && b.gate <= 1 ? b.gate : undefined;
+    return { mode: 'arpeggio', pattern, gate };
+  }
+
+  if (b.mode === 'strum') {
+    // A non-positive spread is a block chord wearing a strum's clothes; the
+    // engine clamps a too-wide one, so only the sign has to be settled here.
+    const spreadBeats =
+      typeof b.spreadBeats === 'number' && Number.isFinite(b.spreadBeats) && b.spreadBeats > 0
+        ? b.spreadBeats
+        : undefined;
+    if (spreadBeats === undefined) return undefined;
+    return {
+      mode: 'strum',
+      spreadBeats,
+      direction: b.direction === 'down' ? 'down' : 'up',
+    };
+  }
+
+  return undefined;
+}
 
 /**
  * Deserialize a JSON string back to a Project.
@@ -256,6 +354,9 @@ export function deserializeProject(json: string): Project {
           root: typeof c.root === 'string' ? (c.root as NoteName) : undefined,
           inversion: typeof c.inversion === 'number' ? c.inversion : 0,
           quality: typeof c.quality === 'string' ? (c.quality as ChordQuality) : undefined,
+          // Schema 1.5 and earlier had no voicing; an absent one means the plain
+          // block chord, which is all those files could express.
+          voicing: readVoicing(c.voicing),
         }))
       : [];
 

@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { projectStore } from '@/store/projectStore';
-import { selectionStore, soleSelectedSegmentId } from '@/store/selectionStore';
+import { selectionStore } from '@/store/selectionStore';
 import { Transport } from '@/components/Transport';
 import { FileMenu } from '@/components/FileMenu';
 import { InstrumentsPanel } from '@/components/InstrumentsPanel';
@@ -8,6 +8,7 @@ import { ScalePalette } from '@/components/ScalePalette';
 import { ChordTimeline } from '@/components/ChordTimeline';
 import { PianoRoll } from '@/components/PianoRoll';
 import { HorizontalScrollbar } from '@/components/HorizontalScrollbar';
+import { SegmentInspector } from '@/components/SegmentInspector';
 import { usePlayback } from '@/hooks/usePlayback';
 import { useSegmentShortcuts } from '@/hooks/useSegmentShortcuts';
 import { useFollowPlayhead } from '@/hooks/useFollowPlayhead';
@@ -19,19 +20,13 @@ import {
   getTotalBeats,
   MIN_SEGMENT_BEATS,
 } from '@/engine/timeline';
-import { describePosition, formatNoteValue } from '@/engine/meterDisplay';
-import { midiToNoteLabel } from '@/engine/chords';
 import type { Bar, NoteName, ScaleType, TimeSignature } from '@/types/music';
 import {
-  DEFAULT_TIME_SIGNATURE,
   NOTE_NAMES,
   PIANO_KEYS_WIDTH,
   PIXELS_PER_BEAT,
   SCALE_TYPES,
 } from '@/utils/constants';
-
-/** Inversion names by index; root position is left out because it says nothing. */
-const INVERSION_NAMES = ['', '1st', '2nd', '3rd'];
 
 /**
  * The bars a play range covers, as "2–4" or just "2" for a range inside one bar.
@@ -61,9 +56,6 @@ function App() {
   const selectedBarId = selectionStore(s => s.selectedBarId);
   const selectedTrackId = selectionStore(s => s.selectedTrackId);
   const selectTrack = selectionStore(s => s.selectTrack);
-  // The inspector speaks about one block, so it shows nothing while several are
-  // selected — the keyboard shortcuts are what act on the whole selection.
-  const selectedSegmentId = selectionStore(soleSelectedSegmentId);
   const selectBar = selectionStore(s => s.selectBar);
 
   const toggleLoopEnabled = projectStore(s => s.toggleLoopEnabled);
@@ -105,10 +97,6 @@ function App() {
 
   const selectedBarContent =
     selectedBar && selectedTrackId ? barContent(selectedBar, selectedTrackId) : null;
-  const selectedSegment = selectedBarContent?.chords.find(c => c.id === selectedSegmentId);
-  // A segment only ever lives in the selected bar, so its metre is that bar's.
-  const selectedSegmentTs =
-    selectedBar?.timeSignature ?? project?.timeSignature ?? DEFAULT_TIME_SIGNATURE;
   const selectedBarSegmentCount = selectedBarContent?.chords.length ?? 0;
   const selectedBarNoteCount = selectedBarContent?.notes.length ?? 0;
 
@@ -226,9 +214,16 @@ function App() {
         </div>
 
         {/* Right Sidebar - Properties */}
-        <div className="w-56 bg-gray-800 border-l border-gray-700 overflow-y-auto">
+        <div className="w-72 shrink-0 bg-gray-800 border-l border-gray-700 overflow-y-auto">
           <div className="p-3 border-b border-gray-700">
             <h2 className="text-sm font-semibold text-gray-300">Properties</h2>
+          </div>
+
+          {/* Outside the bar's own section: selection does not follow the bar
+              cursor, so a chord stays selected — and editable — when the cursor
+              moves to another bar. */}
+          <div className="p-3">
+            <SegmentInspector />
           </div>
 
           {selectedBar && (
@@ -276,40 +271,6 @@ function App() {
                     </option>
                   ))}
                 </select>
-              </div>
-
-              {/* Segment inspector */}
-              <div className="pt-2 border-t border-gray-700">
-                <h3 className="text-xs font-semibold text-gray-400 mb-1">Segment</h3>
-                {selectedSegment ? (
-                  <div className="text-sm text-gray-300 space-y-0.5">
-                    <div>{selectedSegment.chordSymbol ?? selectedSegment.root}</div>
-                    <div className="text-xs text-gray-500">
-                      {selectedSegment.kind === 'note' ? 'Note' : 'Chord'}
-                      {selectedSegment.romanNumeral ? ` · ${selectedSegment.romanNumeral}` : ''}
-                    </div>
-                    <div className="text-xs text-gray-500">
-                      {selectedSegment.kind === 'note' && selectedSegment.pitch !== undefined
-                        ? midiToNoteLabel(selectedSegment.pitch)
-                        : `Octave ${selectedSegment.octave ?? 4}`}
-                    </div>
-                    {selectedSegment.kind !== 'note' && !!selectedSegment.inversion && (
-                      <div className="text-xs text-gray-500">
-                        {INVERSION_NAMES[selectedSegment.inversion]} inversion
-                      </div>
-                    )}
-                    {/* Named as a note value and located in the bar's own metre —
-                        "1.5 beats" says nothing about whether the bar counts in
-                        quarters or dotted quarters. */}
-                    <div className="text-xs text-gray-500">
-                      {formatNoteValue(selectedSegment.duration)}
-                      {' · '}
-                      {describePosition(selectedSegment.startBeat ?? 0, selectedSegmentTs)}
-                    </div>
-                  </div>
-                ) : (
-                  <p className="text-xs text-gray-500">No segment selected</p>
-                )}
               </div>
 
               {/* Bar Info */}

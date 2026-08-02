@@ -1,5 +1,10 @@
 import type { Bar, ChordQuality, ChordSegment, Note, NoteName, Project, TimeSignature } from '@/types/music';
-import { barChords, barNotes, getBarTimeSignature } from '@/engine/timeline';
+import {
+  barChords,
+  barNotes,
+  getBarTimeSignature,
+  MIN_SEGMENT_BEATS,
+} from '@/engine/timeline';
 
 /**
  * MusicXML divisions per quarter note. Four divisions resolve down to a
@@ -274,8 +279,19 @@ function renderHarmony(chord: ChordSegment): string[] {
 }
 
 /**
+ * How close two onsets must be to be written as one chord, in beats.
+ *
+ * Notation has no way to say "strummed": the voices of a rolled chord arrive a
+ * few milliseconds apart, but the thing on the page is still a chord. The line
+ * falls at the shortest block a user can draw — anything closer together than a
+ * note could be written is a gesture within one chord, and anything at least
+ * that far apart is rhythm, which is exactly what should notate separately.
+ */
+export const CHORD_ONSET_TOLERANCE = MIN_SEGMENT_BEATS;
+
+/**
  * Render the notes of one bar, filling gaps and the tail of the measure with
- * rests. Notes that start on the same beat are written as a single chord.
+ * rests. Notes that start together — or near enough — are written as one chord.
  */
 function renderMeasureNotes(notes: Note[], beatsPerMeasure: number, useFlats: boolean): string[] {
   const lines: string[] = [];
@@ -295,16 +311,20 @@ function renderMeasureNotes(notes: Note[], beatsPerMeasure: number, useFlats: bo
       cursor = startBeat;
     }
 
-    // Collect every note starting on this beat — they form one chord.
+    // Collect every note starting on this beat — they form one chord. Written
+    // as a tolerance rather than an equality so a strummed chord notates as the
+    // chord it is, instead of as a stack of hair-thin notes after a rest.
     const chordNotes: Note[] = [];
-    while (i < sorted.length && sorted[i].startBeat === startBeat) {
+    while (i < sorted.length && sorted[i].startBeat - startBeat < CHORD_ONSET_TOLERANCE) {
       chordNotes.push(sorted[i]);
       i++;
     }
 
     // The chord advances the cursor by its shortest member so later notes
     // still line up; longer members are truncated rather than overlapping.
-    const beats = Math.min(...chordNotes.map(n => n.duration));
+    // Measured from the group's own onset, so a strum's staggered releases do
+    // not read as one voice being shorter than the rest.
+    const beats = Math.min(...chordNotes.map(n => n.startBeat + n.duration - startBeat));
     chordNotes.forEach((note, index) => {
       lines.push(...renderNote(note, beats, index > 0, useFlats));
     });

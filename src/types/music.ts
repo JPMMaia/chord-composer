@@ -46,6 +46,60 @@ export interface Scale {
 // What a timeline segment represents: a single note or a stacked chord.
 export type SegmentKind = 'note' | 'chord';
 
+/** How a chord's tones are spread across registers. Absent reads as 'close'. */
+export type SpacingPreset = 'close' | 'open' | 'drop2' | 'drop3';
+
+/** Order an arpeggio walks its pitches in. */
+export type ArpeggioPattern = 'up' | 'down' | 'upDown' | 'asPlayed';
+
+/** One chord tone duplicated an octave away. `tone` indexes the root-position chord. */
+export interface ToneDoubling {
+  tone: number;
+  octaves: 1 | -1;
+}
+
+/**
+ * How a chord's notes are spread in *time*. Arpeggio and strum are alternatives,
+ * not layers — a strum inside an arpeggio would stagger one note against nothing —
+ * so they are one field with a mode rather than two independent ones.
+ */
+export type SegmentBreak =
+  | {
+      mode: 'arpeggio';
+      pattern: ArpeggioPattern;
+      /** Fraction of a step each note sounds for; absent reads as 1 (legato). */
+      gate?: number;
+    }
+  | {
+      mode: 'strum';
+      /**
+       * Onset stagger between adjacent tones, in beats. Beats rather than
+       * milliseconds so that generating notes never needs to know the tempo — a
+       * strum scales with the music instead of the notes going stale on a bpm change.
+       */
+      spreadBeats: number;
+      direction: 'up' | 'down';
+    };
+
+/**
+ * A chord segment's voicing. Absent everywhere means the block voicing this app
+ * produced before voicings existed, so every pre-1.6 project sounds identical.
+ */
+export interface SegmentVoicing {
+  /** Which preset seeded `offsets`; absent once the user hand-tweaks one. */
+  spacing?: SpacingPreset;
+  /**
+   * Per-chord-tone octave offsets, indexed like `CHORD_INTERVALS[quality]`:
+   * 0 = root, 1 = third, 2 = fifth, 3 = seventh. Wins over `spacing` when present.
+   *
+   * Keyed by chord tone rather than by sounding position so a hand-tweaked voicing
+   * survives a change of inversion — the third stays the third.
+   */
+  offsets?: number[];
+  doublings?: ToneDoubling[];
+  break?: SegmentBreak;
+}
+
 // Chord segment in a bar
 export interface ChordSegment {
   id: string;
@@ -71,6 +125,12 @@ export interface ChordSegment {
   root?: NoteName;
   inversion?: number;
   quality?: ChordQuality;
+  /**
+   * Voicing and articulation. Chord segments only — a note segment has one pitch
+   * and nothing to space, double or break. Absent means the plain block chord,
+   * which is what every chord sounded like before voicings existed.
+   */
+  voicing?: SegmentVoicing;
 }
 
 // Individual note

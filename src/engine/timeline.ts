@@ -451,6 +451,31 @@ export function flattenSegments(bars: Bar[], trackId: string): ChordSegment[] {
   return bars.flatMap(bar => barChords(bar, trackId));
 }
 
+/** Where a segment lives, for callers that hold only its id. */
+export interface SegmentLocation {
+  bar: Bar;
+  trackId: string;
+  segment: ChordSegment;
+}
+
+/**
+ * Find a segment anywhere in the project, whichever bar or instrument holds it.
+ *
+ * Unscoped, unlike `flattenSegments`, because selection deliberately does not
+ * follow the bar cursor: a block stays selected when the cursor moves elsewhere,
+ * so anything inspecting the selection has to be able to find it without being
+ * told where to look.
+ */
+export function findSegment(bars: Bar[], segmentId: string): SegmentLocation | null {
+  for (const bar of bars) {
+    for (const [trackId, content] of Object.entries(bar.content)) {
+      const segment = content.chords.find(c => c.id === segmentId);
+      if (segment) return { bar, trackId, segment };
+    }
+  }
+  return null;
+}
+
 /**
  * Build a fresh empty bar, inheriting the scale and meter of the bar before it so
  * that overflowing into new territory does not silently change key or metre.

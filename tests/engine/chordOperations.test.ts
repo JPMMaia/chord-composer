@@ -339,6 +339,78 @@ describe("chordOperations", () => {
       expect(result.some((n) => n.startBeat > 0 && n.startBeat < 2)).toBe(false);
     });
 
+    it("re-voices a chord carrying a spacing offset", () => {
+      // C major in octave 4 is 60/64/67; dropping the third leaves 52.
+      const bar = barWith([
+        { ...makeChord("I", 4), voicing: { offsets: [0, -1, 0] } },
+      ]);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      expect(result.map((n) => n.pitch)).toEqual([52, 60, 67]);
+    });
+
+    it("adds a voice for a doubled chord tone", () => {
+      const bar = barWith([
+        { ...makeChord("I", 4), voicing: { doublings: [{ tone: 0, octaves: -1 }] } },
+      ]);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      expect(result.map((n) => n.pitch)).toEqual([48, 60, 64, 67]);
+    });
+
+    it("sequences an arpeggiated chord across its own duration", () => {
+      const bar = barWith([
+        { ...makeChord("I", 3), voicing: { break: { mode: "arpeggio", pattern: "up" } } },
+      ]);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      expect(result.map((n) => n.startBeat)).toEqual([0, 1, 2]);
+      expect(result.map((n) => n.pitch)).toEqual([60, 64, 67]);
+    });
+
+    it("staggers a strummed chord's onsets but releases it together", () => {
+      const bar = barWith([
+        {
+          ...makeChord("I", 4),
+          voicing: { break: { mode: "strum", spreadBeats: 0.25, direction: "up" } },
+        },
+      ]);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      expect(result.map((n) => n.startBeat)).toEqual([0, 0.25, 0.5]);
+      result.forEach((note) => {
+        expect(note.startBeat + note.duration).toBeCloseTo(4, 10);
+      });
+    });
+
+    it("keeps every note of a broken chord inside its segment", () => {
+      // Notes starting past the bar line are dropped further down, so a break
+      // that spilled over would go silently missing rather than sound late.
+      const bar = barWith([
+        {
+          ...makeChord("I", 1),
+          startBeat: 3,
+          voicing: { break: { mode: "arpeggio", pattern: "upDown" } },
+        },
+      ]);
+      generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4).forEach((note) => {
+        expect(note.startBeat).toBeGreaterThanOrEqual(3);
+        expect(note.startBeat + note.duration).toBeLessThanOrEqual(4 + 1e-9);
+      });
+    });
+
+    it("ignores a voicing on a note segment — one pitch has nothing to voice", () => {
+      const bar = barWith([
+        {
+          id: generateId(),
+          kind: "note",
+          pitch: 60,
+          duration: 4,
+          startBeat: 0,
+          voicing: { offsets: [-1], break: { mode: "arpeggio", pattern: "up" } },
+        },
+      ]);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({ pitch: 60, startBeat: 0, duration: 4 });
+    });
+
     it("skips a segment that starts past the bar line", () => {
       // Refitting owns moving this into the next bar; rendering it here would
       // double it up.

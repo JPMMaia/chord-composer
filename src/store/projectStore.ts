@@ -6,6 +6,8 @@ import type {
   NoteName,
   Scale,
   ScaleType,
+  SegmentBreak,
+  SpacingPreset,
   TimeSignature,
   Track,
 } from '@/types/music';
@@ -13,6 +15,7 @@ import { generateId } from '@/utils/id';
 import {
   barChords,
   clampToBar,
+  findSegment,
   getBarBeats,
   getTotalBeats,
   isValidTimeSignature,
@@ -32,6 +35,14 @@ import {
   shiftSegmentOctave,
   stepSegmentInScale,
 } from '@/engine/chordOperations';
+import {
+  withBreak,
+  withInversion,
+  withoutVoicing,
+  withSpacing,
+  withToggledDoubling,
+  withToneOffset,
+} from '@/engine/voicing';
 import {
   DEFAULT_BPM,
   DEFAULT_TIME_SIGNATURE,
@@ -87,6 +98,18 @@ interface ProjectState {
   stepSegmentsPitch: (segmentIds: string[], direction: -1 | 1) => void;
   shiftSegmentsOctave: (segmentIds: string[], direction: -1 | 1) => void;
   cycleSegmentsInversion: (segmentIds: string[]) => void;
+  setSegmentInversion: (segmentId: string, inversion: number) => void;
+  setSegmentSpacing: (segmentId: string, preset: SpacingPreset) => void;
+  setSegmentToneOffset: (segmentId: string, tone: number, offsetOctaves: number) => void;
+  toggleSegmentDoubling: (segmentId: string, tone: number, octaves: 1 | -1) => void;
+  setSegmentBreak: (segmentId: string, spec: SegmentBreak | null) => void;
+  clearSegmentVoicing: (segmentId: string) => void;
+  setSegmentsInversion: (segmentIds: string[], inversion: number) => void;
+  setSegmentsSpacing: (segmentIds: string[], preset: SpacingPreset) => void;
+  setSegmentsToneOffset: (segmentIds: string[], tone: number, offsetOctaves: number) => void;
+  toggleSegmentsDoubling: (segmentIds: string[], tone: number, octaves: 1 | -1) => void;
+  setSegmentsBreak: (segmentIds: string[], spec: SegmentBreak | null) => void;
+  clearSegmentsVoicing: (segmentIds: string[]) => void;
   setLoopRegion: (start: number | null, end: number | null) => void;
   toggleLoopEnabled: () => void;
   resetProject: () => void;
@@ -158,12 +181,7 @@ function mapBar(
 
 /** The instrument whose content holds a segment, or null if no instrument does. */
 function trackIdOfSegment(bars: Bar[], segmentId: string): string | null {
-  for (const bar of bars) {
-    for (const [trackId, content] of Object.entries(bar.content)) {
-      if (content.chords.some(c => c.id === segmentId)) return trackId;
-    }
-  }
-  return null;
+  return findSegment(bars, segmentId)?.trackId ?? null;
 }
 
 /**
@@ -641,6 +659,69 @@ export const projectStore = create<ProjectState>((set, get) => ({
     if (next) set({ project: next });
   },
 
+  /**
+   * Set an absolute inversion, as the inspector's buttons name one.
+   *
+   * The companion to `cycleSegmentsInversion`, which the `i` key still uses:
+   * stepping through them and picking one out are the same edit, reached two ways.
+   */
+  setSegmentsInversion: (segmentIds: string[], inversion: number) => {
+    const project = get().project;
+    if (!project) return;
+    const next = withTransformedSegments(project, segmentIds, (segment, scale) =>
+      withInversion(segment, scale, inversion)
+    );
+    if (next) set({ project: next });
+  },
+
+  /** Space each chord by a preset, seeding the per-tone offsets it implies. */
+  setSegmentsSpacing: (segmentIds: string[], preset: SpacingPreset) => {
+    const project = get().project;
+    if (!project) return;
+    const next = withTransformedSegments(project, segmentIds, (segment, scale) =>
+      withSpacing(segment, scale, preset)
+    );
+    if (next) set({ project: next });
+  },
+
+  /** Move one chord tone by whole octaves, which makes the voicing custom. */
+  setSegmentsToneOffset: (segmentIds: string[], tone: number, offsetOctaves: number) => {
+    const project = get().project;
+    if (!project) return;
+    const next = withTransformedSegments(project, segmentIds, segment =>
+      withToneOffset(segment, tone, offsetOctaves)
+    );
+    if (next) set({ project: next });
+  },
+
+  /** Add or remove a doubled copy of one chord tone. */
+  toggleSegmentsDoubling: (segmentIds: string[], tone: number, octaves: 1 | -1) => {
+    const project = get().project;
+    if (!project) return;
+    const next = withTransformedSegments(project, segmentIds, segment =>
+      withToggledDoubling(segment, tone, octaves)
+    );
+    if (next) set({ project: next });
+  },
+
+  /** Arpeggiate or strum each chord; null returns it to a block chord. */
+  setSegmentsBreak: (segmentIds: string[], spec: SegmentBreak | null) => {
+    const project = get().project;
+    if (!project) return;
+    const next = withTransformedSegments(project, segmentIds, segment =>
+      withBreak(segment, spec)
+    );
+    if (next) set({ project: next });
+  },
+
+  /** Return each chord to close position, sounded as a block. */
+  clearSegmentsVoicing: (segmentIds: string[]) => {
+    const project = get().project;
+    if (!project) return;
+    const next = withTransformedSegments(project, segmentIds, withoutVoicing);
+    if (next) set({ project: next });
+  },
+
   // The single-segment forms, kept because plenty of callers only ever have one.
   stepSegmentPitch: (segmentId: string, direction: -1 | 1) => {
     get().stepSegmentsPitch([segmentId], direction);
@@ -652,6 +733,30 @@ export const projectStore = create<ProjectState>((set, get) => ({
 
   cycleSegmentInversion: (segmentId: string) => {
     get().cycleSegmentsInversion([segmentId]);
+  },
+
+  setSegmentInversion: (segmentId: string, inversion: number) => {
+    get().setSegmentsInversion([segmentId], inversion);
+  },
+
+  setSegmentSpacing: (segmentId: string, preset: SpacingPreset) => {
+    get().setSegmentsSpacing([segmentId], preset);
+  },
+
+  setSegmentToneOffset: (segmentId: string, tone: number, offsetOctaves: number) => {
+    get().setSegmentsToneOffset([segmentId], tone, offsetOctaves);
+  },
+
+  toggleSegmentDoubling: (segmentId: string, tone: number, octaves: 1 | -1) => {
+    get().toggleSegmentsDoubling([segmentId], tone, octaves);
+  },
+
+  setSegmentBreak: (segmentId: string, spec: SegmentBreak | null) => {
+    get().setSegmentsBreak([segmentId], spec);
+  },
+
+  clearSegmentVoicing: (segmentId: string) => {
+    get().clearSegmentsVoicing([segmentId]);
   },
 
   // -------------------------------------------------------------------------

@@ -1014,6 +1014,141 @@ describe('projectStore', () => {
         expect(state().project).toBe(before);
       });
     });
+
+    describe('voicing', () => {
+      const pitchesOf = (id: string) =>
+        barNotes(barOf(id)!, trackId()).map(n => n.pitch);
+
+      it('spaces a chord by a preset and seeds the offsets it implies', () => {
+        const segment = chordSegment({ octave: 4 });
+        appendSegment(segment);
+
+        state().setSegmentSpacing(segment.id, 'drop2');
+
+        expect(segmentOf(segment.id).voicing).toMatchObject({
+          spacing: 'drop2',
+          offsets: [0, -1, 0],
+        });
+        // C major with the third dropped: 52 instead of 64.
+        expect(pitchesOf(segment.id)).toEqual([52, 60, 67]);
+      });
+
+      it('makes the voicing custom when one tone is hand-tweaked', () => {
+        const segment = chordSegment({ octave: 4 });
+        appendSegment(segment);
+
+        state().setSegmentSpacing(segment.id, 'drop2');
+        state().setSegmentToneOffset(segment.id, 2, -1);
+
+        expect(segmentOf(segment.id).voicing?.spacing).toBeUndefined();
+        expect(pitchesOf(segment.id)).toEqual([52, 55, 60]);
+      });
+
+      it('keeps an offset on its own chord tone across an inversion change', () => {
+        // The reason offsets are keyed by tone rather than by sounding position:
+        // the third stays dropped when the chord rotates underneath it.
+        const segment = chordSegment({ octave: 4 });
+        appendSegment(segment);
+
+        state().setSegmentToneOffset(segment.id, 1, -1);
+        state().setSegmentInversion(segment.id, 1);
+
+        expect(segmentOf(segment.id).voicing?.offsets?.[1]).toBe(-1);
+        // Root and fifth rotate up to 72 and 67; the third stays where the
+        // offset put it rather than following the voice that used to be there.
+        expect(pitchesOf(segment.id)).toEqual([52, 67, 72]);
+      });
+
+      it('sets an absolute inversion, wrapping within the chord', () => {
+        const segment = chordSegment({ octave: 4 });
+        appendSegment(segment);
+
+        state().setSegmentInversion(segment.id, 2);
+        expect(segmentOf(segment.id).inversion).toBe(2);
+
+        // A triad has three inversions, so the fourth is root position again.
+        state().setSegmentInversion(segment.id, 3);
+        expect(segmentOf(segment.id).inversion).toBe(0);
+      });
+
+      it('adds and removes a doubled tone', () => {
+        const segment = chordSegment({ octave: 4 });
+        appendSegment(segment);
+
+        state().toggleSegmentDoubling(segment.id, 0, -1);
+        expect(pitchesOf(segment.id)).toEqual([48, 60, 64, 67]);
+
+        state().toggleSegmentDoubling(segment.id, 0, -1);
+        expect(pitchesOf(segment.id)).toEqual([60, 64, 67]);
+        expect(segmentOf(segment.id).voicing).toBeUndefined();
+      });
+
+      it('arpeggiates without moving or resizing the block itself', () => {
+        const segment = chordSegment({ octave: 4, duration: 3 });
+        appendSegment(segment);
+        const before = segmentOf(segment.id);
+
+        state().setSegmentBreak(segment.id, { mode: 'arpeggio', pattern: 'up' });
+
+        const after = segmentOf(segment.id);
+        expect(after.startBeat).toBe(before.startBeat);
+        expect(after.duration).toBe(before.duration);
+        expect(barNotes(barOf(segment.id)!, trackId()).map(n => n.startBeat)).toEqual([0, 1, 2]);
+      });
+
+      it('applies to a whole selection spanning bars in different keys', () => {
+        const bars = state().project!.bars;
+        state().updateBarScale(bars[1].id, { root: 'A', type: 'naturalMinor' });
+
+        const first = chordSegment({ octave: 4 });
+        appendSegment(first);
+        const second = chordSegment({ root: 'A', quality: 'minor', romanNumeral: 'i', octave: 4 });
+        state().insertSegment(state().project!.bars[1].id, 0, second, trackId());
+
+        state().setSegmentsSpacing([first.id, second.id], 'drop2');
+
+        expect(segmentOf(first.id).voicing?.spacing).toBe('drop2');
+        expect(segmentOf(second.id).voicing?.spacing).toBe('drop2');
+      });
+
+      it('restores the original notes when the voicing is cleared', () => {
+        const segment = chordSegment({ octave: 4 });
+        appendSegment(segment);
+        const original = pitchesOf(segment.id);
+
+        state().setSegmentSpacing(segment.id, 'open');
+        state().toggleSegmentDoubling(segment.id, 0, 1);
+        state().setSegmentBreak(segment.id, { mode: 'arpeggio', pattern: 'up' });
+        expect(pitchesOf(segment.id)).not.toEqual(original);
+
+        state().clearSegmentVoicing(segment.id);
+
+        expect(segmentOf(segment.id).voicing).toBeUndefined();
+        expect(pitchesOf(segment.id)).toEqual(original);
+      });
+
+      it('leaves a note segment alone — one pitch has nothing to voice', () => {
+        const segment: ChordSegment = {
+          id: 'note-seg',
+          kind: 'note',
+          pitch: 60,
+          duration: 1,
+        };
+        appendSegment(segment);
+
+        state().setSegmentSpacing(segment.id, 'drop2');
+
+        expect(segmentOf(segment.id).voicing).toBeUndefined();
+        expect(pitchesOf(segment.id)).toEqual([60]);
+      });
+
+      it('ignores an unknown segment id', () => {
+        const before = state().project;
+        state().setSegmentSpacing('nope', 'drop2');
+        state().clearSegmentVoicing('nope');
+        expect(state().project).toBe(before);
+      });
+    });
   });
 
   describe('instruments', () => {

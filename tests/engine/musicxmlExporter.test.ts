@@ -321,4 +321,93 @@ describe('musicxmlExporter', () => {
       expect(projectToMusicXML(project)).toContain('<rest/>\n        <duration>8</duration>');
     });
   });
+
+  describe('broken chords', () => {
+    /** A bar holding exactly these notes, for the one fixture instrument. */
+    const barOfNotes = (notes: { pitch: number; startBeat: number; duration: number }[]): Bar => ({
+      id: generateId(),
+      barIndex: 0,
+      scale: { root: 'C', type: 'major' },
+      content: soloContent(
+        [],
+        notes.map(n => ({ id: generateId(), velocity: 100, ...n }))
+      ),
+    });
+
+    // Notation has no way to write "strummed", and the thing on the page is
+    // still a chord — not three hair-thin notes preceded by a rest.
+    it('writes a strummed chord as one chord', () => {
+      const xml = projectToMusicXML(
+        createTestProject({
+          bars: [
+            barOfNotes([
+              { pitch: 60, startBeat: 0, duration: 4 },
+              { pitch: 64, startBeat: 0.0625, duration: 3.9375 },
+              { pitch: 67, startBeat: 0.125, duration: 3.875 },
+            ]),
+          ],
+        })
+      );
+
+      // Two of the three are chord members, and the group spans the whole bar.
+      expect(xml.match(/<chord\/>/g)).toHaveLength(2);
+      expect(xml).toContain('<duration>16</duration>');
+      expect(xml).not.toContain('<rest/>');
+    });
+
+    it('writes an arpeggio as separate notes, not a chord', () => {
+      const xml = projectToMusicXML(
+        createTestProject({
+          bars: [
+            barOfNotes([
+              { pitch: 60, startBeat: 0, duration: 1 },
+              { pitch: 64, startBeat: 1, duration: 1 },
+              { pitch: 67, startBeat: 2, duration: 1 },
+              { pitch: 72, startBeat: 3, duration: 1 },
+            ]),
+          ],
+        })
+      );
+
+      expect(xml).not.toContain('<chord/>');
+      expect(xml.match(/<duration>4<\/duration>/g)).toHaveLength(4);
+    });
+
+    // The tolerance has to be narrow enough that genuinely fast writing still
+    // reads as separate notes rather than being swallowed into one chord.
+    it('gathers the widest strum a four-note chord can carry', () => {
+      // 1/16 beat is the widest spread the inspector offers; four voices put
+      // the last onset 3/16 of a beat late, which must still read as one chord.
+      const xml = projectToMusicXML(
+        createTestProject({
+          bars: [
+            barOfNotes([
+              { pitch: 60, startBeat: 0, duration: 4 },
+              { pitch: 64, startBeat: 0.0625, duration: 3.9375 },
+              { pitch: 67, startBeat: 0.125, duration: 3.875 },
+              { pitch: 70, startBeat: 0.1875, duration: 3.8125 },
+            ]),
+          ],
+        })
+      );
+
+      expect(xml.match(/<chord\/>/g)).toHaveLength(3);
+      expect(xml).not.toContain('<rest/>');
+    });
+
+    it('keeps sixteenth notes apart', () => {
+      const xml = projectToMusicXML(
+        createTestProject({
+          bars: [
+            barOfNotes([
+              { pitch: 60, startBeat: 0, duration: 0.25 },
+              { pitch: 64, startBeat: 0.25, duration: 0.25 },
+            ]),
+          ],
+        })
+      );
+
+      expect(xml).not.toContain('<chord/>');
+    });
+  });
 });

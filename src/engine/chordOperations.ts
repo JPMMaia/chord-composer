@@ -4,7 +4,6 @@ import {
   CHORD_INTERVALS,
   getDiatonicChords,
   getDiatonicSevenths,
-  invertIntervals,
   SEMITONE_TO_NOTE,
 } from '@/engine/chords';
 import {
@@ -12,6 +11,7 @@ import {
   getScalePitches,
   octaveForDegree,
 } from '@/engine/scales';
+import { breakChord, voicedPitches } from '@/engine/voicing';
 import { getBarBeats, MIN_SEGMENT_BEATS, withStartBeats } from '@/engine/timeline';
 import { formatChordSymbol } from '@/engine/palette';
 import {
@@ -161,19 +161,27 @@ export function generateNotesFromSegments(
       continue;
     }
 
-    const { quality, rootSemitone } = resolveChord(segment, bar);
+    const { quality, rootSemitone } = resolveSegmentChord(segment, bar.scale);
     // The segment's own register wins; the parameter is the fallback for
     // segments written before the palette could choose an octave.
     const baseMidi = ((segment.octave ?? octave) + 1) * 12 + rootSemitone;
 
-    for (const interval of invertIntervals(CHORD_INTERVALS[quality], segment.inversion ?? 0)) {
-      notes.push({
-        id: generateId(),
-        pitch: baseMidi + interval,
-        startBeat: currentBeat,
-        duration: segment.duration,
-        velocity: 100,
-      });
+    // A segment with no voicing comes back from these two as the same block
+    // chord this loop used to build by hand.
+    const pitches = voicedPitches(
+      CHORD_INTERVALS[quality],
+      segment.inversion ?? 0,
+      baseMidi,
+      segment.voicing
+    );
+
+    for (const timed of breakChord(
+      pitches,
+      currentBeat,
+      segment.duration,
+      segment.voicing?.break
+    )) {
+      notes.push({ id: generateId(), ...timed });
     }
   }
 
@@ -182,14 +190,19 @@ export function generateNotesFromSegments(
 
 /**
  * Resolves a chord segment's quality and root pitch class, falling back to the
- * bar's scale when the segment only carries a Roman numeral.
+ * given scale when the segment only carries a Roman numeral.
+ *
+ * Takes a `Scale` rather than the whole `Bar` because that is all it ever needed,
+ * and because its callers do not all have a bar: the store's segment transforms
+ * are handed the scale of whichever bar a segment lives in, and the inspector
+ * panel resolves a chord to count its tones.
  */
-function resolveChord(
+export function resolveSegmentChord(
   segment: ChordSegment,
-  bar: Bar
+  scale: Scale
 ): { quality: ChordQualityKey; rootSemitone: number } {
   const match = segment.romanNumeral
-    ? getDiatonicChords(bar.scale).find(
+    ? getDiatonicChords(scale).find(
         c =>
           c.romanNumeral.replace(/[°+]/g, '') ===
           segment.romanNumeral!.replace(/[°+]/g, '')

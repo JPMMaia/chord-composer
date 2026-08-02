@@ -1,5 +1,5 @@
 import type { Bar, TimeSignature, Track } from '@/types/music';
-import { allBarNotes, getBarStartBeat, getTotalBeats } from '@/engine/timeline';
+import { allBarNotes, getBarPulse, getBarStartBeat, getTotalBeats } from '@/engine/timeline';
 
 export interface NoteTiming {
   midiNote: number;
@@ -81,8 +81,21 @@ export function getLoopDuration(config: PlaybackConfig): number {
   return getTotalBeats(config.bars, config.timeSignature) * beatDur;
 }
 
+/** Whether a click opens a bar or falls on a beat within it. */
+export type ClickAccent = 'downbeat' | 'pulse';
+
+export interface MetronomeClick {
+  /** Beats from the start of the project. */
+  beat: number;
+  accent: ClickAccent;
+}
+
 /**
  * Calculate metronome click positions, in beats from the start of the project.
+ *
+ * Clicks land on the metre's pulse rather than on every beat, so 6/8 gives two
+ * clicks a bar at 0 and 1.5 where 3/4 gives three at 0, 1 and 2 — the audible
+ * difference between two metres that occupy the same three beats.
  *
  * Takes the bars themselves rather than a bar count because each may be in its
  * own metre; the caller scales the result by BPM.
@@ -90,7 +103,20 @@ export function getLoopDuration(config: PlaybackConfig): number {
 export function calculateMetronomeBeats(
   bars: Bar[],
   projectTs: TimeSignature
-): number[] {
-  const totalBeats = getTotalBeats(bars, projectTs);
-  return Array.from({ length: totalBeats }, (_, i) => i);
+): MetronomeClick[] {
+  const clicks: MetronomeClick[] = [];
+
+  for (let i = 0; i < bars.length; i++) {
+    const barStartBeat = getBarStartBeat(bars, i, projectTs);
+    const { pulseBeats, pulseCount } = getBarPulse(bars[i], projectTs);
+
+    for (let pulse = 0; pulse < pulseCount; pulse++) {
+      clicks.push({
+        beat: barStartBeat + pulse * pulseBeats,
+        accent: pulse === 0 ? 'downbeat' : 'pulse',
+      });
+    }
+  }
+
+  return clicks;
 }

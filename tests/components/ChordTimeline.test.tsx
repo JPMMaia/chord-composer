@@ -1,5 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, fireEvent, createEvent, within, act } from '@testing-library/react';
+import {
+  render,
+  screen,
+  fireEvent,
+  createEvent,
+  within,
+  act,
+  cleanup,
+} from '@testing-library/react';
 import { ChordTimeline } from '@/components/ChordTimeline';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
@@ -232,10 +240,69 @@ describe('ChordTimeline', () => {
       expect(within(el).getAllByTestId('subdivision-line')).toHaveLength(4);
     });
 
-    it('draws no subdivision lines at a whole-beat grid', () => {
+    it("draws the metre's own subdivisions even at a whole-beat grid", () => {
       render(<ChordTimeline />);
       const el = screen.getByTestId(`timeline-bar-${bars()[0].id}`);
-      expect(within(el).queryAllByTestId('subdivision-line')).toHaveLength(0);
+      // 4/4 is simple: an eighth between each of the four quarter-note beats. These
+      // are the metre's, not the snap grid's, so they are drawn regardless of snap.
+      expect(within(el).getAllByTestId('subdivision-line')).toHaveLength(4);
+    });
+  });
+
+  describe('metre', () => {
+    /** Give the first bar its own time signature and render. */
+    function renderWithMeter(beatsPerMeasure: number, beatUnit: number) {
+      act(() => {
+        projectStore.getState().setBarTimeSignature(bars()[0].id, { beatsPerMeasure, beatUnit });
+      });
+      render(<ChordTimeline />);
+      return screen.getByTestId(`timeline-bar-${bars()[0].id}`);
+    }
+
+    it('gives a 6/8 bar the same width as a 3/4 bar', () => {
+      const threeFour = renderWithMeter(3, 4);
+      const width = threeFour.style.width;
+      cleanup();
+
+      const sixEight = renderWithMeter(6, 8);
+      // Six eighths and three quarters are the same length, so the bars match.
+      expect(sixEight.style.width).toBe(width);
+      expect(width).toBe(`${3 * PIXELS_PER_BEAT}px`);
+    });
+
+    it('counts a 3/4 bar in three and a 6/8 bar in two', () => {
+      const threeFour = renderWithMeter(3, 4);
+      expect(within(threeFour).getAllByTestId('beat-line')).toHaveLength(3);
+      cleanup();
+
+      const sixEight = renderWithMeter(6, 8);
+      // Compound duple: two dotted-quarter beats, not six quarters and not three.
+      expect(within(sixEight).getAllByTestId('beat-line')).toHaveLength(2);
+    });
+
+    it('groups a 6/8 bar into threes and a 3/4 bar into twos', () => {
+      const threeFour = renderWithMeter(3, 4);
+      // One eighth inside each of three beats.
+      expect(within(threeFour).getAllByTestId('subdivision-line')).toHaveLength(3);
+      cleanup();
+
+      const sixEight = renderWithMeter(6, 8);
+      // Two eighths inside each of two beats — the same six eighths, grouped
+      // differently, which is the whole difference between the two metres.
+      expect(within(sixEight).getAllByTestId('subdivision-line')).toHaveLength(4);
+    });
+
+    it('says how each metre counts in the bar header', () => {
+      const threeFour = renderWithMeter(3, 4);
+      expect(within(threeFour).getByTestId('bar-meter')).toHaveTextContent(
+        '3 beats · 3 quarters'
+      );
+      cleanup();
+
+      const sixEight = renderWithMeter(6, 8);
+      expect(within(sixEight).getByTestId('bar-meter')).toHaveTextContent(
+        '2 beats · 6 eighths'
+      );
     });
   });
 

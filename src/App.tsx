@@ -19,9 +19,11 @@ import {
   getTotalBeats,
   MIN_SEGMENT_BEATS,
 } from '@/engine/timeline';
+import { describePosition, formatNoteValue } from '@/engine/meterDisplay';
 import { midiToNoteLabel } from '@/engine/chords';
 import type { Bar, NoteName, ScaleType, TimeSignature } from '@/types/music';
 import {
+  DEFAULT_TIME_SIGNATURE,
   NOTE_NAMES,
   PIANO_KEYS_WIDTH,
   PIXELS_PER_BEAT,
@@ -104,6 +106,9 @@ function App() {
   const selectedBarContent =
     selectedBar && selectedTrackId ? barContent(selectedBar, selectedTrackId) : null;
   const selectedSegment = selectedBarContent?.chords.find(c => c.id === selectedSegmentId);
+  // A segment only ever lives in the selected bar, so its metre is that bar's.
+  const selectedSegmentTs =
+    selectedBar?.timeSignature ?? project?.timeSignature ?? DEFAULT_TIME_SIGNATURE;
   const selectedBarSegmentCount = selectedBarContent?.chords.length ?? 0;
   const selectedBarNoteCount = selectedBarContent?.notes.length ?? 0;
 
@@ -293,8 +298,13 @@ function App() {
                         {INVERSION_NAMES[selectedSegment.inversion]} inversion
                       </div>
                     )}
+                    {/* Named as a note value and located in the bar's own metre —
+                        "1.5 beats" says nothing about whether the bar counts in
+                        quarters or dotted quarters. */}
                     <div className="text-xs text-gray-500">
-                      {selectedSegment.duration} beat{selectedSegment.duration !== 1 ? 's' : ''}
+                      {formatNoteValue(selectedSegment.duration)}
+                      {' · '}
+                      {describePosition(selectedSegment.startBeat ?? 0, selectedSegmentTs)}
                     </div>
                   </div>
                 ) : (

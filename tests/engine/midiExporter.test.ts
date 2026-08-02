@@ -321,6 +321,50 @@ describe('midiExporter', () => {
       ]);
     });
 
+    it('clicks in dotted quarters for a compound meter', () => {
+      const project = createTestProject({
+        bars: [
+          barWith(0, { beatsPerMeasure: 3, beatUnit: 4 }, 60),
+          barWith(1, { beatsPerMeasure: 6, beatUnit: 8 }, 62),
+        ],
+      });
+
+      // 24 clocks is a quarter, 36 a dotted quarter — how a reader learns that the
+      // 6/8 bar is felt in two even though it is as long as the 3/4 bar before it.
+      expect(scanClocksPerClick(projectToMidi(project))).toEqual([24, 36]);
+    });
+
+    it('measures a 6/8 bar as three beats, like a 3/4 bar', () => {
+      const project = createTestProject({
+        bars: [
+          barWith(0, { beatsPerMeasure: 6, beatUnit: 8 }, 60),
+          barWith(1, { beatsPerMeasure: 6, beatUnit: 8 }, 62),
+        ],
+      });
+
+      expect(scanNoteOnTicks(projectToMidi(project))).toEqual([
+        { tick: 0, pitch: 60 },
+        { tick: 3 * PPQ, pitch: 62 },
+      ]);
+    });
+
+    it('round-trips a 6/8 project without stretching its bars', () => {
+      const project = createTestProject({
+        timeSignature: { beatsPerMeasure: 6, beatUnit: 8 },
+        bars: [barWith(0, undefined, 60), barWith(1, undefined, 62)],
+      });
+      const restored = midiToProject(projectToMidi(project));
+
+      expect(restored.timeSignature).toEqual({ beatsPerMeasure: 6, beatUnit: 8 });
+      // Import slices by the metre's real length, so the second note lands on the
+      // second bar's downbeat rather than halfway through a six-quarter bar.
+      expect(restored.bars).toHaveLength(2);
+      const onsets = restored.bars.map(bar =>
+        Object.values(bar.content).flatMap(c => c.notes).map(n => [n.pitch, n.startBeat])
+      );
+      expect(onsets).toEqual([[[60, 0]], [[62, 0]]]);
+    });
+
     it('places notes at cumulative bar starts rather than a fixed bar length', () => {
       const project = createTestProject({
         bars: [
@@ -413,6 +457,13 @@ function scanTimeSignatureEvents(
       // The denominator is stored as a power of two.
       beatUnit: 2 ** e.body[1],
     }));
+}
+
+/** MIDI clocks per metronome click of each time-signature event, at 24 per quarter. */
+function scanClocksPerClick(data: Uint8Array): number[] {
+  return scanTrack0(data)
+    .filter(e => e.status === 0xff && e.metaType === 0x58)
+    .map(e => e.body[2]);
 }
 
 /** Note-on events of track 0, in stream order. */

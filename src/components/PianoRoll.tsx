@@ -10,7 +10,13 @@ import {
 } from '@/engine/quantize';
 import { midiToNoteLabel } from '@/engine/chords';
 import { isNoteInScale } from '@/engine/scales';
-import { allBarNotes, getBarBeats, getBarStartBeat, getTotalBeats } from '@/engine/timeline';
+import {
+  allBarNotes,
+  getBarBeats,
+  getBarPulse,
+  getBarStartBeat,
+  getTotalBeats,
+} from '@/engine/timeline';
 import {
   BAR_LINE_WIDTH,
   PIANO_KEYS_WIDTH,
@@ -84,6 +90,12 @@ interface DragState {
 
 const DEFAULT_COLORS = {
   gridLine: '#e5e5e5',
+  /**
+   * Within-beat divisions. The beat line's own colour faded toward whatever is
+   * behind it, rather than a lighter grey: the roll paints onto the page, which is
+   * dark, so a lighter grey would come out *stronger* than the beat it subdivides.
+   */
+  subdivisionLine: 'rgba(229, 229, 229, 0.35)',
   barLine: '#cccccc',
   activeBar: 'rgba(59, 130, 246, 0.1)',
   playhead: '#ef4444',
@@ -265,13 +277,37 @@ export function PianoRoll({
       }
 
       const totalBeats = getTotalBeats(bars, timeSignature);
-      for (let beat = 0; beat <= totalBeats; beat++) {
+
+      const verticalLine = (beat: number) => {
         const x = timelineStart + beatToPixel(beat, pixelsPerBeat);
         ctx.beginPath();
         ctx.moveTo(x, 0);
         ctx.lineTo(x, height);
         ctx.stroke();
+      };
+
+      // Vertical lines follow each bar's own metre rather than a fixed quarter-note
+      // step, so a 6/8 bar shows two dotted-quarter beats split into threes where a
+      // 3/4 bar of the same width shows three quarters split in two. Subdivisions go
+      // down first and the pulse over them, so a coincident pair reads as a pulse.
+      for (let barIndex = 0; barIndex < bars.length; barIndex++) {
+        const barStartBeat = getBarStartBeat(bars, barIndex, timeSignature);
+        const barBeats = getBarBeats(bars[barIndex], timeSignature);
+        const { pulseBeats, subdivisionBeats } = getBarPulse(bars[barIndex], timeSignature);
+
+        ctx.strokeStyle = DEFAULT_COLORS.subdivisionLine;
+        for (let i = 1; i * subdivisionBeats < barBeats; i++) {
+          verticalLine(barStartBeat + i * subdivisionBeats);
+        }
+
+        ctx.strokeStyle = DEFAULT_COLORS.gridLine;
+        for (let i = 0; i * pulseBeats < barBeats; i++) {
+          verticalLine(barStartBeat + i * pulseBeats);
+        }
       }
+
+      // The project's closing line, which no bar's own grid reaches.
+      verticalLine(totalBeats);
 
       // Bar lines sit at accumulated bar starts — bars need not share a metre —
       // plus a closing line at the end of the last bar. Filled rather than stroked

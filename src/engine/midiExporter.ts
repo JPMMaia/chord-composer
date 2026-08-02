@@ -1,6 +1,12 @@
 import type { Bar, Note, Project, TimeSignature, Track } from '@/types/music';
 import { generateId } from '@/utils/id';
-import { barNotes, getBarStartBeat, getBarTimeSignature } from '@/engine/timeline';
+import {
+  barNotes,
+  getBarStartBeat,
+  getBarTimeSignature,
+  getMeterPulse,
+  timeSignatureBeats,
+} from '@/engine/timeline';
 import { gmInstrumentId, gmProgramNumber } from '@/engine/instrumentCatalog';
 import { trackColorAt } from '@/utils/constants';
 
@@ -225,7 +231,10 @@ function timeSignatureEvents(
         ts.beatsPerMeasure & 0xff,
         // The denominator is stored as a power of two: 4 → 2, 8 → 3.
         Math.round(Math.log2(ts.beatUnit)) & 0xff,
-        24, // MIDI clocks per metronome click
+        // MIDI clocks per metronome click, at 24 per quarter. Following the metre's
+        // pulse rather than fixing it at a quarter is what tells a reader that 6/8
+        // clicks in dotted quarters (36) where 3/4 clicks in quarters (24).
+        Math.round(24 * getMeterPulse(ts).pulseBeats) & 0xff,
         8,  // 32nd notes per quarter note
       ],
     });
@@ -364,7 +373,7 @@ export function midiToProject(midiBytes: Uint8Array): Project {
     // The reader merges every chunk's notes into one list, so they all land on the
     // first instrument. The other chunks still become instruments — their names and
     // sounds are real information — but they come in empty.
-    bars: notesToBars(notes, timeSignature.beatsPerMeasure, importedTracks[0].id),
+    bars: notesToBars(notes, timeSignature, importedTracks[0].id),
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -460,7 +469,10 @@ function readNotes(trackEvents: ParsedEvent[][], ppq: number): Note[] {
  * of how many tracks it was written with — splitting it back out by channel would
  * be a different feature.
  */
-function notesToBars(notes: Note[], beatsPerMeasure: number, trackId: string): Bar[] {
+function notesToBars(notes: Note[], ts: TimeSignature, trackId: string): Bar[] {
+  // Ticks were converted to beats against the file's PPQ, so bars are sliced by the
+  // metre's length in beats — six eighths, not six quarters, for a 6/8 file.
+  const beatsPerMeasure = timeSignatureBeats(ts);
   const lastBeat = notes.reduce((max, n) => Math.max(max, n.startBeat), 0);
   const barCount = Math.max(1, Math.floor(lastBeat / beatsPerMeasure) + 1);
 

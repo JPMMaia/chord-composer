@@ -2,7 +2,9 @@ import { describe, it, expect } from "vitest";
 import {
   getBarBeats,
   getBarStartBeat,
+  getMeterPulse,
   getTotalBeats,
+  timeSignatureBeats,
   flattenSegments,
   removeSegmentById,
   resizeSegment,
@@ -59,6 +61,66 @@ describe("timeline", () => {
       expect(getBarBeats(makeBar(0), TS_4_4)).toBe(4);
       expect(getBarBeats(makeBar(0), TS_3_4)).toBe(3);
     });
+
+    it("scales by the denominator, so a beat is always a quarter note", () => {
+      // Six eighths are three quarters — a 6/8 bar is exactly as long as a 3/4 one.
+      expect(timeSignatureBeats({ beatsPerMeasure: 6, beatUnit: 8 })).toBe(3);
+      expect(timeSignatureBeats({ beatsPerMeasure: 3, beatUnit: 4 })).toBe(3);
+      expect(timeSignatureBeats({ beatsPerMeasure: 12, beatUnit: 8 })).toBe(6);
+      expect(timeSignatureBeats({ beatsPerMeasure: 7, beatUnit: 8 })).toBe(3.5);
+      expect(timeSignatureBeats({ beatsPerMeasure: 2, beatUnit: 2 })).toBe(4);
+      expect(timeSignatureBeats({ beatsPerMeasure: 4, beatUnit: 16 })).toBe(1);
+    });
+  });
+
+  describe("getMeterPulse", () => {
+    const pulseOf = (beatsPerMeasure: number, beatUnit: number) =>
+      getMeterPulse({ beatsPerMeasure, beatUnit });
+
+    it("gives a simple metre one beat per denominator unit", () => {
+      expect(pulseOf(4, 4)).toEqual({
+        pulseBeats: 1,
+        pulseCount: 4,
+        subdivisionBeats: 0.5,
+        subdivisionsPerPulse: 2,
+      });
+      expect(pulseOf(2, 2)).toEqual({
+        pulseBeats: 2,
+        pulseCount: 2,
+        subdivisionBeats: 1,
+        subdivisionsPerPulse: 2,
+      });
+    });
+
+    it("groups a compound metre in threes", () => {
+      // 6/8 is two dotted-quarter beats, not six eighth beats and not three quarters.
+      expect(pulseOf(6, 8)).toEqual({
+        pulseBeats: 1.5,
+        pulseCount: 2,
+        subdivisionBeats: 0.5,
+        subdivisionsPerPulse: 3,
+      });
+      expect(pulseOf(12, 8)).toMatchObject({ pulseBeats: 1.5, pulseCount: 4 });
+      expect(pulseOf(9, 8)).toMatchObject({ pulseBeats: 1.5, pulseCount: 3 });
+    });
+
+    it("distinguishes 3/4 from 6/8, which are the same length", () => {
+      expect(timeSignatureBeats({ beatsPerMeasure: 3, beatUnit: 4 })).toBe(
+        timeSignatureBeats({ beatsPerMeasure: 6, beatUnit: 8 })
+      );
+      expect(pulseOf(3, 4).pulseCount).toBe(3);
+      expect(pulseOf(6, 8).pulseCount).toBe(2);
+    });
+
+    it("leaves an irregular metre as an even grid", () => {
+      // 7/8 has no equal grouping in threes, so it is not guessed at.
+      expect(pulseOf(7, 8)).toMatchObject({ pulseBeats: 0.5, pulseCount: 7 });
+      expect(pulseOf(5, 8)).toMatchObject({ pulseBeats: 0.5, pulseCount: 5 });
+    });
+
+    it("reads 3/8 as three eighth beats rather than one pulse", () => {
+      expect(pulseOf(3, 8)).toMatchObject({ pulseBeats: 0.5, pulseCount: 3 });
+    });
   });
 
   describe("getBarStartBeat", () => {
@@ -93,6 +155,12 @@ describe("timeline", () => {
 
     it("sums mixed meters", () => {
       const bars = [makeBar(0, [], TS_4_4), makeBar(1, [], TS_3_4)];
+      expect(getTotalBeats(bars, TS_4_4)).toBe(7);
+    });
+
+    it("sums an eighth-denominator bar by its real length", () => {
+      const bars = [makeBar(0, [], TS_4_4), makeBar(1, [], { beatsPerMeasure: 6, beatUnit: 8 })];
+      // 4 + 3, not 4 + 6.
       expect(getTotalBeats(bars, TS_4_4)).toBe(7);
     });
 

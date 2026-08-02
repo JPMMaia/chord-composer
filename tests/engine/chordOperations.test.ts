@@ -90,9 +90,21 @@ describe("chordOperations", () => {
       expect(() => splitBarIntoChords(bar, -1)).toThrow();
     });
 
-    it("throws if chordCount exceeds bar beats", () => {
+    it("throws when the chords would be finer than a segment can be", () => {
+      // The limit is the grid, not the beat count: sixteen sixteenths fit a 4/4 bar.
       const bar = makeBar(0, 4);
-      expect(() => splitBarIntoChords(bar, 5)).toThrow();
+      expect(splitBarIntoChords(bar, 16)).toHaveLength(16);
+      expect(() => splitBarIntoChords(bar, 17)).toThrow();
+    });
+
+    it("splits a 6/8 bar into six eighths", () => {
+      const bar = barWith([], { beatsPerMeasure: 6, beatUnit: 8 });
+      const result = splitBarIntoChords(bar, 6);
+
+      expect(result).toHaveLength(6);
+      // Six eighths, not six quarters — the bar is three beats long, like 3/4.
+      expect(result.every(c => c.duration === 0.5)).toBe(true);
+      expect(result.reduce((sum, c) => sum + c.duration, 0)).toBe(3);
     });
 
     it("assigns diatonic chord symbols based on bar scale", () => {

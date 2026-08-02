@@ -7,11 +7,13 @@ import {
   barChords,
   flattenSegments,
   getBarBeats,
+  getBarPulse,
   getBarStartBeat,
   getTotalBeats,
   snapBeat,
   SNAP_OPTIONS,
 } from '@/engine/timeline';
+import { describeMeter } from '@/engine/meterDisplay';
 import { paletteItemToSegment, type PaletteItem } from '@/engine/palette';
 import { PALETTE_DRAG_TYPE } from '@/components/ScalePalette';
 import { ChordSegmentBlock } from '@/components/ChordSegmentBlock';
@@ -41,6 +43,41 @@ function parseTs(value: string): TimeSignature {
 }
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+/**
+ * Gridline positions at `step` intervals across a bar, from its start up to but not
+ * including its end. Multiplied out from an index rather than accumulated, so a
+ * step like 1.5 cannot drift a line off the lattice by the end of a long bar.
+ */
+function stepsAcross(beats: number, step: number): number[] {
+  if (!(step > 0)) return [];
+  const count = Math.ceil(beats / step);
+  return Array.from({ length: count }, (_, i) => i * step);
+}
+
+/** A beat as an integer key, so lines that should coincide dedupe despite float drift. */
+const gridKey = (beat: number) => Math.round(beat * 1000);
+
+/**
+ * The faint grid: every step of each interval, minus the positions `covered` by a
+ * line already drawn. Intervals may overlap — the metre's subdivision and the
+ * chosen snap usually do — so each position is emitted at most once.
+ */
+function gridPositions(beats: number, steps: number[], covered: number[]): number[] {
+  const taken = new Set(covered.map(gridKey));
+  const positions: number[] = [];
+
+  for (const step of steps) {
+    for (const beat of stepsAcross(beats, step)) {
+      const key = gridKey(beat);
+      if (taken.has(key)) continue;
+      taken.add(key);
+      positions.push(beat);
+    }
+  }
+
+  return positions.sort((a, b) => a - b);
+}
 
 /** Where a block sat when a drag began, or would land if released now. */
 interface SegmentPlacement {
@@ -625,16 +662,18 @@ export const ChordTimeline: React.FC = () => {
         {bars.map((bar, barIndex) => {
           const beats = getBarBeats(bar, projectTs);
           const width = beats * PIXELS_PER_BEAT;
+          const pulse = getBarPulse(bar, projectTs);
           const isSelectedBar = selectedBarId === bar.id;
 
-          // Every position the grid will snap to, minus the ones a beat line
-          // already draws.
-          const subdivisions =
-            snapBeats < 1
-              ? Array.from({ length: Math.round(beats / snapBeats) }, (_, i) => i * snapBeats).filter(
-                  beat => !Number.isInteger(beat)
-                )
-              : [];
+          // Where the metre's beats fall: every quarter in 3/4, every dotted
+          // quarter in 6/8. The two bars are the same width, so these lines are
+          // most of what tells them apart.
+          const pulses = stepsAcross(beats, pulse.pulseBeats);
+
+          // The faint grid: the metre's own subdivisions — which is what groups
+          // 6/8 into threes — plus wherever the chosen snap will land, minus the
+          // positions a pulse line already covers.
+          const subdivisions = gridPositions(beats, [pulse.subdivisionBeats, snapBeats], pulses);
 
           return (
             <div
@@ -667,6 +706,11 @@ export const ChordTimeline: React.FC = () => {
                 <div className="text-[10px] text-gray-400 truncate">
                   {bar.scale.root} {bar.scale.type.replace(/([A-Z])/g, ' $1').trim()}
                 </div>
+                {/* Two bars of the same width may be in different metres, so say how
+                    this one counts: 3/4 is three quarters, 6/8 two beats of three. */}
+                <div className="text-[10px] text-gray-500 truncate" data-testid="bar-meter">
+                  {describeMeter(bar.timeSignature ?? projectTs)}
+                </div>
               </div>
 
               {/* Segment lane */}
@@ -684,12 +728,12 @@ export const ChordTimeline: React.FC = () => {
                 onDrop={e => handleDrop(e, bar)}
                 className="relative h-20 bg-gray-900"
               >
-                {/* Beat gridlines */}
-                {Array.from({ length: beats }, (_, i) => (
+                {/* Beat gridlines, on the metre's pulse */}
+                {pulses.map((beat, i) => (
                   <div
-                    key={i}
+                    key={beat}
                     data-testid="beat-line"
-                    style={{ left: `${i * PIXELS_PER_BEAT}px` }}
+                    style={{ left: `${beat * PIXELS_PER_BEAT}px` }}
                     className={`absolute top-0 bottom-0 w-px ${
                       i === 0 ? 'bg-transparent' : 'bg-gray-700'
                     }`}

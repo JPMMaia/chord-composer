@@ -3,6 +3,7 @@ import {
   calculateNoteTiming,
   getLoopDuration,
   calculateMetronomeBeats,
+  type MetronomeClick,
   type NoteTiming,
   type PlaybackConfig,
 } from '@/engine/playback';
@@ -227,47 +228,62 @@ describe('playback', () => {
     const inheriting = (count: number): Bar[] =>
       Array.from({ length: count }, (_, i) => makeInheritingBar(i));
 
+    /** Click positions alone, for the cases that do not care about accents. */
+    const positions = (clicks: MetronomeClick[]): number[] => clicks.map(c => c.beat);
+
     it('generates correct beat positions for 4/4 time', () => {
-      const beats = calculateMetronomeBeats(inheriting(2), { beatsPerMeasure: 4, beatUnit: 4 });
-      // 2 bars × 4 beats = 8 beats at 60 BPM
-      expect(beats).toHaveLength(8);
-      expect(beats[0]).toBe(0);
-      expect(beats[1]).toBe(1.0);
-      expect(beats[2]).toBe(2.0);
-      expect(beats[3]).toBe(3.0);
-      expect(beats[4]).toBe(4.0);
+      const clicks = calculateMetronomeBeats(inheriting(2), { beatsPerMeasure: 4, beatUnit: 4 });
+      // 2 bars × 4 quarter-note beats
+      expect(positions(clicks)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
     });
 
     it('generates correct beat positions for 3/4 time', () => {
-      const beats = calculateMetronomeBeats(inheriting(2), { beatsPerMeasure: 3, beatUnit: 4 });
-      // 2 bars × 3 beats = 6 beats
-      expect(beats).toHaveLength(6);
-      expect(beats[0]).toBe(0);
-      expect(beats[1]).toBe(1.0);
-      expect(beats[2]).toBe(2.0);
-      expect(beats[3]).toBe(3.0);
-      expect(beats[4]).toBe(4.0);
-      expect(beats[5]).toBe(5.0);
+      const clicks = calculateMetronomeBeats(inheriting(2), { beatsPerMeasure: 3, beatUnit: 4 });
+      // 2 bars × 3 quarter-note beats
+      expect(positions(clicks)).toEqual([0, 1, 2, 3, 4, 5]);
     });
 
-    it('generates correct beat positions for 6/8 time', () => {
-      const beats = calculateMetronomeBeats(inheriting(1), { beatsPerMeasure: 6, beatUnit: 8 });
-      // 1 bar × 6 beats = 6 beats
-      expect(beats).toHaveLength(6);
-      expect(beats[5]).toBe(5.0);
+    it('clicks in dotted quarters for 6/8, not in quarters', () => {
+      const clicks = calculateMetronomeBeats(inheriting(1), { beatsPerMeasure: 6, beatUnit: 8 });
+      // Compound duple: two beats a bar, each a dotted quarter. The bar is the same
+      // three beats long as 3/4, but is counted in two rather than three.
+      expect(clicks).toEqual([
+        { beat: 0, accent: 'downbeat' },
+        { beat: 1.5, accent: 'pulse' },
+      ]);
+    });
+
+    it('groups 12/8 into four dotted-quarter beats', () => {
+      const clicks = calculateMetronomeBeats(inheriting(1), { beatsPerMeasure: 12, beatUnit: 8 });
+      expect(positions(clicks)).toEqual([0, 1.5, 3, 4.5]);
+    });
+
+    it('gives an irregular metre one click per denominator unit', () => {
+      // 7/8 is not divisible into equal groups of three, so it is left as an even
+      // grid of eighths rather than guessing between 3+2+2 and 2+2+3.
+      const clicks = calculateMetronomeBeats(inheriting(1), { beatsPerMeasure: 7, beatUnit: 8 });
+      expect(positions(clicks)).toEqual([0, 0.5, 1, 1.5, 2, 2.5, 3]);
+    });
+
+    it('accents the first click of every bar', () => {
+      const clicks = calculateMetronomeBeats(inheriting(2), { beatsPerMeasure: 3, beatUnit: 4 });
+      expect(clicks.map(c => c.accent)).toEqual([
+        'downbeat', 'pulse', 'pulse',
+        'downbeat', 'pulse', 'pulse',
+      ]);
     });
 
     it('handles single bar', () => {
-      const beats = calculateMetronomeBeats(inheriting(1), { beatsPerMeasure: 4, beatUnit: 4 });
-      expect(beats).toHaveLength(4);
+      const clicks = calculateMetronomeBeats(inheriting(1), { beatsPerMeasure: 4, beatUnit: 4 });
+      expect(clicks).toHaveLength(4);
     });
 
     it('clicks once per beat across bars of differing lengths', () => {
-      const beats = calculateMetronomeBeats(
+      const clicks = calculateMetronomeBeats(
         [makeBar(0, 4), makeBar(1, 3)],
         { beatsPerMeasure: 4, beatUnit: 4 }
       );
-      expect(beats).toEqual([0, 1, 2, 3, 4, 5, 6]);
+      expect(positions(clicks)).toEqual([0, 1, 2, 3, 4, 5, 6]);
     });
   });
 

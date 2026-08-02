@@ -320,11 +320,83 @@ export function getBarTimeSignature(bar: Bar, projectTs: TimeSignature): TimeSig
 }
 
 /**
+ * How many beats a bar of this metre holds.
+ *
+ * A beat is a quarter note everywhere in the app — BPM is quarter-note BPM, MIDI
+ * counts ticks per quarter, MusicXML counts divisions per quarter — so the
+ * denominator has to be folded in here rather than taken as a beat count. Six
+ * eighths are three quarters, which is why 6/8 and 3/4 come out the same length.
+ */
+export function timeSignatureBeats(ts: TimeSignature): number {
+  return ts.beatsPerMeasure * (4 / ts.beatUnit);
+}
+
+/**
  * Returns the number of beats a bar holds, preferring its own time signature
  * and falling back to the project's.
  */
 export function getBarBeats(bar: Bar, projectTs: TimeSignature): number {
-  return getBarTimeSignature(bar, projectTs).beatsPerMeasure;
+  return timeSignatureBeats(getBarTimeSignature(bar, projectTs));
+}
+
+/**
+ * How a metre is *felt*, as opposed to how long it is.
+ *
+ * 3/4 and 6/8 occupy the same three quarter notes but are not the same metre: 3/4
+ * is three quarter-note pulses each split in two, 6/8 is two dotted-quarter pulses
+ * each split in three. Everything that has to show or sound that difference — the
+ * timeline grid, the piano roll grid, the metronome — asks here, so the rule is
+ * stated once.
+ */
+export interface MeterPulse {
+  /** Length of one felt beat, in beats: 1 in 3/4, 1.5 in 6/8. */
+  pulseBeats: number;
+  /** How many of them fill a bar: 3 in 3/4, 2 in 6/8. */
+  pulseCount: number;
+  /** Length of one subdivision within a pulse: 0.5 in both 3/4 and 6/8. */
+  subdivisionBeats: number;
+  /** Subdivisions per pulse: two when the metre is simple, three when compound. */
+  subdivisionsPerPulse: number;
+}
+
+/**
+ * A metre is compound when its denominator counts subdivisions rather than beats,
+ * which is what an eighth-or-finer unit grouped in threes means: 6/8, 9/8, 12/8,
+ * 6/16. 3/8 is excluded — with only one group it is heard as three eighth beats,
+ * not as a single pulse.
+ */
+function isCompound(ts: TimeSignature): boolean {
+  return ts.beatUnit >= 8 && ts.beatsPerMeasure >= 6 && ts.beatsPerMeasure % 3 === 0;
+}
+
+/**
+ * The pulse of a metre. Irregular metres (5/8, 7/8) fall through to the simple
+ * case, giving one pulse per denominator unit: an even grid rather than a wrong
+ * guess at whether the bar is 3+2+2 or 2+2+3.
+ */
+export function getMeterPulse(ts: TimeSignature): MeterPulse {
+  const unit = 4 / ts.beatUnit;
+
+  if (isCompound(ts)) {
+    return {
+      pulseBeats: unit * 3,
+      pulseCount: ts.beatsPerMeasure / 3,
+      subdivisionBeats: unit,
+      subdivisionsPerPulse: 3,
+    };
+  }
+
+  return {
+    pulseBeats: unit,
+    pulseCount: ts.beatsPerMeasure,
+    subdivisionBeats: unit / 2,
+    subdivisionsPerPulse: 2,
+  };
+}
+
+/** The pulse of a bar, resolving its metre the same way `getBarBeats` does. */
+export function getBarPulse(bar: Bar, projectTs: TimeSignature): MeterPulse {
+  return getMeterPulse(getBarTimeSignature(bar, projectTs));
 }
 
 /**

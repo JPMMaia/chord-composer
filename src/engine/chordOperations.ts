@@ -8,7 +8,7 @@ import {
   SEMITONE_TO_NOTE,
 } from '@/engine/chords';
 import { getScalePitches } from '@/engine/scales';
-import { getBarBeats, withStartBeats } from '@/engine/timeline';
+import { getBarBeats, MIN_SEGMENT_BEATS, withStartBeats } from '@/engine/timeline';
 import { formatChordSymbol } from '@/engine/palette';
 import {
   DEFAULT_TIME_SIGNATURE,
@@ -36,13 +36,17 @@ export function splitBarIntoChords(
     throw new Error('chordCount must be at least 1');
   }
 
-  const beatsPerMeasure = getBarBeats(bar, projectTs);
+  const barBeats = getBarBeats(bar, projectTs);
+  const beatsPerChord = barBeats / chordCount;
 
-  if (chordCount > beatsPerMeasure) {
-    throw new Error(`chordCount (${chordCount}) cannot exceed bar length (${beatsPerMeasure})`);
+  // The limit is what a segment can be, not how many beats the bar has: six chords
+  // fit a 6/8 bar's three beats perfectly well, one per eighth.
+  if (beatsPerChord < MIN_SEGMENT_BEATS) {
+    throw new Error(
+      `chordCount (${chordCount}) cannot exceed bar length (${barBeats} beats at ` +
+        `${MIN_SEGMENT_BEATS} per chord)`
+    );
   }
-
-  const beatsPerChord = beatsPerMeasure / chordCount;
   const diatonicChords = getDiatonicChords(bar.scale);
   const chords: ChordSegment[] = [];
 

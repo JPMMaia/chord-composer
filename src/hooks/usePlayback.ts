@@ -9,6 +9,7 @@ import {
   notesInWindow,
   toClockTime,
 } from '@/engine/scheduler';
+import { syncVst3Clock } from '@/engine/vst3Instrument';
 
 /**
  * Where the play range begins, in song time.
@@ -171,6 +172,12 @@ export function usePlayback(config: PlaybackConfig) {
           setIsLoading(false);
         }
       }
+
+      // Any natively-hosted plugin renders on its own audio device, whose clock
+      // is only kept in step with this one periodically. Re-anchoring here means
+      // the very first note is placed against a fresh reading rather than one up
+      // to half a second old — which would be plainly audible.
+      syncVst3Clock();
 
       const timings = calculateNoteTiming(configRef.current);
       // A range confines playback whether or not repeat is on, so a Play from a

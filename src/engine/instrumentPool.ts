@@ -4,6 +4,9 @@ import { configureLimiter } from '@/engine/instrumentBus';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
 import { SmplrPianoInstrument } from '@/engine/smplrPiano';
 import { SoundfontInstrument } from '@/engine/soundfontInstrument';
+import { parseInstrumentRef } from '@/engine/instrumentRef';
+import { Vst3Instrument } from '@/engine/vst3Instrument';
+import { vst3NameFor } from '@/engine/vst3Catalog';
 
 /**
  * One live `Instrument` per project track.
@@ -66,20 +69,38 @@ export class InstrumentPool {
         existing.instrument.dispose();
       }
 
-      const instrument = this.create(instrumentId);
+      const instrument = this.create(track.id, instrumentId, track.vst3State);
       instrument.setVolume(track.volume);
       this.entries.set(track.id, { instrumentId, instrument });
     }
   }
 
   /**
-   * The acoustic grand gets smplr's dedicated piano; everything else goes through
-   * the GM soundfont. This is the one place that distinction is made.
+   * Which backend makes this track's sound. The one place that is decided.
+   *
+   * A native plugin renders to its own audio device rather than into the
+   * limiter, so it is the one kind of instrument whose output never reaches
+   * this pool's graph. Everything downstream still treats it identically,
+   * because `Instrument` says nothing about where the sound comes out.
    */
-  private create(instrumentId: string): Instrument {
-    return instrumentId === DEFAULT_INSTRUMENT_ID
+  private create(trackId: string, instrumentId: string, vst3State?: string): Instrument {
+    const ref = parseInstrumentRef(instrumentId);
+
+    if (ref.kind === 'vst3') {
+      return new Vst3Instrument(
+        this.ctx,
+        trackId,
+        ref.classId,
+        vst3NameFor(ref.classId),
+        vst3State
+      );
+    }
+
+    // The acoustic grand gets smplr's dedicated piano; every other General MIDI
+    // sound goes through the soundfont.
+    return ref.instrumentId === DEFAULT_INSTRUMENT_ID
       ? new SmplrPianoInstrument(this.ctx, this.limiter)
-      : new SoundfontInstrument(this.ctx, instrumentId, this.limiter);
+      : new SoundfontInstrument(this.ctx, ref.instrumentId, this.limiter);
   }
 
   get(trackId: string): Instrument | undefined {

@@ -55,8 +55,15 @@ const LEGACY_TRACK_ID = 'track-legacy';
  * offsets, doubled tones, and an arpeggio or strum. An absent voicing is the
  * plain block chord — every tone in close position, sounded together — which is
  * the only thing a pre-1.6 chord could be, so older files sound identical.
+ *
+ * 1.7 lets a track name a native VST3 plugin instead of a General MIDI sound,
+ * and carries that plugin's own state — its preset — alongside. The instrument
+ * id needed no migration: a bare id still means General MIDI, and only the new
+ * `vst3:` prefix means a plugin. `vst3State` is absent for every other track,
+ * and for a plugin that has not been touched, which reads as "whatever the
+ * plugin comes up in" — exactly what a pre-1.7 file meant.
  */
-export const SCHEMA_VERSION = '1.6';
+export const SCHEMA_VERSION = '1.7';
 
 /**
  * Validation error returned by validateProject.
@@ -123,6 +130,8 @@ export function serializeProject(project: Project): string {
       // Absent has always meant visible, so only `false` is worth writing.
       visible: t.visible !== false,
       color: t.color,
+      // Only plugins have one, and only once the plugin has been asked for it.
+      vst3State: t.vst3State,
     })),
     bars: project.bars.map(b => ({
       id: b.id,
@@ -309,6 +318,9 @@ export function deserializeProject(json: string): Project {
         solo: t.solo === true,
         visible: t.visible !== false,
         color: typeof t.color === 'string' ? t.color : trackColorAt(i),
+        // Base64 plugin state, opaque here. Anything that is not a string is
+        // dropped rather than passed to the plugin, which would reject it.
+        vst3State: typeof t.vst3State === 'string' ? t.vst3State : undefined,
       }))
     : [];
 

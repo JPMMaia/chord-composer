@@ -9,6 +9,7 @@ import {
 import { midiToProject, projectToMidi } from '@/engine/midiExporter';
 import { projectToMusicXML } from '@/engine/musicxmlExporter';
 import { projectStore } from '@/store/projectStore';
+import { captureVst3State } from '@/engine/vst3Instrument';
 
 /** How long to wait after the last change before writing an auto-save. */
 const AUTO_SAVE_DELAY_MS = 5000;
@@ -71,13 +72,15 @@ export function useFileIO(): UseFileIOResult {
 
     setAutoSaveStatus('pending');
     timeoutRef.current = setTimeout(() => {
-      try {
-        autoSaveToLocalStorage(project);
-        setAutoSaveStatus('saved');
-        setLastSavedAt(new Date());
-      } catch {
-        setAutoSaveStatus('error');
-      }
+      // Plugin state too, or a restored auto-save would come back on the
+      // plugin's defaults rather than what was being worked on.
+      captureVst3State(project)
+        .then(withState => {
+          autoSaveToLocalStorage(withState);
+          setAutoSaveStatus('saved');
+          setLastSavedAt(new Date());
+        })
+        .catch(() => setAutoSaveStatus('error'));
     }, AUTO_SAVE_DELAY_MS);
 
     return () => {
@@ -102,7 +105,9 @@ export function useFileIO(): UseFileIOResult {
     if (!project) return;
     setError(null);
     try {
-      await saveToFile(project, toFilename(project.name, 'json'));
+      // A plugin's preset lives inside the plugin, so it has to be asked for
+      // rather than read from the store.
+      await saveToFile(await captureVst3State(project), toFilename(project.name, 'json'));
     } catch (err) {
       setError(toMessage(err, 'Failed to save the project.'));
     }

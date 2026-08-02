@@ -3,6 +3,10 @@ import type { Track } from '@/types/music';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { gmInstrumentsByFamily } from '@/engine/instrumentCatalog';
+import { vst3Option } from '@/engine/vst3Catalog';
+import { isVst3Ref, parseInstrumentRef } from '@/engine/instrumentRef';
+import { openVst3Editor } from '@/engine/vst3Editor';
+import { useVst3Plugins, type Vst3PluginsState } from '@/hooks/useVst3Plugins';
 import { trackColorAt } from '@/utils/constants';
 
 /**
@@ -19,6 +23,10 @@ export const InstrumentsPanel: React.FC = () => {
 
   const selectedTrackId = selectionStore(s => s.selectedTrackId);
   const selectTrack = selectionStore(s => s.selectTrack);
+
+  // Scanned once for the whole panel rather than per row: the scan is native and
+  // expensive, and every row offers the same list.
+  const vst3 = useVst3Plugins();
 
   if (!tracks) return null;
 
@@ -51,6 +59,7 @@ export const InstrumentsPanel: React.FC = () => {
           index={index}
           isSelected={track.id === selectedTrackId}
           onSelect={() => selectTrack(track.id)}
+          vst3={vst3}
         />
       ))}
 
@@ -68,6 +77,8 @@ interface InstrumentRowProps {
   index: number;
   isSelected: boolean;
   onSelect: () => void;
+  /** Empty in a browser build, and until the native scan finishes. */
+  vst3: Vst3PluginsState;
 }
 
 const InstrumentRow: React.FC<InstrumentRowProps> = ({
@@ -75,6 +86,7 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
   index,
   isSelected,
   onSelect,
+  vst3,
 }) => {
   const removeTrack = projectStore(s => s.removeTrack);
   const setTrackInstrument = projectStore(s => s.setTrackInstrument);
@@ -85,6 +97,29 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
   // flag — shows its notes rather than silently disappearing from the roll.
   const isVisible = track.visible !== false;
   const color = track.color ?? trackColorAt(index);
+
+  const vst3Options = vst3.plugins.map(vst3Option);
+
+  /**
+   * A plugin the picker cannot offer — the project names one that is not
+   * installed here, or the scan has not finished yet. Without an option
+   * carrying this value the `select` would silently display, and on the next
+   * change submit, some *other* instrument.
+   */
+  const unresolved =
+    isVst3Ref(track.instrument) && !vst3Options.some(o => o.value === track.instrument)
+      ? {
+          value: track.instrument,
+          label: vst3.loading
+            ? 'Loading plugins…'
+            : `Missing plugin (${track.instrument.slice(5, 13)}…)`,
+        }
+      : null;
+
+  const ref = parseInstrumentRef(track.instrument);
+  // Offered only for a plugin the scan actually found: opening the editor of
+  // something that is not installed can only fail.
+  const editable = ref.kind === 'vst3' && !unresolved ? ref.classId : null;
 
   return (
     <div
@@ -145,6 +180,22 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
         </button>
       </div>
 
+      {editable && (
+        <button
+          onPointerDown={e => e.stopPropagation()}
+          onClick={() => {
+            openVst3Editor(track.id, editable, track.name).catch(err => {
+              console.error('vst3: could not open the editor', err);
+            });
+          }}
+          title="Open this plugin's own editor"
+          aria-label={`Open ${track.name} plugin editor`}
+          className="mt-1 w-full text-[11px] px-1 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 text-indigo-100 transition-colors"
+        >
+          Open plugin editor
+        </button>
+      )}
+
       <select
         aria-label={`Sound for ${track.name}`}
         value={track.instrument}
@@ -152,6 +203,22 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
         onChange={e => setTrackInstrument(track.id, e.target.value)}
         className="mt-1 w-full bg-gray-700 border border-gray-600 rounded text-gray-200 text-[11px] px-1 py-0.5 focus:outline-none focus:border-indigo-500"
       >
+        {unresolved && (
+          <option value={unresolved.value}>{unresolved.label}</option>
+        )}
+
+        {/* Above the GM families: on a desktop build these are the sounds the
+            user actually reached for, and there are far fewer of them. */}
+        {vst3Options.length > 0 && (
+          <optgroup label="VST3">
+            {vst3Options.map(option => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </optgroup>
+        )}
+
         {/* Grouped by GM family — 128 flat entries is not a navigable list. */}
         {gmInstrumentsByFamily().map(({ family, instruments }) => (
           <optgroup key={family} label={family}>

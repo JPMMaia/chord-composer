@@ -1,0 +1,53 @@
+[workspace]
+members = ["fixtures/test-synth"]
+
+[package]
+name = "chord-composer"
+version = "0.0.0"
+description = "Chord Composer"
+edition = "2021"
+rust-version = "1.77.2"
+
+# The library is what `main.rs` calls into, and what Rust unit tests run against.
+# `cdylib` is required on mobile targets; `staticlib`/`rlib` cover desktop.
+[lib]
+name = "chord_composer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Raw COM bindings generated from the VST 3.8 headers. MIT/Apache — which is the
+# whole reason this is possible without relicensing the project.
+vst3 = "0.3"
+libloading = "0.8"
+
+# Audio output. cpal speaks WASAPI on Windows; rtrb is the lock-free queue that
+# carries note events to the audio thread without it ever taking a lock.
+cpal = "0.15"
+rtrb = "0.3"
+# Plugin state is opaque bytes; the project file is JSON.
+base64 = "0.22"
+
+# A plugin's editor is a native view that needs a real HWND to attach to.
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+]
+
+# A plugin that panics mid-render must not take the audio thread's stack with it.
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

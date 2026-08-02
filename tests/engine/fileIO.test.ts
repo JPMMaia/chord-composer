@@ -469,9 +469,9 @@ describe('fileIO', () => {
       });
     }
 
-    it('declares schema version 1.6', () => {
+    it('declares schema version 1.7', () => {
       const parsed = JSON.parse(serializeProject(createTestProject()));
-      expect(parsed.version).toBe('1.6');
+      expect(parsed.version).toBe('1.7');
     });
 
     describe('voicing', () => {

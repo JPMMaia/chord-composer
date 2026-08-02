@@ -164,6 +164,14 @@ export interface Track {
   visible?: boolean;
   /** Colour its notes draw in. Absent means "assigned by index from TRACK_COLORS". */
   color?: string;
+  /**
+   * A VST3 plugin's own state — its preset — base64'd.
+   *
+   * Opaque: only the plugin that produced it can read it. Absent on every
+   * General MIDI track, and on a plugin track whose plugin has not been asked
+   * for its state yet, which reads as "however the plugin starts up".
+   */
+  vst3State?: string;
 }
 
 /**

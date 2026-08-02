@@ -1,0 +1,14 @@
+[package]
+name = "test-synth"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# A real `.vst3` on disk is the only thing that exercises the host's COM path,
+# so this builds as a loadable module rather than a Rust dependency.
+[lib]
+name = "test_synth"
+crate-type = ["cdylib"]
+
+[dependencies]
+vst3 = "0.3"

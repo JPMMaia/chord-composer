@@ -10,6 +10,13 @@ export default defineConfig({
       '@': path.resolve(import.meta.dirname, './src'),
     },
   },
+  server: {
+    // Rust sources are rebuilt by cargo, not Vite; watching them would restart
+    // the dev server on every `cargo` write.
+    watch: { ignored: ['**/src-tauri/**'] },
+  },
+  // Tauri prints Rust compile errors to the same terminal. Clearing it eats them.
+  clearScreen: false,
   test: {
     globals: true,
     environment: 'jsdom',

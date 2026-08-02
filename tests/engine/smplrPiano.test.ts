@@ -26,6 +26,9 @@ vi.mock('smplr', () => ({
   }),
 }));
 
+const storage = { id: 'sample-storage' };
+vi.mock('@/engine/sampleCache', () => ({ sampleStorage: () => storage }));
+
 import { SmplrPianoInstrument, MASTER_GAIN } from '@/engine/smplrPiano';
 
 interface MockNode {
@@ -111,6 +114,11 @@ describe('SmplrPianoInstrument', () => {
       readyResolve();
       await loading;
       expect(piano.isLoaded).toBe(true);
+    });
+
+    it('fetches through the persistent sample cache, not plain http', () => {
+      piano.load();
+      expect(capturedOptions?.storage).toBe(storage);
     });
 
     it('fetches the samples once however often it is called', async () => {

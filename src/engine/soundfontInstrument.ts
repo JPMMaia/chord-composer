@@ -2,13 +2,14 @@ import { Soundfont } from 'smplr';
 import type { Instrument, ScheduledNote } from '@/engine/instrument';
 import { createInstrumentBus, type InstrumentBus } from '@/engine/instrumentBus';
 import { gmLabel } from '@/engine/instrumentCatalog';
+import { sampleStorage } from '@/engine/sampleCache';
 
 /**
  * Any General MIDI melodic sound, via smplr's Soundfont.
  *
  * Deliberately the same shape as `SmplrPianoInstrument`: both are thin adapters
  * onto smplr sample players, and the scheduler cannot tell them apart. Samples come
- * from smplr's CDN on first load and are cached by the browser thereafter.
+ * from smplr's CDN on first load and out of the persistent sample cache thereafter.
  */
 export class SoundfontInstrument implements Instrument {
   readonly name: string;
@@ -43,6 +44,7 @@ export class SoundfontInstrument implements Instrument {
     this.player = Soundfont(this.ctx, {
       instrument: this.instrumentId,
       destination: this.bus.input,
+      storage: sampleStorage(),
     });
 
     this.loadPromise = this.player.ready.then(() => {

@@ -1,6 +1,7 @@
 import { SplendidGrandPiano } from 'smplr';
 import type { Instrument, ScheduledNote } from '@/engine/instrument';
 import { createInstrumentBus, MASTER_GAIN, type InstrumentBus } from '@/engine/instrumentBus';
+import { sampleStorage } from '@/engine/sampleCache';
 
 /**
  * A sampled acoustic grand, via smplr's SplendidGrandPiano.
@@ -9,8 +10,8 @@ import { createInstrumentBus, MASTER_GAIN, type InstrumentBus } from '@/engine/i
  * through GM program 0 like every other sound — because this is a markedly better
  * piano, and the piano is the instrument every project starts with.
  *
- * Samples are fetched from smplr's CDN on first load, so the very first Play in a
- * session waits on the network; the browser caches them afterwards.
+ * Samples are fetched from smplr's CDN on first load, so the very first Play waits
+ * on the network; they go into the persistent sample cache, so later sessions do not.
  */
 
 export { MASTER_GAIN };
@@ -52,6 +53,7 @@ export class SmplrPianoInstrument implements Instrument {
 
     this.piano = SplendidGrandPiano(this.ctx, {
       destination: this.bus.input,
+      storage: sampleStorage(),
     });
 
     this.loadPromise = this.piano.ready.then(() => {

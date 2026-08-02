@@ -1,4 +1,5 @@
 import type { NoteName, ScaleType, Scale } from '@/types/music';
+import { MAX_SEGMENT_OCTAVE } from '@/utils/constants';
 
 /**
  * Interval patterns (in semitones) for each scale type relative to the root.
@@ -80,6 +81,58 @@ export function getScalePitches(root: NoteName, type: ScaleType): number[] {
   const rootSemitone = resolveRootSemitone(root);
   const intervals = getScaleIntervals(type);
   return intervals.map(interval => (rootSemitone + interval) % 12);
+}
+
+/**
+ * How far a pitch class sits above the tonic, in semitones (0-11).
+ *
+ * A scale is voiced as an ascending run from its root, so a degree whose pitch class
+ * wrapped below the tonic — C# in D major — comes back as 11, not -1.
+ *
+ * @param scale - The scale whose root the offset is measured from.
+ * @param pitchClass - The pitch class to measure (0=C, 1=C#, ..., 11=B).
+ */
+export function degreeOffsetFromTonic(scale: Scale, pitchClass: number): number {
+  const tonic = resolveRootSemitone(scale.root);
+  return (((pitchClass - tonic) % 12) + 12) % 12;
+}
+
+/**
+ * Whether a scale degree crosses the octave line, as 0 or 1.
+ *
+ * The register moves exactly when the ascending run passes C, which is what makes
+ * A minor's third degree a C *above* its A rather than the C below it. This is the
+ * same rule `registerShift` applies when the arrow keys walk a chord along the
+ * scale, so stepping and dropping land in the same place.
+ */
+export function degreeRegisterShift(scale: Scale, pitchClass: number): 0 | 1 {
+  const tonic = resolveRootSemitone(scale.root);
+  return tonic + degreeOffsetFromTonic(scale, pitchClass) >= 12 ? 1 : 0;
+}
+
+/**
+ * The register a scale degree belongs in when the scale is voiced as an ascending
+ * run starting at `baseOctave`.
+ *
+ * The chosen octave is the *root note's* — the rest of the scale rises from it, so a
+ * degree whose pitch class wrapped below the tonic belongs in the next octave. Without
+ * this the run dips backwards at the wrap point: D major at octave 4 would put its
+ * vii° on C#4, a semitone under its own tonic.
+ *
+ * Capped at `MAX_SEGMENT_OCTAVE`, the highest register a chord segment may hold: at the
+ * very top of the range the wrap cannot be honoured without pushing the chord off the
+ * piano roll.
+ *
+ * @param scale - The scale the degree belongs to.
+ * @param pitchClass - Pitch class of the degree (0=C, 1=C#, ..., 11=B).
+ * @param baseOctave - Register of the scale's root note.
+ */
+export function octaveForDegree(
+  scale: Scale,
+  pitchClass: number,
+  baseOctave: number
+): number {
+  return Math.min(baseOctave + degreeRegisterShift(scale, pitchClass), MAX_SEGMENT_OCTAVE);
 }
 
 /**

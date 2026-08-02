@@ -5,7 +5,11 @@ import {
   isNoteInScale,
   getNotesInOctave,
   getScaleName,
+  degreeOffsetFromTonic,
+  degreeRegisterShift,
+  octaveForDegree,
 } from '@/engine/scales';
+import { MAX_SEGMENT_OCTAVE } from '@/utils/constants';
 import { NoteName, ScaleType, Scale } from '@/types/music';
 
 describe('scales', () => {
@@ -115,6 +119,63 @@ describe('scales', () => {
       const notes = getNotesInOctave({ root: 'C', type: 'major' }, 3, 3);
       // Only octave 3: C3=48 through B3=59
       expect(notes).toEqual([48, 50, 52, 53, 55, 57, 59]);
+    });
+  });
+
+  describe('degreeOffsetFromTonic', () => {
+    const D_MAJOR: Scale = { root: 'D', type: 'major' };
+
+    it("measures a degree upward from the tonic", () => {
+      // D major: D E F# G A B C#
+      const offsets = getScalePitches('D', 'major').map(p => degreeOffsetFromTonic(D_MAJOR, p));
+      expect(offsets).toEqual([0, 2, 4, 5, 7, 9, 11]);
+    });
+
+    it("reads a wrapped pitch class as high, not negative", () => {
+      // C# is a semitone below D on the chromatic circle, but the seventh degree
+      // of the scale — eleven semitones above the tonic.
+      expect(degreeOffsetFromTonic(D_MAJOR, 1)).toBe(11);
+    });
+  });
+
+  describe('degreeRegisterShift', () => {
+    it("keeps every degree of C major in one register", () => {
+      const scale: Scale = { root: 'C', type: 'major' };
+      const shifts = getScalePitches('C', 'major').map(p => degreeRegisterShift(scale, p));
+      expect(shifts).toEqual([0, 0, 0, 0, 0, 0, 0]);
+    });
+
+    it("lifts only the degrees that cross C", () => {
+      const scale: Scale = { root: 'A', type: 'naturalMinor' };
+      // A B | C D E F G — the run crosses the octave line at the third degree.
+      const shifts = getScalePitches('A', 'naturalMinor').map(p => degreeRegisterShift(scale, p));
+      expect(shifts).toEqual([0, 0, 1, 1, 1, 1, 1]);
+    });
+  });
+
+  describe('octaveForDegree', () => {
+    const D_MAJOR: Scale = { root: 'D', type: 'major' };
+
+    it("voices D major at octave 4 as D4 ... B4 C#5", () => {
+      const octaves = getScalePitches('D', 'major').map(p => octaveForDegree(D_MAJOR, p, 4));
+      expect(octaves).toEqual([4, 4, 4, 4, 4, 4, 5]);
+    });
+
+    it("leaves a C-rooted scale entirely in the chosen octave", () => {
+      const scale: Scale = { root: 'C', type: 'major' };
+      const octaves = getScalePitches('C', 'major').map(p => octaveForDegree(scale, p, 3));
+      expect(octaves).toEqual([3, 3, 3, 3, 3, 3, 3]);
+    });
+
+    it("carries A minor's upper degrees into the next octave", () => {
+      const scale: Scale = { root: 'A', type: 'naturalMinor' };
+      const octaves = getScalePitches('A', 'naturalMinor').map(p => octaveForDegree(scale, p, 4));
+      expect(octaves).toEqual([4, 4, 5, 5, 5, 5, 5]);
+    });
+
+    it("clamps at the top register rather than leaving the roll", () => {
+      // C# would want octave 8; the highest a segment may hold is 7.
+      expect(octaveForDegree(D_MAJOR, 1, MAX_SEGMENT_OCTAVE)).toBe(MAX_SEGMENT_OCTAVE);
     });
   });
 

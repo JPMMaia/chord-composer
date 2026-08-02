@@ -70,6 +70,11 @@ export const PIANO_ROLL_KEY_COUNT = PIANO_ROLL_MAX_MIDI - PIANO_ROLL_MIN_MIDI + 
  * lowest root at MIDI 24, and octave 7 leaves a seventh chord's top note at MIDI
  * 107. Both the palette dropdown and the octave shortcut read these, so a chord
  * cannot be pushed somewhere the roll could not show it.
+ *
+ * The register a segment ends up in is the *root note's* octave plus one for a degree
+ * whose ascending run wraps past B, so a wrapped degree chosen at octave 7 would want
+ * 8 — beyond the roll. `octaveForDegree` clamps it back to 7, the one case where a
+ * degree still voices below its tonic.
  */
 export const MIN_SEGMENT_OCTAVE = 1;
 export const MAX_SEGMENT_OCTAVE = 7;

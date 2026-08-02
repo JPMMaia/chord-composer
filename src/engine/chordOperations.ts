@@ -7,7 +7,11 @@ import {
   invertIntervals,
   SEMITONE_TO_NOTE,
 } from '@/engine/chords';
-import { getScalePitches } from '@/engine/scales';
+import {
+  degreeRegisterShift,
+  getScalePitches,
+  octaveForDegree,
+} from '@/engine/scales';
 import { getBarBeats, MIN_SEGMENT_BEATS, withStartBeats } from '@/engine/timeline';
 import { formatChordSymbol } from '@/engine/palette';
 import {
@@ -25,12 +29,16 @@ import {
  *
  * @param bar - The bar to split.
  * @param chordCount - Number of chord segments to create.
+ * @param projectTs - Project time signature, used when the bar has none.
+ * @param baseOctave - Register of the scale's root note; degrees above it rise from
+ *   there, exactly as the palette voices them.
  * @returns Array of ChordSegment objects.
  */
 export function splitBarIntoChords(
   bar: Bar,
   chordCount: number,
-  projectTs: TimeSignature = DEFAULT_TIME_SIGNATURE
+  projectTs: TimeSignature = DEFAULT_TIME_SIGNATURE,
+  baseOctave: number = 4
 ): ChordSegment[] {
   if (chordCount < 1) {
     throw new Error('chordCount must be at least 1');
@@ -60,6 +68,7 @@ export function splitBarIntoChords(
       duration: beatsPerChord,
       root: chordInfo.root,
       quality: chordInfo.quality,
+      octave: octaveForDegree(bar.scale, NOTE_NAMES.indexOf(chordInfo.root), baseOctave),
     });
   }
 
@@ -256,8 +265,31 @@ export function retuneSegmentsToScale(
       quality: chord.quality,
       romanNumeral: chord.romanNumeral,
       chordSymbol: formatChordSymbol(chord.root, chord.quality),
+      octave: retunedOctave(segment, fromScale, toScale, chord.root),
     };
   });
+}
+
+/**
+ * The register a retuned chord belongs in once its root has moved to a new key.
+ *
+ * A segment's octave is the register of the *tonic* plus whatever the ascending run
+ * added, so a change of key has to strip the old scale's wrap before applying the
+ * new one. Otherwise C major's vii° (B4) would arrive in D major still at register
+ * 4 — C#4, a semitone under the D4 tonic — which is the jump this whole rule exists
+ * to prevent.
+ */
+function retunedOctave(
+  segment: ChordSegment,
+  fromScale: Scale,
+  toScale: Scale,
+  newRoot: NoteName
+): number {
+  const oldRoot = segment.root;
+  const wasWrapped = oldRoot ? degreeRegisterShift(fromScale, NOTE_NAMES.indexOf(oldRoot)) : 0;
+  const base = (segment.octave ?? 4) - wasWrapped;
+  const octave = octaveForDegree(toScale, NOTE_NAMES.indexOf(newRoot), base);
+  return Math.min(Math.max(octave, MIN_SEGMENT_OCTAVE), MAX_SEGMENT_OCTAVE);
 }
 
 /** Move a single-note segment onto the same scale degree of the new scale. */

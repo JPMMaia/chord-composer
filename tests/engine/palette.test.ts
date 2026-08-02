@@ -107,6 +107,33 @@ describe("palette", () => {
       ]);
     });
 
+    it("keeps every degree of C major in the chosen octave", () => {
+      expect(getPaletteItems(C_MAJOR, "chords", 4).map((i) => i.octave)).toEqual([
+        4, 4, 4, 4, 4, 4, 4,
+      ]);
+    });
+
+    it("voices the chosen octave from the root note, not the whole scale", () => {
+      // D major at octave 4: the vii° is a C#, which sits *above* the D tonic and
+      // so belongs in octave 5 — voicing it at 4 would leap a semitone downward.
+      const dMajor = getPaletteItems({ root: "D", type: "major" }, "chords", 4);
+      expect(dMajor.map((i) => i.label)).toEqual([
+        "D", "Em", "F#m", "G", "A", "Bm", "C#°",
+      ]);
+      expect(dMajor.map((i) => i.octave)).toEqual([4, 4, 4, 4, 4, 4, 5]);
+    });
+
+    it("carries A minor's upper degrees into the next octave", () => {
+      expect(getPaletteItems(A_MINOR, "chords", 4).map((i) => i.octave)).toEqual([
+        4, 4, 5, 5, 5, 5, 5,
+      ]);
+    });
+
+    it("clamps a wrapped degree to the highest register a segment may hold", () => {
+      const dMajor = getPaletteItems({ root: "D", type: "major" }, "chords", 7);
+      expect(dMajor.map((i) => i.octave)).toEqual([7, 7, 7, 7, 7, 7, 7]);
+    });
+
     it("marks every item as a chord with a root and quality", () => {
       items.forEach((item) => {
         expect(item.kind).toBe("chord");
@@ -135,6 +162,12 @@ describe("palette", () => {
       expect(getPaletteItems(A_MINOR, "sevenths").map((i) => i.label)).toEqual([
         "Am7", "Bø7", "Cmaj7", "Dm7", "Em7", "Fmaj7", "G7",
       ]);
+    });
+
+    it("voices sevenths from the root note too", () => {
+      const dMajor = getPaletteItems({ root: "D", type: "major" }, "sevenths", 4);
+      expect(dMajor[6].label).toBe("C#ø7");
+      expect(dMajor.map((i) => i.octave)).toEqual([4, 4, 4, 4, 4, 4, 5]);
     });
   });
 

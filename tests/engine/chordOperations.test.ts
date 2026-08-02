@@ -84,6 +84,17 @@ describe("chordOperations", () => {
       expect(totalDuration).toBe(4);
     });
 
+    it("voices each degree from the scale's root note", () => {
+      const bar: Bar = { ...makeBar(0, 4), scale: { root: "D", type: "major" } };
+      const result = splitBarIntoChords(bar, 7);
+      // The seventh degree of D major is a C#, above the D tonic, so it belongs in
+      // octave 5 rather than dropping a semitone below its own key.
+      expect(result.map((c) => c.root)).toEqual([
+        "D", "E", "F#", "G", "A", "B", "C#",
+      ]);
+      expect(result.map((c) => c.octave)).toEqual([4, 4, 4, 4, 4, 4, 5]);
+    });
+
     it("throws if chordCount is less than 1", () => {
       const bar = makeBar(0, 4);
       expect(() => splitBarIntoChords(bar, 0)).toThrow();
@@ -496,6 +507,38 @@ describe("chordOperations", () => {
       const segments = [diatonic(), diatonic({ romanNumeral: "V", root: "G", chordSymbol: "G" })];
       const result = retuneSegmentsToScale(segments, C_MAJOR, C_MAJOR);
       expect(result.map(s => s.chordSymbol)).toEqual(["C", "G"]);
+    });
+
+    it("re-voices a degree that changes register in the new key", () => {
+      // vii° of C major is B4; of D major it is a C#, which sits above the D tonic
+      // and so has to rise to octave 5 rather than dropping below its own key.
+      const vii = diatonic({
+        romanNumeral: "vii°",
+        root: "B",
+        quality: "diminished",
+        chordSymbol: "B°",
+        octave: 4,
+      });
+      const [segment] = retuneSegmentsToScale([vii], C_MAJOR, D_MAJOR);
+      expect(segment).toMatchObject({ root: "C#", octave: 5 });
+    });
+
+    it("leaves the tonic's register alone across a key change", () => {
+      const [segment] = retuneSegmentsToScale([diatonic({ octave: 4 })], C_MAJOR, D_MAJOR);
+      expect(segment).toMatchObject({ root: "D", octave: 4 });
+    });
+
+    it("strips the old key's wrap instead of stacking a second one", () => {
+      // C is degree 3 of A minor and already wrapped up to octave 5; as the tonic
+      // of C major it belongs back at 4, not at 6.
+      const third = diatonic({
+        romanNumeral: "III",
+        root: "C",
+        chordSymbol: "C",
+        octave: 5,
+      });
+      const [segment] = retuneSegmentsToScale([third], A_MINOR, C_MAJOR);
+      expect(segment).toMatchObject({ root: "E", octave: 4 });
     });
 
     it("preserves segment ids and durations", () => {

@@ -12,7 +12,11 @@ import {
   midiToOctave,
   SEMITONE_TO_NOTE,
 } from '@/engine/chords';
-import { getScalePitches } from '@/engine/scales';
+import {
+  degreeOffsetFromTonic,
+  getScalePitches,
+  octaveForDegree,
+} from '@/engine/scales';
 import { generateId } from '@/utils/id';
 
 /** Which family of blocks the palette is offering. */
@@ -31,9 +35,10 @@ export interface PaletteItem {
   /** MIDI pitch — notes mode only. */
   pitch?: number;
   /**
-   * Register the block was built in. For a note this is the octave its `pitch`
-   * actually landed in, which can be one above the requested octave when the
-   * ascending run wraps past B.
+   * Register the block was built in. The requested octave belongs to the scale's
+   * root note, so any degree whose ascending run wraps past B comes back one
+   * octave higher — for a note that is the octave its `pitch` landed in, for a
+   * chord the register its root is voiced in.
    */
   octave: number;
   quality?: ChordQuality;
@@ -95,7 +100,9 @@ function seventhNumeral(triadNumeral: string, quality: ChordQuality): string {
  *
  * @param scale - The scale to derive material from.
  * @param mode - Which family of blocks to produce.
- * @param octave - Octave for note pitches (notes mode only). Defaults to 4.
+ * @param octave - Register of the scale's *root note*, in every mode. Degrees above
+ *   it rise from there, crossing into the next octave when the run wraps past B, so
+ *   no block ever sounds below the tonic. Defaults to 4.
  */
 export function getPaletteItems(
   scale: Scale,
@@ -111,8 +118,9 @@ export function getPaletteItems(
     return pitches.map((pitch, index) => {
       // Keep the run ascending: a degree whose pitch class wrapped below the
       // tonic belongs in the next octave, so C D E ... B never dips backwards.
-      const offset = ((pitch - rootPitch) % 12 + 12) % 12;
-      const midi = baseMidi + rootPitch + offset;
+      // A single pitch is bounded by the roll rather than by the segment
+      // registers, so this deliberately does not go through `octaveForDegree`.
+      const midi = baseMidi + rootPitch + degreeOffsetFromTonic(scale, pitch);
       return {
         id: `note-${index}`,
         kind: 'note' as const,
@@ -132,6 +140,9 @@ export function getPaletteItems(
 
   const isSevenths = mode === 'sevenths';
   const chords = isSevenths ? getDiatonicSevenths(scale) : getDiatonicChords(scale);
+  // The diatonic stack is built by mapping over these, so degree `index` is the
+  // same degree in both lists.
+  const pitches = getScalePitches(scale.root, scale.type);
 
   return chords.map((chord, index) => ({
     id: `${isSevenths ? 'seventh' : 'chord'}-${index}`,
@@ -143,8 +154,9 @@ export function getPaletteItems(
     root: chord.root,
     quality: chord.quality,
     // A chord symbol stays a bare symbol — the octave is shown beside it rather
-    // than spliced into the name, which would break `chordFromSymbol`.
-    octave,
+    // than spliced into the name, which would break `chordFromSymbol`. The
+    // argument is the tonic's register; a wrapped degree voices one above it.
+    octave: octaveForDegree(scale, pitches[index], octave),
     romanNumeral: chord.romanNumeral,
   }));
 }

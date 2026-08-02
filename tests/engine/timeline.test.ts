@@ -14,8 +14,11 @@ import {
   SNAP_OPTIONS,
   DEFAULT_SNAP_BEATS,
   MIN_SEGMENT_BEATS,
+  barChords,
+  barNotes,
 } from "@/engine/timeline";
 import { Bar, ChordSegment, TimeSignature } from "@/types/music";
+import { OTHER_TRACK_ID, soloContent, TEST_TRACK_ID } from "../helpers/tracks";
 
 const TS_4_4: TimeSignature = { beatsPerMeasure: 4, beatUnit: 4 };
 const TS_3_4: TimeSignature = { beatsPerMeasure: 3, beatUnit: 4 };
@@ -29,8 +32,7 @@ const makeBar = (
   barIndex,
   timeSignature,
   scale: { root: "C", type: "major" },
-  chords,
-  notes: [],
+  content: soloContent(chords),
 });
 
 /** A chord segment with a caller-supplied id so assertions can track it. */
@@ -102,11 +104,11 @@ describe("timeline", () => {
   describe("flattenSegments", () => {
     it("concatenates every bar's segments in bar order", () => {
       const bars = [makeBar(0, [seg("a"), seg("b")]), makeBar(1, [seg("c")])];
-      expect(flattenSegments(bars).map((s) => s.id)).toEqual(["a", "b", "c"]);
+      expect(flattenSegments(bars, TEST_TRACK_ID).map((s) => s.id)).toEqual(["a", "b", "c"]);
     });
 
     it("returns an empty list when no bar has segments", () => {
-      expect(flattenSegments([makeBar(0), makeBar(1)])).toEqual([]);
+      expect(flattenSegments([makeBar(0), makeBar(1)], TEST_TRACK_ID)).toEqual([]);
     });
   });
 
@@ -286,19 +288,19 @@ describe("timeline", () => {
     it("leaves a legal project untouched", () => {
       const bars = [makeBar(0, [seg("a", 1, 0), seg("b", 1, 2)])];
       const result = refitBars(bars, TS_4_4);
-      expect(layout(result[0].chords)).toEqual(["a@0+1", "b@2+1"]);
+      expect(layout(barChords(result[0], TEST_TRACK_ID))).toEqual(["a@0+1", "b@2+1"]);
     });
 
     it("preserves the silence between blocks", () => {
       const bars = [makeBar(0, [seg("a", 1, 3)])];
-      expect(layout(refitBars(bars, TS_4_4)[0].chords)).toEqual(["a@3+1"]);
+      expect(layout(barChords(refitBars(bars, TS_4_4)[0], TEST_TRACK_ID))).toEqual(["a@3+1"]);
     });
 
     it("pushes a block that no longer fits into the next bar at beat 0", () => {
       const bars = [makeBar(0, [seg("a", 2, 0), seg("b", 2, 2), seg("c", 2, 3)])];
       const result = refitBars(bars, TS_4_4);
-      expect(layout(result[0].chords)).toEqual(["a@0+2", "b@2+2"]);
-      expect(layout(result[1].chords)).toEqual(["c@0+2"]);
+      expect(layout(barChords(result[0], TEST_TRACK_ID))).toEqual(["a@0+2", "b@2+2"]);
+      expect(layout(barChords(result[1], TEST_TRACK_ID))).toEqual(["c@0+2"]);
     });
 
     it("appends a bar when the overflow has nowhere to go", () => {
@@ -306,7 +308,7 @@ describe("timeline", () => {
       const result = refitBars(bars, TS_4_4);
       expect(result).toHaveLength(2);
       expect(result[1].barIndex).toBe(1);
-      expect(result[1].chords.map((s) => s.id)).toEqual(["b"]);
+      expect(barChords(result[1], TEST_TRACK_ID).map((s) => s.id)).toEqual(["b"]);
     });
 
     it("squeezes a bar narrowed by a time-signature change", () => {
@@ -316,8 +318,8 @@ describe("timeline", () => {
         makeBar(1),
       ];
       const result = refitBars(bars, TS_4_4);
-      expect(result[0].chords.map((s) => s.id)).toEqual(["a", "b", "c"]);
-      expect(layout(result[1].chords)).toEqual(["d@0+1"]);
+      expect(barChords(result[0], TEST_TRACK_ID).map((s) => s.id)).toEqual(["a", "b", "c"]);
+      expect(layout(barChords(result[1], TEST_TRACK_ID))).toEqual(["d@0+1"]);
     });
 
     it("carries overflow in front of the next bar's own blocks", () => {
@@ -326,34 +328,34 @@ describe("timeline", () => {
         makeBar(1, [seg("b", 1, 0)]),
       ];
       const result = refitBars(bars, TS_4_4);
-      expect(layout(result[1].chords)).toEqual(["spill@0+2", "b@2+1"]);
+      expect(layout(barChords(result[1], TEST_TRACK_ID))).toEqual(["spill@0+2", "b@2+1"]);
     });
 
     it("removes an overlap by shifting the later block right", () => {
       const bars = [makeBar(0, [seg("a", 2, 0), seg("b", 1, 1)])];
-      expect(layout(refitBars(bars, TS_4_4)[0].chords)).toEqual(["a@0+2", "b@2+1"]);
+      expect(layout(barChords(refitBars(bars, TS_4_4)[0], TEST_TRACK_ID))).toEqual(["a@0+2", "b@2+1"]);
     });
 
     it("keeps a block longer than its bar rather than looping forever", () => {
       const bars = [makeBar(0, [seg("huge", 6, 0)], TS_3_4)];
       const result = refitBars(bars, TS_4_4);
-      expect(flattenSegments(result).map((s) => s.id)).toEqual(["huge"]);
+      expect(flattenSegments(result, TEST_TRACK_ID).map((s) => s.id)).toEqual(["huge"]);
     });
 
     it("never drops a segment", () => {
       const chords = Array.from({ length: 11 }, (_, i) => seg(`s${i}`, 1, 0));
       const result = refitBars([makeBar(0, chords)], TS_4_4);
-      expect(flattenSegments(result)).toHaveLength(11);
+      expect(flattenSegments(result, TEST_TRACK_ID)).toHaveLength(11);
     });
 
     it("preserves each bar's notes, scale, id and meter", () => {
       const bars = [makeBar(0, [seg("a", 1, 0)], TS_3_4)];
-      bars[0].notes = [
+      bars[0].content[TEST_TRACK_ID].notes = [
         { id: "n1", pitch: 60, startBeat: 0, duration: 1, velocity: 100 },
       ];
       bars[0].scale = { root: "D", type: "dorian" };
       const result = refitBars(bars, TS_4_4);
-      expect(result[0].notes).toHaveLength(1);
+      expect(barNotes(result[0], TEST_TRACK_ID)).toHaveLength(1);
       expect(result[0].scale).toEqual({ root: "D", type: "dorian" });
       expect(result[0].id).toBe("bar-0");
       expect(result[0].timeSignature).toEqual(TS_3_4);
@@ -361,11 +363,62 @@ describe("timeline", () => {
 
     it("fills in positions for segments that carry none", () => {
       const bars = [makeBar(0, [seg("a"), seg("b")])];
-      expect(layout(refitBars(bars, TS_4_4)[0].chords)).toEqual(["a@0+1", "b@1+1"]);
+      expect(layout(barChords(refitBars(bars, TS_4_4)[0], TEST_TRACK_ID))).toEqual(["a@0+1", "b@1+1"]);
     });
 
     it("returns no bars for no bars", () => {
       expect(refitBars([], TS_4_4)).toEqual([]);
+    });
+
+    // Instruments share bars but not lanes: the whole point of refitting each
+    // track's list on its own is that one instrument's ripple cannot move
+    // another's blocks, even when they sit on exactly the same beats.
+    describe("per-instrument isolation", () => {
+      const twoTrackBar = (): Bar => ({
+        id: "bar-0",
+        barIndex: 0,
+        scale: { root: "C", type: "major" },
+        content: {
+          [TEST_TRACK_ID]: { chords: [seg("a", 2, 0), seg("b", 2, 2)], notes: [] },
+          [OTHER_TRACK_ID]: { chords: [seg("x", 2, 0), seg("y", 2, 2)], notes: [] },
+        },
+      });
+
+      it("leaves another instrument's blocks where they are", () => {
+        const bars = [twoTrackBar()];
+        // `a` grows over `b`, so `b` is pushed past the bar line and spills.
+        bars[0].content[TEST_TRACK_ID].chords = [seg("a", 3, 0), seg("b", 2, 1)];
+
+        const result = refitBars(bars, TS_4_4, [TEST_TRACK_ID, OTHER_TRACK_ID]);
+
+        expect(layout(barChords(result[0], TEST_TRACK_ID))).toEqual(["a@0+3"]);
+        expect(layout(barChords(result[1], TEST_TRACK_ID))).toEqual(["b@0+2"]);
+        // The other instrument is untouched by all of that.
+        expect(layout(barChords(result[0], OTHER_TRACK_ID))).toEqual(["x@0+2", "y@2+2"]);
+      });
+
+      it("lets each instrument fill the same bar independently", () => {
+        const result = refitBars([twoTrackBar()], TS_4_4, [TEST_TRACK_ID, OTHER_TRACK_ID]);
+
+        // Both instruments use the full bar; neither pushes the other along.
+        expect(layout(barChords(result[0], TEST_TRACK_ID))).toEqual(["a@0+2", "b@2+2"]);
+        expect(layout(barChords(result[0], OTHER_TRACK_ID))).toEqual(["x@0+2", "y@2+2"]);
+      });
+
+      it("appends only as many bars as the longest instrument needs", () => {
+        const bars = [twoTrackBar()];
+        // Five one-beat blocks overrun a 4/4 bar by one, on one instrument only.
+        bars[0].content[TEST_TRACK_ID].chords = Array.from({ length: 5 }, (_, i) =>
+          seg(`s${i}`, 1, i)
+        );
+
+        const result = refitBars(bars, TS_4_4, [TEST_TRACK_ID, OTHER_TRACK_ID]);
+
+        expect(result).toHaveLength(2);
+        expect(barChords(result[1], TEST_TRACK_ID).map(s => s.id)).toEqual(["s4"]);
+        // The other instrument gains no content in the bar it did not overflow into.
+        expect(barChords(result[1], OTHER_TRACK_ID)).toEqual([]);
+      });
     });
   });
 

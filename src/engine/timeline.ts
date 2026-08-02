@@ -1,5 +1,74 @@
-import type { Bar, ChordSegment, TimeSignature } from '@/types/music';
+import type { Bar, ChordSegment, Note, TimeSignature, TrackContent } from '@/types/music';
 import { generateId } from '@/utils/id';
+
+// ---------------------------------------------------------------------------
+// Per-instrument content accessors
+// ---------------------------------------------------------------------------
+
+/** Shared empty content, so a miss allocates nothing and never leaks a writable array. */
+const EMPTY_CONTENT: TrackContent = Object.freeze({
+  chords: Object.freeze([]) as unknown as ChordSegment[],
+  notes: Object.freeze([]) as unknown as Note[],
+});
+
+/**
+ * One instrument's material in a bar, or empty content when it has none.
+ *
+ * Every read of a bar's segments or notes goes through here or its wrappers, so
+ * "an instrument with no key in this bar is silent" is stated once rather than
+ * at each of the ~50 call sites that used to read `bar.chords` directly.
+ */
+export function barContent(bar: Bar, trackId: string): TrackContent {
+  return bar.content[trackId] ?? EMPTY_CONTENT;
+}
+
+export function barChords(bar: Bar, trackId: string): ChordSegment[] {
+  return barContent(bar, trackId).chords;
+}
+
+export function barNotes(bar: Bar, trackId: string): Note[] {
+  return barContent(bar, trackId).notes;
+}
+
+/** Every note in a bar, tagged with the instrument it belongs to. */
+export function allBarNotes(bar: Bar): Array<{ note: Note; trackId: string }> {
+  return Object.entries(bar.content).flatMap(([trackId, content]) =>
+    content.notes.map(note => ({ note, trackId }))
+  );
+}
+
+/** Every instrument id that has content anywhere in the project. */
+export function trackIdsInBars(bars: Bar[]): string[] {
+  const ids = new Set<string>();
+  for (const bar of bars) {
+    for (const id of Object.keys(bar.content)) ids.add(id);
+  }
+  return [...ids];
+}
+
+/** Replace one instrument's content in a bar, leaving the others alone. */
+export function withBarContent(bar: Bar, trackId: string, content: TrackContent): Bar {
+  return { ...bar, content: { ...bar.content, [trackId]: content } };
+}
+
+/** Rewrite one instrument's segments in a bar, keeping its notes for the store to regenerate. */
+export function mapBarChords(
+  bar: Bar,
+  trackId: string,
+  fn: (chords: ChordSegment[]) => ChordSegment[]
+): Bar {
+  const content = barContent(bar, trackId);
+  return withBarContent(bar, trackId, { ...content, chords: fn(content.chords) });
+}
+
+/** Drop an instrument's content from every bar — what removing a track leaves behind. */
+export function withoutTrackContent(bars: Bar[], trackId: string): Bar[] {
+  return bars.map(bar => {
+    if (!(trackId in bar.content)) return bar;
+    const { [trackId]: _removed, ...rest } = bar.content;
+    return { ...bar, content: rest };
+  });
+}
 
 /**
  * Smallest editable segment length, in beats. Matches the piano roll's grid size
@@ -133,17 +202,63 @@ export function placeSegmentInBar(
  * cascading, appending bars as needed. Every mutation ends here, which is what keeps
  * one rule in one place.
  */
-export function refitBars(bars: Bar[], projectTs: TimeSignature): Bar[] {
+export function refitBars(bars: Bar[], projectTs: TimeSignature, trackIds?: string[]): Bar[] {
   if (bars.length === 0) return [];
 
+  const ids = trackIds ?? trackIdsInBars(bars);
+  // An appended bar inherits the last real bar's meter, exactly as `createBar` does.
+  const capacityAt = (index: number) =>
+    getBarBeats(bars[Math.min(index, bars.length - 1)], projectTs);
+
+  // Each instrument is refitted on its own, so one instrument's ripple can never
+  // push another's blocks. Overflow may append bars, and different instruments may
+  // need different numbers of them, so the project ends up as long as the longest.
+  let barCount = bars.length;
+  const perTrack = new Map<string, ChordSegment[][]>();
+  for (const id of ids) {
+    const refitted = refitTrackChords(
+      bars.map(bar => barChords(bar, id)),
+      capacityAt
+    );
+    perTrack.set(id, refitted);
+    barCount = Math.max(barCount, refitted.length);
+  }
+
   const result: Bar[] = [];
+  for (let i = 0; i < barCount; i++) {
+    const source = bars[i] ?? createBar(i, result);
+    const content: Record<string, TrackContent> = {};
+
+    for (const id of ids) {
+      const chords = perTrack.get(id)![i] ?? [];
+      // Bars stay sparse: an instrument only gets a key here if it has something
+      // in this bar, or already had one to preserve.
+      if (chords.length === 0 && !(id in source.content)) continue;
+      content[id] = { chords, notes: barContent(source, id).notes };
+    }
+
+    result.push({ ...source, barIndex: i, content });
+  }
+
+  return result;
+}
+
+/**
+ * Refit one instrument's segments across the project: the bar invariant applied to
+ * a single track's lists. Returns one list per bar, possibly longer than the input
+ * when blocks spilled off the end.
+ */
+function refitTrackChords(
+  chordsPerBar: ChordSegment[][],
+  capacityAt: (index: number) => number
+): ChordSegment[][] {
+  const result: ChordSegment[][] = [];
   let carried: ChordSegment[] = [];
 
-  for (let i = 0; bars[i] || carried.length > 0; i++) {
-    const source = bars[i] ?? createBar(result.length, result);
-    const capacity = getBarBeats(source, projectTs);
+  for (let i = 0; i < chordsPerBar.length || carried.length > 0; i++) {
+    const capacity = capacityAt(i);
     // Carried blocks were pushed out of the previous bar, so they come first.
-    const incoming = [...carried, ...byStart(withStartBeats(source.chords))];
+    const incoming = [...carried, ...byStart(withStartBeats(chordsPerBar[i] ?? []))];
 
     const chords: ChordSegment[] = [];
     carried = [];
@@ -172,7 +287,7 @@ export function refitBars(bars: Bar[], projectTs: TimeSignature): Bar[] {
 
     // Spilled blocks restart at the top of the next bar.
     carried = carried.map(s => ({ ...s, startBeat: undefined }));
-    result.push({ ...source, barIndex: result.length, chords });
+    result.push(chords);
   }
 
   return result;
@@ -253,9 +368,15 @@ export function getBarIndexAtBeat(
   return Math.max(0, bars.length - 1);
 }
 
-/** Concatenate every bar's segments into one ordered list. */
-export function flattenSegments(bars: Bar[]): ChordSegment[] {
-  return bars.flatMap(bar => bar.chords);
+/**
+ * Concatenate one instrument's segments across every bar into one ordered list.
+ *
+ * Scoped to an instrument because its callers — Shift-range ordering and stale
+ * selection pruning — both act on what the timeline is currently showing, which
+ * is only ever the selected instrument.
+ */
+export function flattenSegments(bars: Bar[], trackId: string): ChordSegment[] {
+  return bars.flatMap(bar => barChords(bar, trackId));
 }
 
 /**
@@ -269,8 +390,7 @@ function createBar(index: number, existing: Bar[]): Bar {
     barIndex: index,
     timeSignature: previous?.timeSignature,
     scale: previous ? { ...previous.scale } : { root: 'C', type: 'major' },
-    chords: [],
-    notes: [],
+    content: {},
   };
 }
 

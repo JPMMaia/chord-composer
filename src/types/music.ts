@@ -82,15 +82,39 @@ export interface Note {
   velocity: number;
 }
 
-// Track
+// Track — one instrument in the arrangement.
 export interface Track {
   id: string;
   name: string;
+  /**
+   * The sound this instrument makes: a General MIDI id from
+   * `@/engine/instrumentCatalog`, e.g. 'acoustic_grand_piano'. Empty on tracks
+   * read from files written before instruments could choose a sound.
+   */
   instrument: string;
   volume: number;
   pan: number;
+  /**
+   * Temporarily silenced. Its notes still draw in the piano roll — muting is
+   * about what you hear, `visible` is about what you see.
+   */
   muted: boolean;
   solo: boolean;
+  /** When false, this instrument's notes are hidden from the roll. Absent reads as visible. */
+  visible?: boolean;
+  /** Colour its notes draw in. Absent means "assigned by index from TRACK_COLORS". */
+  color?: string;
+}
+
+/**
+ * One instrument's material within a bar.
+ *
+ * `notes` is derived from `chords` — the store regenerates it after every
+ * mutation — so nothing outside `projectStore` should write it.
+ */
+export interface TrackContent {
+  chords: ChordSegment[];
+  notes: Note[];
 }
 
 // Bar (measure)
@@ -99,9 +123,14 @@ export interface Bar {
   barIndex: number;
   /** Per-bar meter. Falls back to the project time signature when absent. */
   timeSignature?: TimeSignature;
+  /** Scale and meter belong to the bar, so every instrument shares them. */
   scale: Scale;
-  chords: ChordSegment[];
-  notes: Note[];
+  /**
+   * Per-instrument content, keyed by `Track.id`. A track with no key here simply
+   * has nothing in this bar; the accessors in `@/engine/timeline` read that as
+   * silence rather than requiring every bar to carry a key per track.
+   */
+  content: Record<string, TrackContent>;
 }
 
 // Project

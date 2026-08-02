@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { projectToMusicXML } from '@/engine/musicxmlExporter';
 import { Project, Bar } from '@/types/music';
 import { generateId } from '@/utils/id';
+import { soloContent, TEST_TRACK_ID } from '../helpers/tracks';
 
 function createTestProject(overrides?: Partial<Project>): Project {
   const now = new Date('2024-01-01T00:00:00.000Z');
@@ -14,7 +15,9 @@ function createTestProject(overrides?: Partial<Project>): Project {
     keyMode: 'major',
     tracks: [
       {
-        id: generateId(),
+        // Matches the key `soloContent` writes, so the exporter's per-instrument
+        // lookup finds this fixture's music.
+        id: TEST_TRACK_ID,
         name: 'Piano',
         instrument: 'acoustic_grand_piano',
         volume: 0.8,
@@ -28,15 +31,14 @@ function createTestProject(overrides?: Partial<Project>): Project {
         id: generateId(),
         barIndex: 0,
         scale: { root: 'C', type: 'major' },
-        chords: [
+        content: soloContent([
           { id: generateId(), romanNumeral: 'I', chordSymbol: 'C', duration: 2, root: 'C', quality: 'major' },
           { id: generateId(), romanNumeral: 'V', chordSymbol: 'G', duration: 2, root: 'G', quality: 'major' },
-        ],
-        notes: [
+        ], [
           { id: generateId(), pitch: 60, startBeat: 0, duration: 1, velocity: 100 },
           { id: generateId(), pitch: 64, startBeat: 1, duration: 1, velocity: 90 },
           { id: generateId(), pitch: 67, startBeat: 2, duration: 2, velocity: 85 },
-        ],
+        ]),
       },
     ],
     createdAt: now,
@@ -117,21 +119,19 @@ describe('musicxmlExporter', () => {
             id: generateId(),
             barIndex: 0,
             scale: { root: 'C', type: 'major' },
-            chords: [{ id: generateId(), romanNumeral: 'I', chordSymbol: 'C', duration: 4, root: 'C', quality: 'major' }],
-            notes: [
+            content: soloContent([{ id: generateId(), romanNumeral: 'I', chordSymbol: 'C', duration: 4, root: 'C', quality: 'major' }], [
               { id: generateId(), pitch: 60, startBeat: 0, duration: 2, velocity: 100 },
               { id: generateId(), pitch: 64, startBeat: 2, duration: 2, velocity: 90 },
-            ],
+            ]),
           },
           {
             id: generateId(),
             barIndex: 1,
             scale: { root: 'C', type: 'major' },
-            chords: [{ id: generateId(), romanNumeral: 'V', chordSymbol: 'G', duration: 4, root: 'G', quality: 'major' }],
-            notes: [
+            content: soloContent([{ id: generateId(), romanNumeral: 'V', chordSymbol: 'G', duration: 4, root: 'G', quality: 'major' }], [
               { id: generateId(), pitch: 67, startBeat: 0, duration: 2, velocity: 100 },
               { id: generateId(), pitch: 71, startBeat: 2, duration: 2, velocity: 85 },
-            ],
+            ]),
           },
         ],
       });
@@ -148,8 +148,7 @@ describe('musicxmlExporter', () => {
           id: generateId(),
           barIndex: 0,
           scale: { root: 'C', type: 'major' },
-          chords: [{ id: generateId(), romanNumeral: 'I', chordSymbol: 'C', duration: 4, root: 'C', quality: 'major' }],
-          notes: [],
+          content: soloContent([{ id: generateId(), romanNumeral: 'I', chordSymbol: 'C', duration: 4, root: 'C', quality: 'major' }], []),
         }],
       });
       const xml = projectToMusicXML(project);
@@ -214,11 +213,10 @@ describe('musicxmlExporter', () => {
           id: generateId(),
           barIndex: 0,
           scale: { root: 'C', type: 'major' },
-          chords: [],
-          notes: [
+          content: soloContent([], [
             { id: generateId(), pitch: 60, startBeat: 0, duration: 1, velocity: 100 }, // C4
             { id: generateId(), pitch: 63, startBeat: 1, duration: 1, velocity: 90 },  // Db4
-          ],
+          ]),
         }],
       });
       const xml = projectToMusicXML(project);
@@ -237,8 +235,7 @@ describe('musicxmlExporter', () => {
       barIndex,
       timeSignature,
       scale: { root: 'C', type: 'major' },
-      chords: [],
-      notes: [],
+      content: soloContent([], []),
     });
 
     /** The `<beats>` values in document order, one per emitted `<time>`. */
@@ -292,10 +289,9 @@ describe('musicxmlExporter', () => {
             id: generateId(),
             barIndex: 0,
             scale: { root: 'C', type: 'major' },
-            chords: [],
-            notes: [
+            content: soloContent([], [
               { id: generateId(), pitch: 60, startBeat: 2, duration: 1, velocity: 100 },
-            ],
+            ]),
           },
         ],
       });
@@ -313,11 +309,10 @@ describe('musicxmlExporter', () => {
             id: generateId(),
             barIndex: 0,
             scale: { root: 'C', type: 'major' },
-            chords: [],
-            notes: [
+            content: soloContent([], [
               { id: generateId(), pitch: 60, startBeat: 0, duration: 1, velocity: 100 },
               { id: generateId(), pitch: 67, startBeat: 3, duration: 1, velocity: 100 },
-            ],
+            ]),
           },
         ],
       });

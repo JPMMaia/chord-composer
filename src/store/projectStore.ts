@@ -7,18 +7,22 @@ import type {
   Scale,
   ScaleType,
   TimeSignature,
+  Track,
 } from '@/types/music';
 import { generateId } from '@/utils/id';
 import {
+  barChords,
   clampToBar,
   getBarBeats,
   getTotalBeats,
   isValidTimeSignature,
+  mapBarChords,
   MIN_SEGMENT_BEATS,
   placeSegmentInBar,
   refitBars,
   removeSegmentById,
   resizeSegment,
+  withoutTrackContent,
   withStartBeats,
 } from '@/engine/timeline';
 import {
@@ -33,7 +37,9 @@ import {
   DEFAULT_TIME_SIGNATURE,
   DEFAULT_KEY,
   DEFAULT_KEY_MODE,
+  trackColorAt,
 } from '@/utils/constants';
+import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
 
 /** One block's destination in a batch move. */
 export interface SegmentMove {
@@ -53,11 +59,28 @@ interface ProjectState {
   removeBar: (barId: string) => void;
   updateBarScale: (barId: string, scale: { root: NoteName; type: ScaleType }) => void;
   setBarTimeSignature: (barId: string, ts: TimeSignature) => void;
-  insertSegment: (barId: string, startBeat: number, segment: ChordSegment) => void;
+  insertSegment: (
+    barId: string,
+    startBeat: number,
+    segment: ChordSegment,
+    trackId: string
+  ) => void;
   removeSegment: (segmentId: string) => void;
   moveSegment: (segmentId: string, targetBarId: string, startBeat: number) => void;
   moveSegments: (moves: SegmentMove[]) => void;
   resizeSegmentDuration: (segmentId: string, duration: number) => void;
+  // Instruments. Tracks live here rather than in a store of their own so they
+  // ride along with undo, autosave and project load like everything else.
+  /** Returns the new instrument's id, so the caller can select it. */
+  addTrack: (name?: string) => string | null;
+  removeTrack: (trackId: string) => void;
+  renameTrack: (trackId: string, name: string) => void;
+  setTrackInstrument: (trackId: string, instrument: string) => void;
+  setTrackVolume: (trackId: string, volume: number) => void;
+  setTrackPan: (trackId: string, pan: number) => void;
+  toggleTrackMute: (trackId: string) => void;
+  toggleTrackSolo: (trackId: string) => void;
+  toggleTrackVisible: (trackId: string) => void;
   stepSegmentPitch: (segmentId: string, direction: -1 | 1) => void;
   shiftSegmentOctave: (segmentId: string, direction: -1 | 1) => void;
   cycleSegmentInversion: (segmentId: string) => void;
@@ -73,16 +96,30 @@ interface ProjectState {
 const GENERATED_NOTE_OCTAVE = 4;
 
 /**
- * Regenerate every bar's notes from its segments.
+ * Regenerate every instrument's notes in every bar from its segments.
  *
- * `bar.notes` is derived state: this is what keeps the piano roll in step with the
- * chord panel. Running it over all bars rather than only the edited one is what makes
- * overflow correct — a segment pushed across a bar line changes two bars at once.
+ * A track's notes are derived state: this is what keeps the piano roll in step with
+ * the chord panel. Running it over all bars rather than only the edited one is what
+ * makes overflow correct — a segment pushed across a bar line changes two bars at
+ * once — and over all instruments because a refit can move any of them.
  */
 function withGeneratedNotes(bars: Bar[], projectTs: TimeSignature): Bar[] {
   return bars.map(bar => ({
     ...bar,
-    notes: generateNotesFromSegments(bar, projectTs, GENERATED_NOTE_OCTAVE),
+    content: Object.fromEntries(
+      Object.entries(bar.content).map(([trackId, content]) => [
+        trackId,
+        {
+          chords: content.chords,
+          notes: generateNotesFromSegments(
+            content.chords,
+            bar,
+            projectTs,
+            GENERATED_NOTE_OCTAVE
+          ),
+        },
+      ])
+    ),
   }));
 }
 
@@ -90,9 +127,14 @@ function withGeneratedNotes(bars: Bar[], projectTs: TimeSignature): Bar[] {
  * Rebuild the project from a set of bars: refit them so every segment sits inside
  * its bar without overlapping, then resync the derived notes. Every segment mutation
  * funnels through here so no caller can skip either step.
+ *
+ * The refit is handed the project's track ids, not just the ids with content, so an
+ * instrument that has been emptied still gets its (empty) lists rebuilt rather than
+ * keeping stale ones.
  */
 function applyBars(project: Project, bars: Bar[]): Project {
-  const refitted = refitBars(bars, project.timeSignature);
+  const trackIds = project.tracks.map(t => t.id);
+  const refitted = refitBars(bars, project.timeSignature, trackIds);
   return {
     ...project,
     bars: withGeneratedNotes(refitted, project.timeSignature),
@@ -101,11 +143,27 @@ function applyBars(project: Project, bars: Bar[]): Project {
 }
 
 /**
- * Rewrite one bar's segments, leaving every other bar alone. The refit that follows
- * still sees the whole project, so a change here can still spill into later bars.
+ * Rewrite one instrument's segments in one bar, leaving every other bar and every
+ * other instrument alone. The refit that follows still sees the whole project, so a
+ * change here can still spill into later bars.
  */
-function mapBar(bars: Bar[], barId: string, fn: (bar: Bar) => ChordSegment[]): Bar[] {
-  return bars.map(bar => (bar.id === barId ? { ...bar, chords: fn(bar) } : bar));
+function mapBar(
+  bars: Bar[],
+  barId: string,
+  trackId: string,
+  fn: (chords: ChordSegment[]) => ChordSegment[]
+): Bar[] {
+  return bars.map(bar => (bar.id === barId ? mapBarChords(bar, trackId, fn) : bar));
+}
+
+/** The instrument whose content holds a segment, or null if no instrument does. */
+function trackIdOfSegment(bars: Bar[], segmentId: string): string | null {
+  for (const bar of bars) {
+    for (const [trackId, content] of Object.entries(bar.content)) {
+      if (content.chords.some(c => c.id === segmentId)) return trackId;
+    }
+  }
+  return null;
 }
 
 /**
@@ -114,9 +172,14 @@ function mapBar(bars: Bar[], barId: string, fn: (bar: Bar) => ChordSegment[]): B
  * Blocks the ripple pushes off the end are parked at the bar line rather than
  * discarded; the refit that follows is what carries them into the next bar.
  */
-function placedIn(bar: Bar, segment: ChordSegment, startBeat: number, capacity: number) {
+function placedIn(
+  chords: ChordSegment[],
+  segment: ChordSegment,
+  startBeat: number,
+  capacity: number
+) {
   const { kept, overflow } = placeSegmentInBar(
-    bar.chords,
+    chords,
     segment,
     clampToBar(startBeat, segment.duration, capacity),
     capacity
@@ -147,13 +210,27 @@ function withTransformedSegments(
   const targets = new Set(segmentIds);
   if (targets.size === 0) return null;
 
+  // Searches every instrument's content rather than being told which one to look
+  // in: a selection is always within one instrument, but finding the ids is cheap
+  // and saves threading a track id through the keyboard-shortcut hooks.
   let matched = false;
   const bars = project.bars.map(bar => {
-    if (!bar.chords.some(c => targets.has(c.id))) return bar;
+    const content = Object.entries(bar.content);
+    if (!content.some(([, c]) => c.chords.some(s => targets.has(s.id)))) return bar;
     matched = true;
     return {
       ...bar,
-      chords: bar.chords.map(c => (targets.has(c.id) ? transform(c, bar.scale) : c)),
+      content: Object.fromEntries(
+        content.map(([trackId, trackContent]) => [
+          trackId,
+          {
+            ...trackContent,
+            chords: trackContent.chords.map(c =>
+              targets.has(c.id) ? transform(c, bar.scale) : c
+            ),
+          },
+        ])
+      ),
     };
   });
 
@@ -166,6 +243,21 @@ function withTransformedSegments(
   };
 }
 
+/** Build an instrument. New ones start on the default sound, audible and visible. */
+export function createTrack(name: string, index: number, instrument?: string): Track {
+  return {
+    id: generateId(),
+    name,
+    instrument: instrument ?? DEFAULT_INSTRUMENT_ID,
+    volume: 1.0,
+    pan: 0,
+    muted: false,
+    solo: false,
+    visible: true,
+    color: trackColorAt(index),
+  };
+}
+
 const createInitialProject = (): Project => ({
   id: generateId(),
   name: 'Untitled',
@@ -173,11 +265,37 @@ const createInitialProject = (): Project => ({
   timeSignature: DEFAULT_TIME_SIGNATURE,
   key: DEFAULT_KEY,
   keyMode: DEFAULT_KEY_MODE,
-  tracks: [],
+  // Every project opens with one instrument, so there is always somewhere for a
+  // dropped chord to land.
+  tracks: [createTrack('Piano', 0)],
   bars: [],
   createdAt: new Date(),
   updatedAt: new Date(),
 });
+
+/**
+ * Patch one instrument, leaving the others alone.
+ *
+ * An unknown id is a no-op rather than an error: these are all driven by clicks on
+ * a panel that can lag a removal by a frame, which is a sloppy state, not a bug.
+ */
+function updateTrack(
+  get: () => ProjectState,
+  set: (partial: Partial<ProjectState>) => void,
+  trackId: string,
+  patch: (track: Track) => Partial<Track>
+): void {
+  const project = get().project;
+  if (!project) return;
+  if (!project.tracks.some(t => t.id === trackId)) return;
+  set({
+    project: {
+      ...project,
+      tracks: project.tracks.map(t => (t.id === trackId ? { ...t, ...patch(t) } : t)),
+      updatedAt: new Date(),
+    },
+  });
+}
 
 export const projectStore = create<ProjectState>((set, get) => ({
   project: null,
@@ -193,7 +311,15 @@ export const projectStore = create<ProjectState>((set, get) => ({
     set({
       project: {
         ...project,
-        bars: project.bars.map(bar => ({ ...bar, chords: withStartBeats(bar.chords) })),
+        bars: project.bars.map(bar => ({
+          ...bar,
+          content: Object.fromEntries(
+            Object.entries(bar.content).map(([trackId, content]) => [
+              trackId,
+              { ...content, chords: withStartBeats(content.chords) },
+            ])
+          ),
+        })),
       },
     });
   },
@@ -284,8 +410,7 @@ export const projectStore = create<ProjectState>((set, get) => ({
       id: generateId(),
       barIndex: project.bars.length,
       scale: { root: project.key, type: project.keyMode === 'minor' ? 'naturalMinor' : 'major' },
-      chords: [],
-      notes: [],
+      content: {},
     };
     set({
       project: {
@@ -324,11 +449,17 @@ export const projectStore = create<ProjectState>((set, get) => ({
       if (i !== barIndex) return b;
       const nextScale = { root: scale.root, type: scale.type };
       // Diatonic segments name a scale degree, so a change of scale has to move them
-      // onto the new key's chord for that degree — and their notes with them.
+      // onto the new key's chord for that degree — and their notes with them. The
+      // scale belongs to the bar, so every instrument in it is retuned.
       return {
         ...b,
         scale: nextScale,
-        chords: retuneSegmentsToScale(b.chords, b.scale, nextScale),
+        content: Object.fromEntries(
+          Object.entries(b.content).map(([trackId, content]) => [
+            trackId,
+            { ...content, chords: retuneSegmentsToScale(content.chords, b.scale, nextScale) },
+          ])
+        ),
       };
     });
     set({
@@ -354,16 +485,18 @@ export const projectStore = create<ProjectState>((set, get) => ({
     set({ project: applyBars(project, bars) });
   },
 
-  insertSegment: (barId: string, startBeat: number, segment: ChordSegment) => {
+  insertSegment: (barId: string, startBeat: number, segment: ChordSegment, trackId: string) => {
     const project = get().project;
     if (!project) return;
     const target = project.bars.find(b => b.id === barId);
     // A drop that missed every bar is a sloppy gesture, not an error.
     if (!target) return;
+    // Likewise a drop with no instrument to land on.
+    if (!project.tracks.some(t => t.id === trackId)) return;
 
     const capacity = getBarBeats(target, project.timeSignature);
-    const bars = mapBar(project.bars, barId, bar =>
-      placedIn(bar, segment, startBeat, capacity)
+    const bars = mapBar(project.bars, barId, trackId, chords =>
+      placedIn(chords, segment, startBeat, capacity)
     );
     set({ project: applyBars(project, bars) });
   },
@@ -371,11 +504,19 @@ export const projectStore = create<ProjectState>((set, get) => ({
   removeSegment: (segmentId: string) => {
     const project = get().project;
     if (!project) return;
+    const trackId = trackIdOfSegment(project.bars, segmentId);
+    if (!trackId) return;
+
     // The space it occupied stays empty — a deleted block leaves a rest behind.
-    const bars = project.bars.map(bar => ({
-      ...bar,
-      chords: removeSegmentById(withStartBeats(bar.chords), segmentId),
-    }));
+    // Bars where this instrument has nothing are skipped rather than gaining an
+    // empty key, which would leave `content` growing a entry per bar per edit.
+    const bars = project.bars.map(bar =>
+      trackId in bar.content
+        ? mapBarChords(bar, trackId, chords =>
+            removeSegmentById(withStartBeats(chords), segmentId)
+          )
+        : bar
+    );
     set({ project: applyBars(project, bars) });
   },
 
@@ -399,13 +540,23 @@ export const projectStore = create<ProjectState>((set, get) => ({
 
     const barIndexById = new Map(project.bars.map((bar, index) => [bar.id, index]));
 
+    // A drag only ever moves blocks belonging to the instrument being edited, so
+    // the whole batch is resolved against one track. It is found from the first
+    // move that names a *live* segment, not simply the first move: a stale id is
+    // skipped rather than being allowed to abandon the whole gesture.
+    const trackId = moves.reduce<string | null>(
+      (found, move) => found ?? trackIdOfSegment(project.bars, move.segmentId),
+      null
+    );
+    if (!trackId) return;
+
     // Drop moves whose block or destination no longer exists rather than failing
     // the whole gesture: a stale selection is a sloppy state, not an error.
     const resolved = moves
       .map(move => ({
         move,
         segment: project.bars
-          .flatMap(bar => withStartBeats(bar.chords))
+          .flatMap(bar => withStartBeats(barChords(bar, trackId)))
           .find(c => c.id === move.segmentId),
       }))
       .filter(
@@ -415,10 +566,13 @@ export const projectStore = create<ProjectState>((set, get) => ({
     if (resolved.length === 0) return;
 
     const movedIds = new Set(resolved.map(entry => entry.move.segmentId));
-    let bars = project.bars.map(bar => ({
-      ...bar,
-      chords: withStartBeats(bar.chords).filter(c => !movedIds.has(c.id)),
-    }));
+    let bars = project.bars.map(bar =>
+      trackId in bar.content
+        ? mapBarChords(bar, trackId, chords =>
+            withStartBeats(chords).filter(c => !movedIds.has(c.id))
+          )
+        : bar
+    );
 
     const ordered = [...resolved].sort(
       (a, b) =>
@@ -429,8 +583,8 @@ export const projectStore = create<ProjectState>((set, get) => ({
     for (const { move, segment } of ordered) {
       const target = bars.find(bar => bar.id === move.targetBarId)!;
       const capacity = getBarBeats(target, project.timeSignature);
-      bars = mapBar(bars, move.targetBarId, bar =>
-        placedIn(bar, segment, move.startBeat, capacity)
+      bars = mapBar(bars, move.targetBarId, trackId, chords =>
+        placedIn(chords, segment, move.startBeat, capacity)
       );
     }
 
@@ -440,16 +594,20 @@ export const projectStore = create<ProjectState>((set, get) => ({
   resizeSegmentDuration: (segmentId: string, duration: number) => {
     const project = get().project;
     if (!project) return;
-    const owner = project.bars.find(b => b.chords.some(c => c.id === segmentId));
+    const trackId = trackIdOfSegment(project.bars, segmentId);
+    if (!trackId) return;
+    const owner = project.bars.find(b =>
+      barChords(b, trackId).some(c => c.id === segmentId)
+    );
     if (!owner) return;
 
-    const chords = withStartBeats(owner.chords);
+    const chords = withStartBeats(barChords(owner, trackId));
     // A block grows into the space in front of it, not into the whole bar: it is
     // pinned where it sits, so the bar line is what caps it.
     const start = chords.find(c => c.id === segmentId)!.startBeat!;
     const maxBeats = getBarBeats(owner, project.timeSignature) - start;
 
-    const bars = mapBar(project.bars, owner.id, () =>
+    const bars = mapBar(project.bars, owner.id, trackId, () =>
       resizeSegment(chords, segmentId, duration, maxBeats)
     );
     set({ project: applyBars(project, bars) });
@@ -494,6 +652,75 @@ export const projectStore = create<ProjectState>((set, get) => ({
 
   cycleSegmentInversion: (segmentId: string) => {
     get().cycleSegmentsInversion([segmentId]);
+  },
+
+  // -------------------------------------------------------------------------
+  // Instruments
+  // -------------------------------------------------------------------------
+
+  addTrack: (name?: string) => {
+    const project = get().project;
+    if (!project) return null;
+    const index = project.tracks.length;
+    const track = createTrack(name ?? `Instrument ${index + 1}`, index);
+    set({
+      project: {
+        ...project,
+        tracks: [...project.tracks, track],
+        updatedAt: new Date(),
+      },
+    });
+    return track.id;
+  },
+
+  /** Remove an instrument and everything it played. */
+  removeTrack: (trackId: string) => {
+    const project = get().project;
+    if (!project) return;
+    if (!project.tracks.some(t => t.id === trackId)) return;
+    set({
+      project: {
+        ...project,
+        tracks: project.tracks.filter(t => t.id !== trackId),
+        bars: withoutTrackContent(project.bars, trackId),
+        updatedAt: new Date(),
+      },
+    });
+  },
+
+  renameTrack: (trackId: string, name: string) => {
+    updateTrack(get, set, trackId, () => ({ name }));
+  },
+
+  setTrackInstrument: (trackId: string, instrument: string) => {
+    updateTrack(get, set, trackId, () => ({ instrument }));
+  },
+
+  setTrackVolume: (trackId: string, volume: number) => {
+    if (volume < 0 || volume > 1) {
+      throw new Error('Volume must be between 0 and 1');
+    }
+    updateTrack(get, set, trackId, () => ({ volume }));
+  },
+
+  setTrackPan: (trackId: string, pan: number) => {
+    if (pan < -1 || pan > 1) {
+      throw new Error('Pan must be between -1 and 1');
+    }
+    updateTrack(get, set, trackId, () => ({ pan }));
+  },
+
+  toggleTrackMute: (trackId: string) => {
+    updateTrack(get, set, trackId, t => ({ muted: !t.muted }));
+  },
+
+  toggleTrackSolo: (trackId: string) => {
+    updateTrack(get, set, trackId, t => ({ solo: !t.solo }));
+  },
+
+  /** Show or hide this instrument's notes on the piano roll. Does not affect sound. */
+  toggleTrackVisible: (trackId: string) => {
+    updateTrack(get, set, trackId, t => ({ visible: t.visible === false }));
   },
 
   resetProject: () => {

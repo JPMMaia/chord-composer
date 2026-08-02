@@ -10,6 +10,7 @@ import {
 import { calculateNoteTiming } from '@/engine/playback';
 import type { NoteTiming, PlaybackConfig } from '@/engine/playback';
 import type { Bar, Note, TimeSignature } from '@/types/music';
+import { soloContent, TEST_TRACK_ID } from '../helpers/tracks';
 
 const timing = (startTime: number, midiNote = 60): NoteTiming => ({
   midiNote,
@@ -32,8 +33,7 @@ const makeBar = (barIndex: number, beats: number, notes: Note[] = []): Bar => ({
   barIndex,
   timeSignature: { beatsPerMeasure: beats, beatUnit: 4 },
   scale: { root: 'C', type: 'major' },
-  chords: [],
-  notes,
+  content: soloContent([], notes),
 });
 
 const makeConfig = (bpm: number, timeSignature: TimeSignature, bars: Bar[]): PlaybackConfig => ({

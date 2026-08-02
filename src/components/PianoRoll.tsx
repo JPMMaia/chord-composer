@@ -1,5 +1,5 @@
 import { useRef, useEffect, useCallback, useMemo } from 'react';
-import type { Bar, Note, TimeSignature } from '@/types/music';
+import type { Bar, Note, TimeSignature, Track } from '@/types/music';
 import {
   snapToGrid,
   beatToPixel,
@@ -10,17 +10,26 @@ import {
 } from '@/engine/quantize';
 import { midiToNoteLabel } from '@/engine/chords';
 import { isNoteInScale } from '@/engine/scales';
-import { getBarBeats, getBarStartBeat, getTotalBeats } from '@/engine/timeline';
+import { allBarNotes, getBarBeats, getBarStartBeat, getTotalBeats } from '@/engine/timeline';
 import {
   BAR_LINE_WIDTH,
   PIANO_KEYS_WIDTH,
   PIANO_ROLL_MAX_MIDI,
   PIANO_ROLL_MIN_MIDI,
+  trackColorAt,
 } from '@/utils/constants';
 
 export interface PianoRollProps {
   bars: Bar[];
   selectedBarId: string;
+  /** The project's instruments, for their colours and visibility. */
+  tracks: Track[];
+  /**
+   * The instrument being edited. Its notes are drawn at full strength; the others
+   * stay visible but dimmed, so the roll shows the whole arrangement while making
+   * it obvious which part of it an edit would touch.
+   */
+  selectedTrackId: string | null;
   playheadBeat: number;
   pixelsPerBeat: number;
   pixelsPerOctave: number;
@@ -57,6 +66,11 @@ interface PositionedNote {
   /** Beats from the start of the project. */
   absoluteBeat: number;
   isInSelectedBar: boolean;
+  /** The instrument that plays it. */
+  trackId: string;
+  /** Its instrument's colour, as a CSS hex string. */
+  color: string;
+  isInSelectedTrack: boolean;
 }
 
 interface DragState {
@@ -72,12 +86,6 @@ const DEFAULT_COLORS = {
   gridLine: '#e5e5e5',
   barLine: '#cccccc',
   activeBar: 'rgba(59, 130, 246, 0.1)',
-  noteFill: '#3b82f6',
-  noteStroke: '#2563eb',
-  // Notes outside the selected bar stay visible for context but are muted, so it is
-  // still obvious which bar an edit would land in.
-  inactiveNoteFill: 'rgba(59, 130, 246, 0.3)',
-  inactiveNoteStroke: 'rgba(37, 99, 235, 0.45)',
   playhead: '#ef4444',
   // Dark enough to read as a black key, and to carry a light label — the roll
   // names every key, so the two key faces need genuinely different contrast.
@@ -92,9 +100,31 @@ const DEFAULT_COLORS = {
 /** Below this row height a key name would overlap its neighbours, so it is dropped. */
 const MIN_LABEL_ROW_HEIGHT = 8;
 
+/**
+ * How strongly a note is painted, by whether it belongs to the selected instrument
+ * and whether it sits in the selected bar. The two dimensions compose: the selected
+ * instrument in the selected bar is the only combination drawn at full strength,
+ * and everything else recedes by a predictable amount.
+ */
+function noteAlpha(isInSelectedTrack: boolean, isInSelectedBar: boolean): number {
+  if (isInSelectedTrack) return isInSelectedBar ? 1 : 0.3;
+  return isInSelectedBar ? 0.35 : 0.15;
+}
+
+/** A `#rrggbb` colour as `rgba(...)` at the given alpha. */
+function withAlpha(hex: string, alpha: number): string {
+  const value = Number.parseInt(hex.slice(1), 16);
+  const r = (value >> 16) & 0xff;
+  const g = (value >> 8) & 0xff;
+  const b = value & 0xff;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 export function PianoRoll({
   bars,
   selectedBarId,
+  tracks,
+  selectedTrackId,
   playheadBeat,
   pixelsPerBeat,
   pixelsPerOctave,
@@ -130,24 +160,40 @@ export function PianoRoll({
     [bars, selectedBarId]
   );
 
-  /** Every note in the project, placed on the shared absolute-beat axis. */
-  const positionedNotes = useMemo<PositionedNote[]>(
-    () =>
-      bars.flatMap((bar, index) => {
-        const barStartBeat = getBarStartBeat(bars, index, timeSignature);
-        return bar.notes.map((note) => ({
+  /**
+   * Every *visible* instrument's notes, placed on the shared absolute-beat axis.
+   *
+   * An instrument the user has hidden is dropped here rather than at draw time, so
+   * it is also excluded from hit-testing — a note you cannot see must not be a note
+   * you can accidentally grab.
+   */
+  const positionedNotes = useMemo<PositionedNote[]>(() => {
+    const visible = new Map(
+      tracks
+        // Absent means visible, so instruments from older files still show.
+        .filter(track => track.visible !== false)
+        .map((track, index) => [track.id, track.color ?? trackColorAt(index)])
+    );
+
+    return bars.flatMap((bar, index) => {
+      const barStartBeat = getBarStartBeat(bars, index, timeSignature);
+      return allBarNotes(bar)
+        .filter(({ trackId }) => visible.has(trackId))
+        .map(({ note, trackId }) => ({
           note,
           barId: bar.id,
           absoluteBeat: barStartBeat + note.startBeat,
           isInSelectedBar: bar.id === selectedBarId,
+          trackId,
+          color: visible.get(trackId)!,
+          isInSelectedTrack: trackId === selectedTrackId,
         }));
-      }),
-    [bars, selectedBarId, timeSignature]
-  );
+    });
+  }, [bars, tracks, selectedBarId, selectedTrackId, timeSignature]);
 
-  /** Only the selected bar's notes respond to clicks and drags. */
+  /** Only the selected instrument's notes in the selected bar respond to clicks. */
   const selectedBarNotes = useMemo(
-    () => positionedNotes.filter((p) => p.isInSelectedBar),
+    () => positionedNotes.filter(p => p.isInSelectedBar && p.isInSelectedTrack),
     [positionedNotes]
   );
 
@@ -252,32 +298,40 @@ export function PianoRoll({
         ctx.fillRect(x, 0, barWidth, height);
       }
 
-      // Every bar's notes are drawn, not just the selected one's. The selected bar
-      // goes last so its notes sit above any that overlap them.
-      const drawNote = ({ note, absoluteBeat, isInSelectedBar }: PositionedNote) => {
+      // Every visible instrument's notes are drawn, in every bar — the roll shows
+      // the whole arrangement. Colour says which instrument, alpha says how close
+      // to the edit the note is.
+      const drawNote = ({
+        note,
+        absoluteBeat,
+        isInSelectedBar,
+        isInSelectedTrack,
+        color,
+      }: PositionedNote) => {
         const x = timelineStart + beatToPixel(absoluteBeat, pixelsPerBeat);
         const y = pitchToPixel(note.pitch, pixelsPerOctave);
         const noteWidth = Math.max(beatToPixel(note.duration, pixelsPerBeat), 2);
         const noteHeight = pixelsPerOctave / 12;
+        const alpha = noteAlpha(isInSelectedTrack, isInSelectedBar);
 
-        ctx.fillStyle = isInSelectedBar
-          ? DEFAULT_COLORS.noteFill
-          : DEFAULT_COLORS.inactiveNoteFill;
+        ctx.fillStyle = withAlpha(color, alpha);
         ctx.fillRect(x, y, noteWidth, noteHeight - 1);
 
-        ctx.strokeStyle = isInSelectedBar
-          ? DEFAULT_COLORS.noteStroke
-          : DEFAULT_COLORS.inactiveNoteStroke;
+        // The outline is drawn a shade stronger than the fill so overlapping notes
+        // from different instruments stay individually readable when both are dim.
+        ctx.strokeStyle = withAlpha(color, Math.min(1, alpha + 0.2));
         ctx.lineWidth = 1;
         ctx.strokeRect(x, y, noteWidth, noteHeight - 1);
       };
 
-      for (const positioned of positionedNotes) {
-        if (!positioned.isInSelectedBar) drawNote(positioned);
-      }
-      for (const positioned of positionedNotes) {
-        if (positioned.isInSelectedBar) drawNote(positioned);
-      }
+      // Painted faintest first, so the note an edit would actually touch — selected
+      // instrument, selected bar — always wins an overlap.
+      const drawOrder = [...positionedNotes].sort(
+        (a, b) =>
+          noteAlpha(a.isInSelectedTrack, a.isInSelectedBar) -
+          noteAlpha(b.isInSelectedTrack, b.isInSelectedBar)
+      );
+      for (const positioned of drawOrder) drawNote(positioned);
 
       const playheadX = timelineStart + beatToPixel(playheadBeat, pixelsPerBeat);
       ctx.strokeStyle = DEFAULT_COLORS.playhead;

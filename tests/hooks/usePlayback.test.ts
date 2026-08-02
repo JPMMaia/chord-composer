@@ -56,7 +56,20 @@ vi.mock('@/engine/smplrPiano', () => {
 import { usePlayback } from '@/hooks/usePlayback';
 import { TICK_MS, LOOKAHEAD_SECONDS } from '@/engine/scheduler';
 import type { PlaybackConfig } from '@/engine/playback';
-import type { Bar, Note } from '@/types/music';
+import type { Bar, Note, Track } from '@/types/music';
+import { soloContent, TEST_TRACK_ID } from '../helpers/tracks';
+
+/** The instrument the fixture bars' notes belong to. */
+const testTrack: Track = {
+  id: TEST_TRACK_ID,
+  name: 'Piano',
+  instrument: 'acoustic_grand_piano',
+  volume: 1,
+  pan: 0,
+  muted: false,
+  solo: false,
+  visible: true,
+};
 
 const makeNote = (pitch: number, startBeat: number): Note => ({
   id: `n-${pitch}-${startBeat}`,
@@ -71,8 +84,7 @@ const makeBar = (barIndex: number, notes: Note[]): Bar => ({
   barIndex,
   timeSignature: { beatsPerMeasure: 4, beatUnit: 4 },
   scale: { root: 'C', type: 'major' },
-  chords: [],
-  notes,
+  content: soloContent([], notes),
 });
 
 /** 60 BPM so one beat is one second and the arithmetic reads directly. */
@@ -80,7 +92,7 @@ const config: PlaybackConfig = {
   bpm: 60,
   timeSignature: { beatsPerMeasure: 4, beatUnit: 4 },
   bars: [makeBar(0, [makeNote(60, 0), makeNote(62, 1), makeNote(64, 2), makeNote(65, 3)])],
-  tracks: [],
+  tracks: [testTrack],
   loopStart: null,
   loopEnd: null,
   loopEnabled: false,
@@ -109,11 +121,23 @@ describe('usePlayback', () => {
 
     // jsdom has no Web Audio; the hook only needs a constructible, resumable
     // context whose clock advances.
+    const node = () => ({ connect: vi.fn(), disconnect: vi.fn() });
     class MockAudioContext {
       state = 'suspended';
+      destination = node();
       get currentTime() {
         return clock;
       }
+      // The instrument pool owns one limiter downstream of every instrument.
+      createDynamicsCompressor = () => ({
+        ...node(),
+        threshold: { value: 0 },
+        knee: { value: 0 },
+        ratio: { value: 0 },
+        attack: { value: 0 },
+        release: { value: 0 },
+      });
+      createGain = () => ({ ...node(), gain: { value: 1 } });
       resume = async () => {
         this.state = 'running';
       };

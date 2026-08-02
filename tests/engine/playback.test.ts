@@ -6,15 +6,29 @@ import {
   type NoteTiming,
   type PlaybackConfig,
 } from '@/engine/playback';
-import type { Bar, Note, TimeSignature } from '@/types/music';
+import { isTrackAudible } from '@/engine/instrumentPool';
+import type { Bar, Note, TimeSignature, Track } from '@/types/music';
+import { soloContent, TEST_TRACK_ID, OTHER_TRACK_ID } from '../helpers/tracks';
+
+/** An audible instrument, unless a test says otherwise. */
+const makeTrack = (id: string, overrides: Partial<Track> = {}): Track => ({
+  id,
+  name: id,
+  instrument: 'acoustic_grand_piano',
+  volume: 1,
+  pan: 0,
+  muted: false,
+  solo: false,
+  visible: true,
+  ...overrides,
+});
 
 const makeBar = (barIndex: number, beats: number, notes: Note[] = []): Bar => ({
   id: `bar-${barIndex}`,
   barIndex,
   timeSignature: { beatsPerMeasure: beats, beatUnit: 4 },
   scale: { root: 'C', type: 'major' },
-  chords: [],
-  notes,
+  content: soloContent([], notes),
 });
 
 /** A bar with no meter of its own, so it inherits the project's. */
@@ -22,8 +36,7 @@ const makeInheritingBar = (barIndex: number, notes: Note[] = []): Bar => ({
   id: `bar-${barIndex}`,
   barIndex,
   scale: { root: 'C', type: 'major' },
-  chords: [],
-  notes,
+  content: soloContent([], notes),
 });
 
 const makeConfig = (
@@ -36,7 +49,7 @@ const makeConfig = (
   bpm,
   timeSignature,
   bars,
-  tracks: [],
+  tracks: [makeTrack(TEST_TRACK_ID)],
   loopStart,
   loopEnd,
 });
@@ -255,6 +268,86 @@ describe('playback', () => {
         { beatsPerMeasure: 4, beatUnit: 4 }
       );
       expect(beats).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    });
+  });
+
+  describe('instruments', () => {
+    /** One bar, two instruments, one note each. */
+    const twoInstrumentBar = (): Bar => ({
+      id: 'bar-0',
+      barIndex: 0,
+      timeSignature: { beatsPerMeasure: 4, beatUnit: 4 },
+      scale: { root: 'C', type: 'major' },
+      content: {
+        [TEST_TRACK_ID]: {
+          chords: [],
+          notes: [{ id: 'a', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }],
+        },
+        [OTHER_TRACK_ID]: {
+          chords: [],
+          notes: [{ id: 'b', pitch: 72, startBeat: 1, duration: 1, velocity: 100 }],
+        },
+      },
+    });
+
+    it('tags each timing with the instrument that plays it', () => {
+      const timings = calculateNoteTiming({
+        bpm: 60,
+        timeSignature: { beatsPerMeasure: 4, beatUnit: 4 },
+        bars: [twoInstrumentBar()],
+        tracks: [makeTrack(TEST_TRACK_ID), makeTrack(OTHER_TRACK_ID)],
+        loopStart: null,
+        loopEnd: null,
+        loopEnabled: false,
+      });
+
+      expect(timings.map(t => [t.midiNote, t.trackId])).toEqual([
+        [60, TEST_TRACK_ID],
+        [72, OTHER_TRACK_ID],
+      ]);
+    });
+
+    // Mute and solo are applied when a note is dispatched, not here — filtering at
+    // this point would freeze the mute state at the moment Play was pressed.
+    it('includes muted instruments, leaving the decision to the dispatcher', () => {
+      const timings = calculateNoteTiming({
+        bpm: 60,
+        timeSignature: { beatsPerMeasure: 4, beatUnit: 4 },
+        bars: [twoInstrumentBar()],
+        tracks: [makeTrack(TEST_TRACK_ID, { muted: true }), makeTrack(OTHER_TRACK_ID)],
+        loopStart: null,
+        loopEnd: null,
+        loopEnabled: false,
+      });
+
+      expect(timings).toHaveLength(2);
+    });
+  });
+
+  describe('isTrackAudible', () => {
+    const piano = makeTrack(TEST_TRACK_ID);
+    const strings = makeTrack(OTHER_TRACK_ID);
+
+    it('hears an unmuted instrument when nothing is soloed', () => {
+      expect(isTrackAudible(piano, [piano, strings])).toBe(true);
+    });
+
+    it('silences a muted instrument', () => {
+      const muted = makeTrack(TEST_TRACK_ID, { muted: true });
+      expect(isTrackAudible(muted, [muted, strings])).toBe(false);
+    });
+
+    it('silences everything that is not soloed once anything is', () => {
+      const soloed = makeTrack(OTHER_TRACK_ID, { solo: true });
+      expect(isTrackAudible(soloed, [piano, soloed])).toBe(true);
+      expect(isTrackAudible(piano, [piano, soloed])).toBe(false);
+    });
+
+    // Otherwise soloing a muted instrument would un-mute it, which is not what
+    // either control means.
+    it('keeps a muted instrument silent even when it is the soloed one', () => {
+      const both = makeTrack(TEST_TRACK_ID, { muted: true, solo: true });
+      expect(isTrackAudible(both, [both, strings])).toBe(false);
     });
   });
 });

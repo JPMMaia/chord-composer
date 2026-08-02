@@ -2,28 +2,41 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, fireEvent } from '@testing-library/react';
 import { PianoRoll } from '@/components/PianoRoll';
 import { pitchToPixel, pitchRangeHeight } from '@/engine/quantize';
-import { Bar } from '@/types/music';
+import { Bar, Track } from '@/types/music';
+import { soloContent, TEST_TRACK_ID } from '../helpers/tracks';
+
+/** The one instrument the shared fixture bars belong to. */
+const mockTracks: Track[] = [
+  {
+    id: TEST_TRACK_ID,
+    name: 'Piano',
+    instrument: 'acoustic_grand_piano',
+    volume: 1,
+    pan: 0,
+    muted: false,
+    solo: false,
+    visible: true,
+  },
+];
 
 const mockBars: Bar[] = [
   {
     id: 'bar-1',
     barIndex: 0,
     scale: { root: 'C', type: 'major' },
-    chords: [],
-    notes: [
+    content: soloContent([], [
       { id: 'n1', pitch: 60, startBeat: 0, duration: 1, velocity: 100 },
       { id: 'n2', pitch: 64, startBeat: 1, duration: 1, velocity: 100 },
       { id: 'n3', pitch: 67, startBeat: 2, duration: 1, velocity: 100 },
-    ],
+    ]),
   },
   {
     id: 'bar-2',
     barIndex: 1,
     scale: { root: 'C', type: 'major' },
-    chords: [],
-    notes: [
+    content: soloContent([], [
       { id: 'n4', pitch: 72, startBeat: 4, duration: 2, velocity: 100 },
-    ],
+    ]),
   },
 ];
 
@@ -59,6 +72,8 @@ describe('PianoRoll', () => {
       <PianoRoll
         bars={mockBars}
         selectedBarId="bar-1"
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
         playheadBeat={0}
         pixelsPerBeat={100}
         pixelsPerOctave={100}
@@ -77,6 +92,8 @@ describe('PianoRoll', () => {
       <PianoRoll
         bars={mockBars}
         selectedBarId="bar-1"
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
         playheadBeat={0}
         pixelsPerBeat={100}
         pixelsPerOctave={100}
@@ -98,6 +115,8 @@ describe('PianoRoll', () => {
       <PianoRoll
         bars={mockBars}
         selectedBarId="bar-1"
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
         playheadBeat={0}
         pixelsPerBeat={100}
         pixelsPerOctave={100}
@@ -116,6 +135,8 @@ describe('PianoRoll', () => {
       <PianoRoll
         bars={mockBars}
         selectedBarId="bar-1"
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
         playheadBeat={0}
         pixelsPerBeat={100}
         pixelsPerOctave={100}
@@ -134,6 +155,8 @@ describe('PianoRoll', () => {
       <PianoRoll
         bars={mockBars}
         selectedBarId="bar-1"
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
         playheadBeat={0}
         pixelsPerBeat={100}
         pixelsPerOctave={100}
@@ -152,6 +175,8 @@ describe('PianoRoll', () => {
       <PianoRoll
         bars={mockBars}
         selectedBarId="bar-1"
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
         playheadBeat={0}
         pixelsPerBeat={100}
         pixelsPerOctave={100}
@@ -171,6 +196,8 @@ describe('PianoRoll', () => {
       <PianoRoll
         bars={mockBars}
         selectedBarId="bar-1"
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
         playheadBeat={0}
         pixelsPerBeat={100}
         pixelsPerOctave={100}
@@ -188,6 +215,8 @@ describe('PianoRoll', () => {
       <PianoRoll
         bars={mockBars}
         selectedBarId="bar-1"
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
         playheadBeat={2.5}
         pixelsPerBeat={100}
         pixelsPerOctave={100}
@@ -206,6 +235,8 @@ describe('PianoRoll', () => {
       <PianoRoll
         bars={mockBars}
         selectedBarId="bar-1"
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
         playheadBeat={0}
         pixelsPerBeat={100}
         pixelsPerOctave={100}
@@ -224,6 +255,8 @@ describe('PianoRoll', () => {
       <PianoRoll
         bars={mockBars}
         selectedBarId="bar-1"
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
         playheadBeat={0}
         pixelsPerBeat={100}
         pixelsPerOctave={100}
@@ -240,6 +273,8 @@ describe('PianoRoll', () => {
   it('handles empty bars array', () => {
     const { container } = render(
       <PianoRoll
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
         bars={[]}
         selectedBarId=""
         playheadBeat={0}
@@ -260,6 +295,8 @@ describe('PianoRoll', () => {
       <PianoRoll
         bars={mockBars}
         selectedBarId="bar-1"
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
         playheadBeat={0}
         pixelsPerBeat={200}
         pixelsPerOctave={100}
@@ -278,6 +315,8 @@ describe('PianoRoll', () => {
       <PianoRoll
         bars={mockBars}
         selectedBarId="bar-1"
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
         playheadBeat={0}
         pixelsPerBeat={100}
         pixelsPerOctave={200}
@@ -296,6 +335,8 @@ describe('PianoRoll', () => {
       <PianoRoll
         bars={mockBars}
         selectedBarId="bar-1"
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
         playheadBeat={0}
         pixelsPerBeat={100}
         pixelsPerOctave={100}
@@ -309,6 +350,8 @@ describe('PianoRoll', () => {
       <PianoRoll
         bars={mockBars}
         selectedBarId="bar-1"
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
         playheadBeat={5}
         pixelsPerBeat={100}
         pixelsPerOctave={100}
@@ -367,14 +410,16 @@ describe('PianoRoll', () => {
 
     it('places bar lines at cumulative starts across mixed meters', () => {
       const bars: Bar[] = [
-        { id: 'b0', barIndex: 0, timeSignature: { beatsPerMeasure: 3, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, chords: [], notes: [] },
-        { id: 'b1', barIndex: 1, timeSignature: { beatsPerMeasure: 4, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, chords: [], notes: [] },
-        { id: 'b2', barIndex: 2, timeSignature: { beatsPerMeasure: 2, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, chords: [], notes: [] },
+        { id: 'b0', barIndex: 0, timeSignature: { beatsPerMeasure: 3, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, content: soloContent() },
+        { id: 'b1', barIndex: 1, timeSignature: { beatsPerMeasure: 4, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, content: soloContent() },
+        { id: 'b2', barIndex: 2, timeSignature: { beatsPerMeasure: 2, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, content: soloContent() },
       ];
       const strokes = recordStrokes();
 
       render(
         <PianoRoll
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
           bars={bars}
           selectedBarId="b0"
           playheadBeat={0}
@@ -399,13 +444,15 @@ describe('PianoRoll', () => {
 
     it('draws one gridline per beat of the whole project', () => {
       const bars: Bar[] = [
-        { id: 'b0', barIndex: 0, timeSignature: { beatsPerMeasure: 3, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, chords: [], notes: [] },
-        { id: 'b1', barIndex: 1, scale: { root: 'C', type: 'major' }, chords: [], notes: [] },
+        { id: 'b0', barIndex: 0, timeSignature: { beatsPerMeasure: 3, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, content: soloContent() },
+        { id: 'b1', barIndex: 1, scale: { root: 'C', type: 'major' }, content: soloContent() },
       ];
       const strokes = recordStrokes();
 
       render(
         <PianoRoll
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
           bars={bars}
           selectedBarId="b0"
           playheadBeat={0}
@@ -426,17 +473,16 @@ describe('PianoRoll', () => {
 
   describe('note placement across bars', () => {
     const PIANO_KEYS_WIDTH = 80;
-    const ACTIVE_FILL = '#3b82f6';
+    // The default instrument's blue at full strength: selected instrument, selected
+    // bar. Every note fill is now rgba, since alpha carries the dimming.
+    const ACTIVE_FILL = 'rgba(59, 130, 246, 1)';
     const PIXELS_PER_BEAT = 10;
 
     /** One note per bar, all on beat 0 of their own bar and all on the same pitch. */
     const bars: Bar[] = [
-      { id: 'b0', barIndex: 0, scale: { root: 'C', type: 'major' }, chords: [],
-        notes: [{ id: 'n0', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }] },
-      { id: 'b1', barIndex: 1, scale: { root: 'C', type: 'major' }, chords: [],
-        notes: [{ id: 'n1', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }] },
-      { id: 'b2', barIndex: 2, scale: { root: 'C', type: 'major' }, chords: [],
-        notes: [{ id: 'n2', pitch: 60, startBeat: 1, duration: 1, velocity: 100 }] },
+      { id: 'b0', barIndex: 0, scale: { root: 'C', type: 'major' }, content: soloContent([], [{ id: 'n0', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }]) },
+      { id: 'b1', barIndex: 1, scale: { root: 'C', type: 'major' }, content: soloContent([], [{ id: 'n1', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }]) },
+      { id: 'b2', barIndex: 2, scale: { root: 'C', type: 'major' }, content: soloContent([], [{ id: 'n2', pitch: 60, startBeat: 1, duration: 1, velocity: 100 }]) },
     ];
 
     interface Filled { color: string; x: number; w: number }
@@ -477,6 +523,8 @@ describe('PianoRoll', () => {
       const fills = recordFills();
       render(
         <PianoRoll
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
           bars={barsToRender}
           selectedBarId={selectedBarId}
           playheadBeat={0}
@@ -488,7 +536,12 @@ describe('PianoRoll', () => {
       );
       // The key bed uses white/grey fills and the active bar a translucent blue; only
       // notes use the two note colours.
-      return fills.filter(f => f.color.startsWith('#3b82f6') || f.color.startsWith('rgba(59, 130, 246, 0.3)'));
+      // The selected-bar highlight is the same blue at 0.1, so it has to be
+      // excluded by name rather than by hue.
+      const ACTIVE_BAR_HIGHLIGHT = 'rgba(59, 130, 246, 0.1)';
+      return fills.filter(
+        f => f.color.startsWith('rgba(59, 130, 246,') && f.color !== ACTIVE_BAR_HIGHLIGHT
+      );
     }
 
     it('keeps other bars’ notes visible when a later bar is selected', () => {
@@ -519,12 +572,120 @@ describe('PianoRoll', () => {
       expect(fills[fills.length - 1].color).toBe(ACTIVE_FILL);
     });
 
+    // The roll shows the whole arrangement: other instruments stay visible, in
+    // their own colour, but recede so the one being edited reads first.
+    describe('multiple instruments', () => {
+      const OTHER_TRACK = 'track-strings';
+      /** The second entry of TRACK_COLORS — amber. */
+      const OTHER_HUE = 'rgba(245, 158, 11,';
+
+      const twoInstrumentTracks: Track[] = [
+        { ...mockTracks[0] },
+        {
+          id: OTHER_TRACK,
+          name: 'Strings',
+          instrument: 'string_ensemble_1',
+          volume: 1,
+          pan: 0,
+          muted: false,
+          solo: false,
+          visible: true,
+          color: '#f59e0b',
+        },
+      ];
+
+      /** One bar, one note each for two instruments. */
+      const sharedBar: Bar[] = [
+        {
+          id: 'b0',
+          barIndex: 0,
+          scale: { root: 'C', type: 'major' },
+          content: {
+            [TEST_TRACK_ID]: {
+              chords: [],
+              notes: [{ id: 'p', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }],
+            },
+            [OTHER_TRACK]: {
+              chords: [],
+              notes: [{ id: 's', pitch: 64, startBeat: 1, duration: 1, velocity: 100 }],
+            },
+          },
+        },
+      ];
+
+      /** Every note fill, whatever hue, for a given set of instruments. */
+      function allNoteFills(tracks: Track[], selectedTrackId: string | null): Filled[] {
+        const fills = recordFills();
+        render(
+          <PianoRoll
+            bars={sharedBar}
+            selectedBarId="b0"
+            tracks={tracks}
+            selectedTrackId={selectedTrackId}
+            playheadBeat={0}
+            pixelsPerBeat={PIXELS_PER_BEAT}
+            pixelsPerOctave={120}
+            gridSize={0.25}
+            timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
+          />
+        );
+        return fills.filter(
+          f =>
+            (f.color.startsWith('rgba(59, 130, 246,') && f.color !== 'rgba(59, 130, 246, 0.1)') ||
+            f.color.startsWith(OTHER_HUE)
+        );
+      }
+
+      it('draws every visible instrument', () => {
+        const fills = allNoteFills(twoInstrumentTracks, TEST_TRACK_ID);
+        expect(fills).toHaveLength(2);
+      });
+
+      it('gives each instrument its own colour', () => {
+        const fills = allNoteFills(twoInstrumentTracks, TEST_TRACK_ID);
+
+        expect(fills.some(f => f.color.startsWith('rgba(59, 130, 246,'))).toBe(true);
+        expect(fills.some(f => f.color.startsWith(OTHER_HUE))).toBe(true);
+      });
+
+      it('draws the selected instrument at full strength and the rest dimmed', () => {
+        const fills = allNoteFills(twoInstrumentTracks, TEST_TRACK_ID);
+
+        expect(fills.find(f => f.color.startsWith('rgba(59, 130, 246,'))!.color).toBe(ACTIVE_FILL);
+        expect(fills.find(f => f.color.startsWith(OTHER_HUE))!.color).toBe(
+          'rgba(245, 158, 11, 0.35)'
+        );
+      });
+
+      it('draws the selected instrument last so it wins an overlap', () => {
+        const fills = allNoteFills(twoInstrumentTracks, TEST_TRACK_ID);
+        expect(fills[fills.length - 1].color).toBe(ACTIVE_FILL);
+      });
+
+      // The point of the eye toggle: a hidden instrument leaves the roll entirely,
+      // while still being perfectly audible.
+      it('draws nothing for a hidden instrument', () => {
+        const hidden = twoInstrumentTracks.map(t =>
+          t.id === OTHER_TRACK ? { ...t, visible: false } : t
+        );
+        const fills = allNoteFills(hidden, TEST_TRACK_ID);
+
+        expect(fills).toHaveLength(1);
+        expect(fills.every(f => !f.color.startsWith(OTHER_HUE))).toBe(true);
+      });
+
+      it('still draws a muted instrument, because muting is about sound', () => {
+        const muted = twoInstrumentTracks.map(t =>
+          t.id === OTHER_TRACK ? { ...t, muted: true } : t
+        );
+        expect(allNoteFills(muted, TEST_TRACK_ID)).toHaveLength(2);
+      });
+    });
+
     it('accumulates bar starts across mixed meters', () => {
       const mixed: Bar[] = [
-        { id: 'm0', barIndex: 0, timeSignature: { beatsPerMeasure: 3, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, chords: [],
-          notes: [{ id: 'x0', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }] },
-        { id: 'm1', barIndex: 1, timeSignature: { beatsPerMeasure: 4, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, chords: [],
-          notes: [{ id: 'x1', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }] },
+        { id: 'm0', barIndex: 0, timeSignature: { beatsPerMeasure: 3, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, content: soloContent([], [{ id: 'x0', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }]) },
+        { id: 'm1', barIndex: 1, timeSignature: { beatsPerMeasure: 4, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, content: soloContent([], [{ id: 'x1', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }]) },
       ];
       // Bar 2 starts on beat 3, not beat 4, because bar 1 is in 3/4.
       const xs = noteFills('m0', mixed).map(f => f.x).sort((a, b) => a - b);
@@ -533,8 +694,7 @@ describe('PianoRoll', () => {
 
     it('scales note width with duration', () => {
       const twoBeats: Bar[] = [
-        { id: 'd0', barIndex: 0, scale: { root: 'C', type: 'major' }, chords: [],
-          notes: [{ id: 'y0', pitch: 60, startBeat: 0, duration: 2, velocity: 100 }] },
+        { id: 'd0', barIndex: 0, scale: { root: 'C', type: 'major' }, content: soloContent([], [{ id: 'y0', pitch: 60, startBeat: 0, duration: 2, velocity: 100 }]) },
       ];
       expect(noteFills('d0', twoBeats)[0].w).toBe(2 * PIXELS_PER_BEAT);
     });
@@ -575,6 +735,8 @@ describe('PianoRoll', () => {
         <PianoRoll
           bars={mockBars}
           selectedBarId="bar-1"
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
           playheadBeat={0}
           pixelsPerBeat={10}
           pixelsPerOctave={pixelsPerOctave}
@@ -637,13 +799,15 @@ describe('PianoRoll', () => {
     const PIXELS_PER_BEAT = 10;
 
     const bars: Bar[] = [
-      { id: 'b0', barIndex: 0, scale: { root: 'C', type: 'major' }, chords: [], notes: [] },
-      { id: 'b1', barIndex: 1, scale: { root: 'C', type: 'major' }, chords: [], notes: [] },
+      { id: 'b0', barIndex: 0, scale: { root: 'C', type: 'major' }, content: soloContent() },
+      { id: 'b1', barIndex: 1, scale: { root: 'C', type: 'major' }, content: soloContent() },
     ];
 
     function clickAt(selectedBarId: string, beat: number, onNoteClick: () => void) {
       const { container } = render(
         <PianoRoll
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
           bars={bars}
           selectedBarId={selectedBarId}
           playheadBeat={0}
@@ -693,12 +857,13 @@ describe('PianoRoll', () => {
     const PIANO_KEYS_WIDTH = 80;
     const PIXELS_PER_BEAT = 10;
     const SCROLL_LEFT = 60;
-    const ACTIVE_FILL = '#3b82f6';
+    // The default instrument's blue at full strength: selected instrument, selected
+    // bar. Every note fill is now rgba, since alpha carries the dimming.
+    const ACTIVE_FILL = 'rgba(59, 130, 246, 1)';
 
     const bars: Bar[] = [
-      { id: 'b0', barIndex: 0, scale: { root: 'C', type: 'major' }, chords: [],
-        notes: [{ id: 'n0', pitch: 60, startBeat: 2, duration: 1, velocity: 100 }] },
-      { id: 'b1', barIndex: 1, scale: { root: 'C', type: 'major' }, chords: [], notes: [] },
+      { id: 'b0', barIndex: 0, scale: { root: 'C', type: 'major' }, content: soloContent([], [{ id: 'n0', pitch: 60, startBeat: 2, duration: 1, velocity: 100 }]) },
+      { id: 'b1', barIndex: 1, scale: { root: 'C', type: 'major' }, content: soloContent() },
     ];
 
     interface Drawn { color: string; x: number }
@@ -738,6 +903,8 @@ describe('PianoRoll', () => {
     function renderAt(scrollLeft: number, extra: Partial<React.ComponentProps<typeof PianoRoll>> = {}) {
       return render(
         <PianoRoll
+        tracks={mockTracks}
+        selectedTrackId={TEST_TRACK_ID}
           bars={bars}
           selectedBarId="b0"
           playheadBeat={0}

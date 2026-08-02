@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { FileMenu } from '@/components/FileMenu';
 import { projectStore } from '@/store/projectStore';
-import { trackStore } from '@/store/trackStore';
 import { serializeProject } from '@/engine/fileIO';
 import { projectToMidi } from '@/engine/midiExporter';
 
@@ -36,14 +35,11 @@ describe('FileMenu', () => {
     stubDownloads();
     projectStore.getState().createProject();
     projectStore.getState().addBar();
-    trackStore.getState().resetTracks();
-    trackStore.getState().addTrack();
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     projectStore.getState().resetProject();
-    trackStore.getState().resetTracks();
   });
 
   it('renders a File button with the menu closed', () => {

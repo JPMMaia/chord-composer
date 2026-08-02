@@ -1,6 +1,5 @@
 import { useRef, useCallback, useEffect, useState } from 'react';
-import { SmplrPianoInstrument } from '@/engine/smplrPiano';
-import type { Instrument } from '@/engine/instrument';
+import { InstrumentPool, isTrackAudible } from '@/engine/instrumentPool';
 import { calculateNoteTiming, getLoopDuration } from '@/engine/playback';
 import type { NoteTiming, PlaybackConfig } from '@/engine/playback';
 import {
@@ -24,12 +23,12 @@ function rangeStart(config: PlaybackConfig): number {
 }
 
 /**
- * Drives playback: owns the AudioContext, the instrument, and the look-ahead
+ * Drives playback: owns the AudioContext, the instrument pool, and the look-ahead
  * scheduling loop.
  *
- * The scheduling arithmetic lives in `@/engine/scheduler` and the sound in an
- * `Instrument`; this hook is the part that has to care about React lifecycles and
- * the browser's autoplay rules.
+ * The scheduling arithmetic lives in `@/engine/scheduler` and the sound in the
+ * pool's `Instrument`s; this hook is the part that has to care about React
+ * lifecycles and the browser's autoplay rules.
  */
 export function usePlayback(config: PlaybackConfig) {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -38,7 +37,7 @@ export function usePlayback(config: PlaybackConfig) {
   const [currentTime, setCurrentTime] = useState(0);
 
   const ctxRef = useRef<AudioContext | null>(null);
-  const instrumentRef = useRef<Instrument | null>(null);
+  const poolRef = useRef<InstrumentPool | null>(null);
 
   /** Clock reading at song position 0. Playback's whole frame of reference. */
   const songStartClockRef = useRef(0);
@@ -70,11 +69,11 @@ export function usePlayback(config: PlaybackConfig) {
    */
   const tick = useCallback(
     (timings: NoteTiming[]) => {
-      const instrument = instrumentRef.current;
-      if (!instrument) return;
+      const pool = poolRef.current;
+      if (!pool) return;
 
       const cfg = configRef.current;
-      const elapsed = instrument.now() - songStartClockRef.current;
+      const elapsed = pool.now() - songStartClockRef.current;
       const loopDuration = getLoopDuration(cfg);
       const loopFrom = rangeStart(cfg);
 
@@ -88,8 +87,16 @@ export function usePlayback(config: PlaybackConfig) {
         toSong: Math.min(horizon, endSong),
       });
 
+      // Mute and solo are read here, per note, rather than baked into `timings`,
+      // so toggling either during playback is heard on the next tick.
+      const audible = new Set(
+        cfg.tracks.filter(t => isTrackAudible(t, cfg.tracks)).map(t => t.id)
+      );
+
       for (const note of due) {
-        instrument.schedule({
+        if (!audible.has(note.trackId)) continue;
+
+        pool.get(note.trackId)?.schedule({
           midiNote: note.midiNote,
           velocity: note.velocity,
           when: toClockTime(note.startTime, songStartClockRef.current),
@@ -111,7 +118,7 @@ export function usePlayback(config: PlaybackConfig) {
         }
 
         clearTimer();
-        instrument.stopAll();
+        pool.stopAll();
         setIsPlaying(false);
         // Back to the start of the range rather than of the song, so pressing Play
         // again repeats what was just heard.
@@ -140,21 +147,26 @@ export function usePlayback(config: PlaybackConfig) {
       }
       const ctx = ctxRef.current;
 
-      if (!instrumentRef.current) {
-        instrumentRef.current = new SmplrPianoInstrument(ctx);
+      if (!poolRef.current) {
+        poolRef.current = new InstrumentPool(ctx);
       }
-      const instrument = instrumentRef.current;
+      const pool = poolRef.current;
+
+      // Reconcile before loading: an instrument added or re-voiced since the last
+      // Play has to exist before there is anything to wait for.
+      pool.ensure(configRef.current.tracks);
 
       if (ctx.state === 'suspended') {
         await ctx.resume();
       }
 
       // First Play in a session waits on the sample download; the transport shows a
-      // loading state rather than appearing to do nothing.
-      if (!instrument.isLoaded) {
+      // loading state rather than appearing to do nothing. Adding an instrument
+      // later puts it back into that state for just that instrument's samples.
+      if (!pool.isLoaded) {
         setIsLoading(true);
         try {
-          await instrument.load();
+          await pool.loadAll();
         } finally {
           setIsLoading(false);
         }
@@ -167,7 +179,7 @@ export function usePlayback(config: PlaybackConfig) {
 
       // Anchoring the reference *behind* `now` by the resume offset is what makes a
       // paused project pick up where it left off with the same arithmetic.
-      songStartClockRef.current = instrument.now() - resumeFrom;
+      songStartClockRef.current = pool.now() - resumeFrom;
       scheduledUpToRef.current = resumeFrom;
 
       setIsPlaying(true);
@@ -184,11 +196,11 @@ export function usePlayback(config: PlaybackConfig) {
 
   const pause = useCallback(() => {
     clearTimer();
-    instrumentRef.current?.stopAll();
+    poolRef.current?.stopAll();
 
-    const instrument = instrumentRef.current;
-    resumeFromRef.current = instrument
-      ? Math.max(0, instrument.now() - songStartClockRef.current)
+    const pool = poolRef.current;
+    resumeFromRef.current = pool
+      ? Math.max(0, pool.now() - songStartClockRef.current)
       : 0;
 
     setIsPaused(true);
@@ -197,7 +209,7 @@ export function usePlayback(config: PlaybackConfig) {
 
   const stop = useCallback(() => {
     clearTimer();
-    instrumentRef.current?.stopAll();
+    poolRef.current?.stopAll();
 
     resumeFromRef.current = 0;
     scheduledUpToRef.current = 0;
@@ -206,13 +218,13 @@ export function usePlayback(config: PlaybackConfig) {
     setCurrentTime(0);
   }, [clearTimer]);
 
-  // Tear down on unmount only. The instrument and context are deliberately kept
-  // across config changes so a BPM edit does not re-download the samples.
+  // Tear down on unmount only. The pool and context are deliberately kept across
+  // config changes so a BPM edit does not re-download the samples.
   useEffect(() => {
     return () => {
       clearTimer();
-      instrumentRef.current?.dispose();
-      instrumentRef.current = null;
+      poolRef.current?.dispose();
+      poolRef.current = null;
       ctxRef.current?.close();
       ctxRef.current = null;
     };
@@ -226,6 +238,6 @@ export function usePlayback(config: PlaybackConfig) {
     play,
     pause,
     stop,
-    instrument: instrumentRef.current,
+    pool: poolRef.current,
   };
 }

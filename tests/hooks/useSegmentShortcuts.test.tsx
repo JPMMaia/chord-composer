@@ -4,6 +4,10 @@ import { useSegmentShortcuts } from '@/hooks/useSegmentShortcuts';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import type { ChordSegment } from '@/types/music';
+import { barChords } from '@/engine/timeline';
+
+/** The instrument being edited — the Piano every project starts with. */
+const trackId = (): string => projectStore.getState().project!.tracks[0].id;
 
 const state = () => projectStore.getState();
 
@@ -20,13 +24,13 @@ function placeChord(overrides: Partial<ChordSegment> = {}): ChordSegment {
     duration: 1,
     ...overrides,
   };
-  state().insertSegment(state().project!.bars[0].id, 0, segment);
+  state().insertSegment(state().project!.bars[0].id, 0, segment, trackId());
   return segment;
 }
 
 /** The live copy of a segment, after the store has rebuilt the project around it. */
 const segmentOf = (id: string): ChordSegment =>
-  state().project!.bars.flatMap(b => b.chords).find(c => c.id === id)!;
+  state().project!.bars.flatMap(b => barChords(b, trackId())).find(c => c.id === id)!;
 
 describe('useSegmentShortcuts', () => {
   beforeEach(() => {
@@ -34,6 +38,8 @@ describe('useSegmentShortcuts', () => {
     state().createProject();
     state().addBar();
     selectionStore.getState().clearSelection();
+    // Select-all acts on the instrument the timeline is showing, so it needs one.
+    selectionStore.getState().selectTrack(trackId());
   });
 
   it('steps the selected chord up a scale degree on ArrowUp', () => {
@@ -155,7 +161,7 @@ describe('useSegmentShortcuts', () => {
         octave: 4,
         duration: 1,
       };
-      state().insertSegment(state().project!.bars[1].id, 0, second);
+      state().insertSegment(state().project!.bars[1].id, 0, second, trackId());
       selectionStore.getState().setSelectedSegments([first.id, second.id]);
       return [first, second];
     }
@@ -201,8 +207,8 @@ describe('useSegmentShortcuts', () => {
       // visual step and one undo entry.
       const after = state().project;
       expect(after).not.toBe(before);
-      expect(after!.bars[0].chords[0].root).toBe('D');
-      expect(after!.bars[1].chords[0].root).toBe('A');
+      expect(barChords(after!.bars[0], trackId())[0].root).toBe('D');
+      expect(barChords(after!.bars[1], trackId())[0].root).toBe('A');
     });
   });
 
@@ -263,6 +269,6 @@ function chordsInBothBars(): void {
     octave: 4,
     duration: 1,
   };
-  state().insertSegment(state().project!.bars[0].id, 0, { ...base, id: 'seg-1' });
-  state().insertSegment(state().project!.bars[1].id, 0, { ...base, id: 'seg-2' });
+  state().insertSegment(state().project!.bars[0].id, 0, { ...base, id: 'seg-1' }, trackId());
+  state().insertSegment(state().project!.bars[1].id, 0, { ...base, id: 'seg-2' }, trackId());
 }

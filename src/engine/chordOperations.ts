@@ -94,10 +94,10 @@ export function reorderChords(
 }
 
 /**
- * Generates the piano-roll notes for a bar from its segments.
+ * Generates the piano-roll notes for one instrument in a bar from its segments.
  *
- * This is the sync engine behind the chord panel: `bar.notes` is derived state,
- * regenerated whenever segments change, so the piano roll always mirrors the
+ * This is the sync engine behind the chord panel: a track's `notes` are derived
+ * state, regenerated whenever segments change, so the piano roll always mirrors the
  * timeline. A chord segment expands to its stacked intervals, voiced in whatever
  * inversion it carries; a note segment yields a single pitch. Segments sit where
  * they were placed, so the gaps between them come out as silence with no further
@@ -106,12 +106,18 @@ export function reorderChords(
  * Deliberately total — it never throws — because it runs on every edit, including
  * transient states like a bar whose last segment was just deleted.
  *
- * @param bar - The bar whose segments drive the notes.
+ * Takes the segments rather than reading them off the bar, because a bar holds one
+ * list per instrument and this runs once per instrument. The bar is still needed
+ * for the scale and meter every instrument shares.
+ *
+ * @param chords - The segments to voice, from one instrument's content.
+ * @param bar - The bar they sit in, for its scale and meter.
  * @param projectTs - Project time signature, used when the bar has none.
  * @param octave - Fallback octave for chord segments that carry none of their own.
- * @returns The notes for this bar, in segment order.
+ * @returns The notes for this instrument in this bar, in segment order.
  */
 export function generateNotesFromSegments(
+  chords: ChordSegment[],
   bar: Bar,
   projectTs: TimeSignature,
   octave: number = 4
@@ -121,7 +127,7 @@ export function generateNotesFromSegments(
 
   // A segment saved before free placement carries no position; packing it is what
   // its position used to mean.
-  for (const segment of withStartBeats(bar.chords)) {
+  for (const segment of withStartBeats(chords)) {
     const currentBeat = segment.startBeat!;
 
     // Refitting owns moving a segment past the bar line into the next bar; drawing

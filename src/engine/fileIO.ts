@@ -1,5 +1,26 @@
-import type { ChordQuality, NoteName, Project, ScaleType, SegmentKind, TimeSignature } from '@/types/music';
-import { isValidTimeSignature } from '@/engine/timeline';
+import type {
+  ChordQuality,
+  ChordSegment,
+  Note,
+  NoteName,
+  Project,
+  ScaleType,
+  SegmentKind,
+  TimeSignature,
+  Track,
+  TrackContent,
+} from '@/types/music';
+import { barChords, isValidTimeSignature } from '@/engine/timeline';
+import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
+import { trackColorAt } from '@/utils/constants';
+
+/**
+ * Track id given to the piano synthesised for a pre-1.5 file that listed no tracks.
+ *
+ * Fixed rather than generated so that loading the same legacy file twice produces
+ * the same project — otherwise a round-trip through save would look like a change.
+ */
+const LEGACY_TRACK_ID = 'track-legacy';
 
 /**
  * Current schema version for forward/backward compatibility.
@@ -18,8 +39,15 @@ import { isValidTimeSignature } from '@/engine/timeline';
  *
  * 1.4 added the play range and the repeat flag. Absent fields mean "no range, no
  * repeat" — play the whole project once — which is all a pre-1.4 file could mean.
+ *
+ * 1.5 made instruments real. A bar's segments and notes moved from flat `chords`
+ * and `notes` arrays into `content`, keyed by track id, and tracks gained a sound,
+ * a colour and a visibility flag. A pre-1.5 file had one timbre — a piano — and no
+ * way to say which instrument played what, so its flat arrays are read into a
+ * single Piano track, synthesised if the file listed no tracks at all. That is
+ * exactly what those files always meant.
  */
-export const SCHEMA_VERSION = '1.4';
+export const SCHEMA_VERSION = '1.5';
 
 /**
  * Validation error returned by validateProject.
@@ -83,6 +111,9 @@ export function serializeProject(project: Project): string {
       pan: t.pan,
       muted: t.muted,
       solo: t.solo,
+      // Absent has always meant visible, so only `false` is worth writing.
+      visible: t.visible !== false,
+      color: t.color,
     })),
     bars: project.bars.map(b => ({
       id: b.id,
@@ -91,26 +122,35 @@ export function serializeProject(project: Project): string {
       // project still serialises exactly as it did under schema 1.0.
       timeSignature: b.timeSignature,
       scale: b.scale,
-      chords: b.chords.map(c => ({
-        id: c.id,
-        startBeat: c.startBeat,
-        kind: c.kind ?? 'chord',
-        romanNumeral: c.romanNumeral,
-        chordSymbol: c.chordSymbol,
-        duration: c.duration,
-        pitch: c.pitch,
-        octave: c.octave,
-        root: c.root,
-        inversion: c.inversion,
-        quality: c.quality,
-      })),
-      notes: b.notes.map(n => ({
-        id: n.id,
-        pitch: n.pitch,
-        startBeat: n.startBeat,
-        duration: n.duration,
-        velocity: n.velocity,
-      })),
+      // Per-instrument from 1.5 on. The inner shape is unchanged from 1.4, so a
+      // reader that understands one bar's chords understands these.
+      content: Object.fromEntries(
+        Object.entries(b.content).map(([trackId, trackContent]) => [
+          trackId,
+          {
+            chords: trackContent.chords.map(c => ({
+              id: c.id,
+              startBeat: c.startBeat,
+              kind: c.kind ?? 'chord',
+              romanNumeral: c.romanNumeral,
+              chordSymbol: c.chordSymbol,
+              duration: c.duration,
+              pitch: c.pitch,
+              octave: c.octave,
+              root: c.root,
+              inversion: c.inversion,
+              quality: c.quality,
+            })),
+            notes: trackContent.notes.map(n => ({
+              id: n.id,
+              pitch: n.pitch,
+              startBeat: n.startBeat,
+              duration: n.duration,
+              velocity: n.velocity,
+            })),
+          },
+        ])
+      ),
     })),
     createdAt: project.createdAt.toISOString(),
     updatedAt: project.updatedAt.toISOString(),
@@ -156,57 +196,107 @@ export function deserializeProject(json: string): Project {
   const timeSignature = p.timeSignature as { beatsPerMeasure: number; beatUnit: number };
 
   // Type-check tracks and bars
-  const tracks = Array.isArray(p.tracks)
+  const parsedTracks = Array.isArray(p.tracks)
     ? (p.tracks as Record<string, unknown>[]).map((t, i) => ({
         id: (t.id as string) ?? `track-${i}`,
         name: (t.name as string) ?? `Track ${i + 1}`,
-        instrument: (t.instrument as string) ?? '',
+        // A pre-1.5 track named no sound; every project was a piano.
+        instrument:
+          typeof t.instrument === 'string' && t.instrument
+            ? t.instrument
+            : DEFAULT_INSTRUMENT_ID,
         volume: typeof t.volume === 'number' ? t.volume : 1.0,
         pan: typeof t.pan === 'number' ? t.pan : 0,
         muted: t.muted === true,
         solo: t.solo === true,
+        visible: t.visible !== false,
+        color: typeof t.color === 'string' ? t.color : trackColorAt(i),
       }))
     : [];
 
+  // A file with no tracks at all is pre-1.5 — and pre-instruments, since 1.5 always
+  // writes at least one. Its flat bar arrays are a piano part, so it gets a piano to
+  // hang them on rather than opening as a project that can play nothing.
+  const tracks: Track[] =
+    parsedTracks.length > 0
+      ? parsedTracks
+      : [
+          {
+            id: LEGACY_TRACK_ID,
+            name: 'Piano',
+            instrument: DEFAULT_INSTRUMENT_ID,
+            volume: 1.0,
+            pan: 0,
+            muted: false,
+            solo: false,
+            visible: true,
+            color: trackColorAt(0),
+          },
+        ];
+
+  /** Where a pre-1.5 bar's flat arrays land: the first instrument. */
+  const legacyTrackId = tracks[0].id;
+
+  const readChords = (raw: unknown, barIndex: number): ChordSegment[] =>
+    Array.isArray(raw)
+      ? (raw as Record<string, unknown>[]).map((c, j) => ({
+          id: (c.id as string) ?? `chord-${barIndex}-${j}`,
+          // Schema 1.1 and earlier had no positions; leaving it undefined lets
+          // the store pack the bar, which is what those files meant.
+          startBeat: typeof c.startBeat === 'number' ? c.startBeat : undefined,
+          // Schema 1.0 had no note segments, so anything unlabelled is a chord.
+          kind: (c.kind === 'note' ? 'note' : 'chord') as SegmentKind,
+          romanNumeral: typeof c.romanNumeral === 'string' ? c.romanNumeral : undefined,
+          chordSymbol: typeof c.chordSymbol === 'string' ? c.chordSymbol : undefined,
+          duration: typeof c.duration === 'number' ? c.duration : 4,
+          pitch: typeof c.pitch === 'number' ? c.pitch : undefined,
+          // Schema 1.2 and earlier had no register; note generation reads an
+          // absent octave as 4, which is the only one those files could mean.
+          octave: typeof c.octave === 'number' ? c.octave : undefined,
+          root: typeof c.root === 'string' ? (c.root as NoteName) : undefined,
+          inversion: typeof c.inversion === 'number' ? c.inversion : 0,
+          quality: typeof c.quality === 'string' ? (c.quality as ChordQuality) : undefined,
+        }))
+      : [];
+
+  const readNotes = (raw: unknown, barIndex: number): Note[] =>
+    Array.isArray(raw)
+      ? (raw as Record<string, unknown>[]).map((n, k) => ({
+          id: (n.id as string) ?? `note-${barIndex}-${k}`,
+          pitch: typeof n.pitch === 'number' ? n.pitch : 60,
+          startBeat: typeof n.startBeat === 'number' ? n.startBeat : 0,
+          duration: typeof n.duration === 'number' ? n.duration : 1,
+          velocity: typeof n.velocity === 'number' ? n.velocity : 100,
+        }))
+      : [];
+
   const bars = Array.isArray(p.bars)
-    ? (p.bars as Record<string, unknown>[]).map((b, i) => ({
-        id: (b.id as string) ?? `bar-${i}`,
-        barIndex: typeof b.barIndex === 'number' ? b.barIndex : i,
-        // A missing — or nonsensical — meter means the bar follows the project's.
-        timeSignature: isValidTimeSignature(b.timeSignature as TimeSignature | undefined)
-          ? (b.timeSignature as TimeSignature)
-          : undefined,
-        scale: (b.scale as { root: NoteName; type: ScaleType }) ?? { root: 'C', type: 'major' },
-        chords: Array.isArray(b.chords)
-          ? (b.chords as Record<string, unknown>[]).map((c, j) => ({
-              id: (c.id as string) ?? `chord-${i}-${j}`,
-              // Schema 1.1 and earlier had no positions; leaving it undefined lets
-              // the store pack the bar, which is what those files meant.
-              startBeat: typeof c.startBeat === 'number' ? c.startBeat : undefined,
-              // Schema 1.0 had no note segments, so anything unlabelled is a chord.
-              kind: (c.kind === 'note' ? 'note' : 'chord') as SegmentKind,
-              romanNumeral: typeof c.romanNumeral === 'string' ? c.romanNumeral : undefined,
-              chordSymbol: typeof c.chordSymbol === 'string' ? c.chordSymbol : undefined,
-              duration: typeof c.duration === 'number' ? c.duration : 4,
-              pitch: typeof c.pitch === 'number' ? c.pitch : undefined,
-              // Schema 1.2 and earlier had no register; note generation reads an
-              // absent octave as 4, which is the only one those files could mean.
-              octave: typeof c.octave === 'number' ? c.octave : undefined,
-              root: typeof c.root === 'string' ? (c.root as NoteName) : undefined,
-              inversion: typeof c.inversion === 'number' ? c.inversion : 0,
-              quality: typeof c.quality === 'string' ? (c.quality as ChordQuality) : undefined,
-            }))
-          : [],
-        notes: Array.isArray(b.notes)
-          ? (b.notes as Record<string, unknown>[]).map((n, k) => ({
-              id: (n.id as string) ?? `note-${i}-${k}`,
-              pitch: typeof n.pitch === 'number' ? n.pitch : 60,
-              startBeat: typeof n.startBeat === 'number' ? n.startBeat : 0,
-              duration: typeof n.duration === 'number' ? n.duration : 1,
-              velocity: typeof n.velocity === 'number' ? n.velocity : 100,
-            }))
-          : [],
-      }))
+    ? (p.bars as Record<string, unknown>[]).map((b, i) => {
+        // 1.5 and later carry `content`; anything earlier carries flat arrays that
+        // belong to the one instrument those files could express.
+        const content: Record<string, TrackContent> =
+          b.content && typeof b.content === 'object'
+            ? Object.fromEntries(
+                Object.entries(b.content as Record<string, Record<string, unknown>>).map(
+                  ([trackId, raw]) => [
+                    trackId,
+                    { chords: readChords(raw?.chords, i), notes: readNotes(raw?.notes, i) },
+                  ]
+                )
+              )
+            : { [legacyTrackId]: { chords: readChords(b.chords, i), notes: readNotes(b.notes, i) } };
+
+        return {
+          id: (b.id as string) ?? `bar-${i}`,
+          barIndex: typeof b.barIndex === 'number' ? b.barIndex : i,
+          // A missing — or nonsensical — meter means the bar follows the project's.
+          timeSignature: isValidTimeSignature(b.timeSignature as TimeSignature | undefined)
+            ? (b.timeSignature as TimeSignature)
+            : undefined,
+          scale: (b.scale as { root: NoteName; type: ScaleType }) ?? { root: 'C', type: 'major' },
+          content,
+        };
+      })
     : [];
 
   // A range needs both bounds to mean anything; a half-written one is discarded
@@ -308,10 +398,20 @@ export function validateProject(project: Project): ValidationResult {
       const { beatsPerMeasure, beatUnit } = b.timeSignature;
       errors.push(`Bar ${i}: invalid time signature ${beatsPerMeasure}/${beatUnit}.`);
     }
-    for (let j = 0; j < b.chords.length; j++) {
-      const c = b.chords[j];
-      if (c.quality && !VALID_QUALITIES.includes(c.quality)) {
-        errors.push(`Bar ${i}, chord ${j}: invalid quality "${c.quality}".`);
+    // Content keyed by an instrument that does not exist would be silently
+    // unplayable and invisible, so it is worth catching at the door.
+    const trackIds = new Set(project.tracks.map(t => t.id));
+    for (const trackId of Object.keys(b.content)) {
+      if (!trackIds.has(trackId)) {
+        errors.push(`Bar ${i}: content for unknown instrument "${trackId}".`);
+        continue;
+      }
+      const chords = barChords(b, trackId);
+      for (let j = 0; j < chords.length; j++) {
+        const c = chords[j];
+        if (c.quality && !VALID_QUALITIES.includes(c.quality)) {
+          errors.push(`Bar ${i}, chord ${j}: invalid quality "${c.quality}".`);
+        }
       }
     }
   }

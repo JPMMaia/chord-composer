@@ -74,6 +74,31 @@ export const PIANO_ROLL_KEY_COUNT = PIANO_ROLL_MAX_MIDI - PIANO_ROLL_MIN_MIDI + 
 export const MIN_SEGMENT_OCTAVE = 1;
 export const MAX_SEGMENT_OCTAVE = 7;
 
+/**
+ * Colours instruments' notes are drawn in on the piano roll, assigned by track
+ * index and cycled when there are more instruments than hues.
+ *
+ * The first is the blue the roll drew every note in before instruments existed,
+ * so a single-piano project looks exactly as it always did. The rest are spaced
+ * around the wheel far enough to stay apart when dimmed to 15% alpha, which is
+ * how an unselected instrument's notes in an unselected bar are painted.
+ */
+export const TRACK_COLORS = [
+  '#3b82f6', // blue
+  '#f59e0b', // amber
+  '#10b981', // emerald
+  '#ec4899', // pink
+  '#8b5cf6', // violet
+  '#ef4444', // red
+  '#14b8a6', // teal
+  '#a3e635', // lime
+];
+
+/** The colour an instrument draws in, by its position in the project. */
+export function trackColorAt(index: number): string {
+  return TRACK_COLORS[index % TRACK_COLORS.length];
+}
+
 /** Default BPM */
 export const DEFAULT_BPM = 120;
 

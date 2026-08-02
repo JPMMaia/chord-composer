@@ -9,7 +9,6 @@ import {
 import { midiToProject, projectToMidi } from '@/engine/midiExporter';
 import { projectToMusicXML } from '@/engine/musicxmlExporter';
 import { projectStore } from '@/store/projectStore';
-import { trackStore } from '@/store/trackStore';
 
 /** How long to wait after the last change before writing an auto-save. */
 const AUTO_SAVE_DELAY_MS = 5000;
@@ -60,7 +59,6 @@ function downloadBlob(blob: Blob, filename: string): void {
 export function useFileIO(): UseFileIOResult {
   const project = projectStore(state => state.project);
   const loadProject = projectStore(state => state.loadProject);
-  const setTracks = trackStore(state => state.setTracks);
 
   const [error, setError] = useState<string | null>(null);
   const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>('idle');
@@ -89,13 +87,15 @@ export function useFileIO(): UseFileIOResult {
 
   const clearError = useCallback(() => setError(null), []);
 
-  /** Apply a loaded project to the project and track stores. */
+  /**
+   * Apply a loaded project. Instruments ride along inside it, so this is now just
+   * `loadProject` — it stays as a named seam because three callers share it.
+   */
   const applyProject = useCallback(
     (loaded: Project) => {
       loadProject(loaded);
-      setTracks(loaded.tracks);
     },
-    [loadProject, setTracks]
+    [loadProject]
   );
 
   const handleSave = useCallback(async () => {

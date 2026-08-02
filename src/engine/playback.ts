@@ -1,5 +1,5 @@
-import type { Bar, TimeSignature } from '@/types/music';
-import { getBarStartBeat, getTotalBeats } from '@/engine/timeline';
+import type { Bar, TimeSignature, Track } from '@/types/music';
+import { allBarNotes, getBarStartBeat, getTotalBeats } from '@/engine/timeline';
 
 export interface NoteTiming {
   midiNote: number;
@@ -7,13 +7,20 @@ export interface NoteTiming {
   duration: number;
   velocity: number;
   barIndex: number;
+  /** The instrument that plays this note. */
+  trackId: string;
 }
 
 export interface PlaybackConfig {
   bpm: number;
   timeSignature: TimeSignature;
   bars: Bar[];
-  tracks: string[];
+  /**
+   * The project's instruments. Mute and solo are read at dispatch time rather than
+   * filtered out here, so toggling either mid-playback takes effect immediately
+   * instead of at the next Play.
+   */
+  tracks: Track[];
   /** Play range bounds, in beats. Null means "the whole project". */
   loopStart: number | null;
   loopEnd: number | null;
@@ -29,10 +36,14 @@ function beatDuration(bpm: number): number {
 }
 
 /**
- * Calculate timing information for all notes in all bars.
+ * Calculate timing information for every instrument's notes in all bars.
  *
  * Bars may each be in their own metre, so a bar's position is the accumulated
  * length of everything before it rather than `barIndex × beatsPerMeasure`.
+ *
+ * Every instrument's notes are included regardless of mute and solo: the result is
+ * computed once per Play, and filtering here would freeze the mute state at that
+ * moment. Whether a note is actually sounded is decided when it is dispatched.
  */
 export function calculateNoteTiming(config: PlaybackConfig): NoteTiming[] {
   const beatDur = beatDuration(config.bpm);
@@ -42,13 +53,14 @@ export function calculateNoteTiming(config: PlaybackConfig): NoteTiming[] {
     const bar = config.bars[i];
     const barStartBeat = getBarStartBeat(config.bars, i, config.timeSignature);
 
-    for (const note of bar.notes) {
+    for (const { note, trackId } of allBarNotes(bar)) {
       timings.push({
         midiNote: note.pitch,
         startTime: (barStartBeat + note.startBeat) * beatDur,
         duration: note.duration * beatDur,
         velocity: note.velocity,
         barIndex: bar.barIndex,
+        trackId,
       });
     }
   }

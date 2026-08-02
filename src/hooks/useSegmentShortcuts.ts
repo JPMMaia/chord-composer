@@ -52,7 +52,11 @@ export function useSegmentShortcuts(): void {
       if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'a' || e.key === 'A')) {
         const project = projectStore.getState().project;
         if (!project) return;
-        setSelectedSegments(flattenSegments(project.bars).map(s => s.id));
+        // Select-all means "everything the timeline is showing", which is the
+        // selected instrument's blocks — not every instrument's at once.
+        const trackId = selectionStore.getState().selectedTrackId;
+        if (!trackId) return;
+        setSelectedSegments(flattenSegments(project.bars, trackId).map(s => s.id));
         e.preventDefault();
         return;
       }

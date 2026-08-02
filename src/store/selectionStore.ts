@@ -3,11 +3,17 @@ import { create } from 'zustand';
 interface SelectionState {
   /** Bar whose scale drives the palette and the properties panel. */
   selectedBarId: string | null;
+  /**
+   * Instrument being edited. The chord timeline shows only this instrument's
+   * blocks; the piano roll draws every visible instrument but highlights this one.
+   */
+  selectedTrackId: string | null;
   /** Every selected block, in project order. Empty when nothing is selected. */
   selectedSegmentIds: string[];
   /** Where a Shift+click range measures from — the last block picked on its own. */
   anchorSegmentId: string | null;
   selectBar: (barId: string | null) => void;
+  selectTrack: (trackId: string | null) => void;
   /** Replace the selection with one block, or clear it. */
   selectSegment: (segmentId: string | null) => void;
   setSelectedSegments: (segmentIds: string[]) => void;
@@ -30,11 +36,22 @@ interface SelectionState {
  */
 export const selectionStore = create<SelectionState>((set, get) => ({
   selectedBarId: null,
+  selectedTrackId: null,
   selectedSegmentIds: [],
   anchorSegmentId: null,
 
   selectBar: (barId: string | null) => {
     set({ selectedBarId: barId });
+  },
+
+  /**
+   * Switch the instrument being edited, dropping the block selection with it —
+   * those ids belong to the instrument being left, and the timeline is about to
+   * stop showing them.
+   */
+  selectTrack: (trackId: string | null) => {
+    if (get().selectedTrackId === trackId) return;
+    set({ selectedTrackId: trackId, selectedSegmentIds: [], anchorSegmentId: null });
   },
 
   selectSegment: (segmentId: string | null) => {
@@ -69,7 +86,12 @@ export const selectionStore = create<SelectionState>((set, get) => ({
   },
 
   clearSelection: () => {
-    set({ selectedBarId: null, selectedSegmentIds: [], anchorSegmentId: null });
+    set({
+      selectedBarId: null,
+      selectedTrackId: null,
+      selectedSegmentIds: [],
+      anchorSegmentId: null,
+    });
   },
 }));
 

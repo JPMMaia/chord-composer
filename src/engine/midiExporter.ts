@@ -1,6 +1,8 @@
 import type { Bar, Note, Project, TimeSignature, Track } from '@/types/music';
 import { generateId } from '@/utils/id';
-import { getBarStartBeat, getBarTimeSignature } from '@/engine/timeline';
+import { barNotes, getBarStartBeat, getBarTimeSignature } from '@/engine/timeline';
+import { gmInstrumentId, gmProgramNumber } from '@/engine/instrumentCatalog';
+import { trackColorAt } from '@/utils/constants';
 
 // ---------------------------------------------------------------------------
 // MIDI constants
@@ -19,6 +21,8 @@ const META_END_OF_TRACK = 0x2f;
 
 const NOTE_OFF = 0x80;
 const NOTE_ON = 0x90;
+/** Selects the General MIDI sound a channel plays. */
+const PROGRAM_CHANGE = 0xc0;
 
 /** Default ticks per quarter note (PPQ). */
 const DEFAULT_PPQ = 96;
@@ -114,9 +118,9 @@ function channelForTrack(index: number): number {
 /**
  * Convert a Project to a Format-1 MIDI file.
  *
- * One MTrk chunk is written per project track; the first chunk also carries the
- * tempo and time-signature meta events. Notes belong to bars rather than tracks
- * in the project model, so all notes are written to the first track.
+ * One MTrk chunk is written per project instrument, carrying that instrument's own
+ * notes and a Program Change naming its General MIDI sound. The first chunk also
+ * carries the tempo and time-signature meta events.
  */
 export function projectToMidi(project: Project): Uint8Array<ArrayBuffer> {
   const ppq = DEFAULT_PPQ;
@@ -138,6 +142,8 @@ export function projectToMidi(project: Project): Uint8Array<ArrayBuffer> {
       })(),
     });
 
+    const channel = channelForTrack(t);
+
     if (t === 0) {
       const usPerBeat = Math.round(MICROSECONDS_PER_MINUTE / project.bpm);
       events.push({
@@ -152,7 +158,19 @@ export function projectToMidi(project: Project): Uint8Array<ArrayBuffer> {
       });
 
       events.push(...timeSignatureEvents(project.bars, project.timeSignature, ppq));
-      events.push(...noteEvents(project.bars, project.timeSignature, ppq, channelForTrack(t)));
+    }
+
+    if (track) {
+      // Name the instrument's sound before any note sounds on this channel.
+      events.push({
+        tick: 0,
+        order: 2,
+        data: [PROGRAM_CHANGE | channel, gmProgramNumber(track.instrument) & 0x7f],
+      });
+
+      events.push(
+        ...noteEvents(project.bars, project.timeSignature, ppq, channel, track.id)
+      );
     }
 
     chunks.push(buildTrackChunk(events));
@@ -216,12 +234,13 @@ function timeSignatureEvents(
   return events;
 }
 
-/** Build note-on/note-off events for every note in every bar. */
+/** Build note-on/note-off events for one instrument's notes across every bar. */
 function noteEvents(
   bars: Bar[],
   projectTs: TimeSignature,
   ppq: number,
-  channel: number
+  channel: number,
+  trackId: string
 ): AbsoluteEvent[] {
   const events: AbsoluteEvent[] = [];
 
@@ -229,7 +248,7 @@ function noteEvents(
     const bar = bars[i];
     // Bars may each be in their own metre, so accumulate rather than multiply.
     const barStartTick = Math.round(getBarStartBeat(bars, i, projectTs) * ppq);
-    for (const note of bar.notes) {
+    for (const note of barNotes(bar, trackId)) {
       const startTick = barStartTick + Math.round(note.startBeat * ppq);
       // Zero-length notes would produce a note-off before the note-on is heard.
       const durationTicks = Math.max(1, Math.round(note.duration * ppq));
@@ -320,6 +339,20 @@ export function midiToProject(midiBytes: Uint8Array): Project {
   const timeSignature = readTimeSignature(allEvents);
   const notes = readNotes(trackEvents, division);
 
+  const importedTracks: Track[] = trackEvents.map((events, i) => ({
+    id: generateId(),
+    name: readTrackName(events) ?? `Track ${i + 1}`,
+    // Honour the Program Change if the file carries one — which is what our own
+    // exporter writes, so a MIDI round-trip preserves each instrument's sound.
+    instrument: gmInstrumentId(readProgram(events) ?? 0),
+    volume: 0.8,
+    pan: 0,
+    muted: false,
+    solo: false,
+    visible: true,
+    color: trackColorAt(i),
+  }));
+
   return {
     id: generateId(),
     name: readTrackName(trackEvents[0]) ?? 'Imported MIDI',
@@ -327,16 +360,11 @@ export function midiToProject(midiBytes: Uint8Array): Project {
     timeSignature,
     key: 'C',
     keyMode: 'major',
-    tracks: trackEvents.map((events, i) => ({
-      id: generateId(),
-      name: readTrackName(events) ?? `Track ${i + 1}`,
-      instrument: 'acoustic_grand_piano',
-      volume: 0.8,
-      pan: 0,
-      muted: false,
-      solo: false,
-    })),
-    bars: notesToBars(notes, timeSignature.beatsPerMeasure),
+    tracks: importedTracks,
+    // The reader merges every chunk's notes into one list, so they all land on the
+    // first instrument. The other chunks still become instruments — their names and
+    // sounds are real information — but they come in empty.
+    bars: notesToBars(notes, timeSignature.beatsPerMeasure, importedTracks[0].id),
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -364,6 +392,16 @@ function readTimeSignature(events: ParsedEvent[]): { beatsPerMeasure: number; be
     }
   }
   return { beatsPerMeasure: 4, beatUnit: 4 };
+}
+
+/** Read the first Program Change of a track, if it has one. */
+function readProgram(events: ParsedEvent[]): number | null {
+  for (const event of events) {
+    if ((event.status & 0xf0) === PROGRAM_CHANGE) {
+      return event.data[0] ?? null;
+    }
+  }
+  return null;
 }
 
 /** Read the first track-name meta event of a track, if any. */
@@ -414,8 +452,15 @@ function readNotes(trackEvents: ParsedEvent[][], ppq: number): Note[] {
   return notes.sort((a, b) => a.startBeat - b.startBeat || a.pitch - b.pitch);
 }
 
-/** Distribute notes into bars, converting absolute beats to bar-relative beats. */
-function notesToBars(notes: Note[], beatsPerMeasure: number): Bar[] {
+/**
+ * Distribute notes into bars, converting absolute beats to bar-relative beats.
+ *
+ * Everything lands on `trackId`. The reader merges all MTrk chunks into one note
+ * list before this point, so an imported file arrives as a single part regardless
+ * of how many tracks it was written with — splitting it back out by channel would
+ * be a different feature.
+ */
+function notesToBars(notes: Note[], beatsPerMeasure: number, trackId: string): Bar[] {
   const lastBeat = notes.reduce((max, n) => Math.max(max, n.startBeat), 0);
   const barCount = Math.max(1, Math.floor(lastBeat / beatsPerMeasure) + 1);
 
@@ -423,13 +468,12 @@ function notesToBars(notes: Note[], beatsPerMeasure: number): Bar[] {
     id: generateId(),
     barIndex,
     scale: { root: 'C', type: 'major' },
-    chords: [],
-    notes: [],
+    content: { [trackId]: { chords: [], notes: [] } },
   }));
 
   for (const note of notes) {
     const barIndex = Math.min(barCount - 1, Math.floor(note.startBeat / beatsPerMeasure));
-    bars[barIndex].notes.push({
+    bars[barIndex].content[trackId].notes.push({
       ...note,
       startBeat: note.startBeat - barIndex * beatsPerMeasure,
     });

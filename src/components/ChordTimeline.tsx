@@ -4,6 +4,7 @@ import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { editorStore } from '@/store/editorStore';
 import {
+  barChords,
   flattenSegments,
   getBarBeats,
   getBarStartBeat,
@@ -111,6 +112,9 @@ export const ChordTimeline: React.FC = () => {
   const moveSegments = projectStore(s => s.moveSegments);
 
   const selectedBarId = selectionStore(s => s.selectedBarId);
+  // The timeline is the *editing* surface, so it shows one instrument at a time.
+  // Other instruments stay visible on the piano roll below, in their own colours.
+  const selectedTrackId = selectionStore(s => s.selectedTrackId);
   const selectedSegmentIds = selectionStore(s => s.selectedSegmentIds);
   const selectBar = selectionStore(s => s.selectBar);
   const selectSegment = selectionStore(s => s.selectSegment);
@@ -304,16 +308,30 @@ export const ChordTimeline: React.FC = () => {
   // a dead id and arm the keyboard shortcuts over nothing. Only write on a real
   // shrink, or this loops against its own update.
   useEffect(() => {
-    if (!project || selectedSegmentIds.length === 0) return;
-    const live = new Set(flattenSegments(project.bars).map(s => s.id));
+    if (!project || !selectedTrackId || selectedSegmentIds.length === 0) return;
+    const live = new Set(flattenSegments(project.bars, selectedTrackId).map(s => s.id));
     const kept = selectedSegmentIds.filter(id => live.has(id));
     if (kept.length !== selectedSegmentIds.length) setSelectedSegments(kept);
-  }, [project, selectedSegmentIds, setSelectedSegments]);
+  }, [project, selectedTrackId, selectedSegmentIds, setSelectedSegments]);
 
   if (!project) return null;
 
+  if (!selectedTrackId) {
+    return (
+      <div
+        data-testid="chord-timeline"
+        className="shrink-0 flex items-center justify-center h-24 bg-gray-900 border-b border-gray-700"
+      >
+        <p className="text-xs text-gray-500 italic">
+          Select an instrument to edit its notes.
+        </p>
+      </div>
+    );
+  }
+
   const { bars, timeSignature: projectTs } = project;
   const totalBeats = getTotalBeats(bars, projectTs);
+  const selectedTrack = project.tracks.find(t => t.id === selectedTrackId);
 
   /** The range to draw: the one being dragged if there is one, else the stored one. */
   const shownRange = rangeDrag
@@ -376,16 +394,19 @@ export const ChordTimeline: React.FC = () => {
     insertSegment(
       bar.id,
       snapBeat(beatAt(e), snapBeats),
-      paletteItemToSegment(item, DROP_DURATION_BEATS)
+      paletteItemToSegment(item, DROP_DURATION_BEATS),
+      selectedTrackId
     );
     selectBar(bar.id);
   };
 
   /** Where a block sits, by id, across the whole project — the drag's starting point. */
   const placementOf = (segmentId: string): DragOrigin | null => {
-    const barIndex = bars.findIndex(bar => bar.chords.some(c => c.id === segmentId));
+    const barIndex = bars.findIndex(bar =>
+      barChords(bar, selectedTrackId).some(c => c.id === segmentId)
+    );
     if (barIndex < 0) return null;
-    const segment = bars[barIndex].chords.find(c => c.id === segmentId)!;
+    const segment = barChords(bars[barIndex], selectedTrackId).find(c => c.id === segmentId)!;
     return { barIndex, startBeat: segment.startBeat ?? 0, duration: segment.duration };
   };
 
@@ -414,7 +435,7 @@ export const ChordTimeline: React.FC = () => {
     const current = selectionStore.getState().selectedSegmentIds;
 
     if (e.shiftKey) {
-      const order = flattenSegments(bars).map(s => s.id);
+      const order = flattenSegments(bars, selectedTrackId).map(s => s.id);
       const anchor = selectionStore.getState().anchorSegmentId;
       const from = anchor ? order.indexOf(anchor) : -1;
       const to = order.indexOf(segment.id);
@@ -474,18 +495,19 @@ export const ChordTimeline: React.FC = () => {
    * above their neighbours do so via z-index instead.
    */
   const laneSegments = (bar: Bar, barIndex: number): ChordSegment[] => {
-    if (!drag) return bar.chords;
+    const chords = barChords(bar, selectedTrackId);
+    if (!drag) return chords;
 
     const at = (segmentId: string) => drag.preview.get(segmentId);
 
-    const own = bar.chords
+    const own = chords
       .filter(s => (at(s.id) ? at(s.id)!.barIndex === barIndex : true))
       .map(s => (at(s.id) ? { ...s, startBeat: at(s.id)!.startBeat } : s));
 
     // Blocks dragged in from another bar, which this lane has no copy of yet.
     const incoming = bars
       .filter((_, index) => index !== barIndex)
-      .flatMap(other => other.chords)
+      .flatMap(other => barChords(other, selectedTrackId))
       .filter(s => at(s.id)?.barIndex === barIndex)
       .map(s => ({ ...s, startBeat: at(s.id)!.startBeat }));
 
@@ -517,6 +539,19 @@ export const ChordTimeline: React.FC = () => {
             ))}
           </select>
         </label>
+
+        {/* Which instrument a drop will land on. The lanes show only this one's
+            blocks, so without this the timeline going empty on an instrument
+            switch reads as data loss. */}
+        {selectedTrack && (
+          <span data-testid="timeline-track-name" className="flex items-center gap-1.5">
+            <span
+              style={{ backgroundColor: selectedTrack.color ?? undefined }}
+              className="w-2 h-2 rounded-sm"
+            />
+            <span className="text-gray-300">{selectedTrack.name}</span>
+          </span>
+        )}
       </div>
 
       <div className="flex items-stretch">

@@ -1,5 +1,5 @@
 import type { Bar, ChordQuality, ChordSegment, Note, NoteName, Project, TimeSignature } from '@/types/music';
-import { getBarTimeSignature } from '@/engine/timeline';
+import { barChords, barNotes, getBarTimeSignature } from '@/engine/timeline';
 
 /**
  * MusicXML divisions per quarter note. Four divisions resolve down to a
@@ -177,7 +177,7 @@ export function projectToMusicXML(project: Project): string {
     // A part needs at least one measure to be well-formed.
     const measures: Bar[] = bars.length > 0
       ? bars
-      : [{ id: 'empty', barIndex: 0, scale: { root: key, type: 'major' }, chords: [], notes: [] }];
+      : [{ id: 'empty', barIndex: 0, scale: { root: key, type: 'major' }, content: {} }];
 
     // A measure restates the metre only when it differs from the one before it.
     let previousTs: TimeSignature | null = null;
@@ -231,12 +231,15 @@ export function projectToMusicXML(project: Project): string {
       // Chord symbols are attached to the first part only; repeating them on
       // every staff would duplicate the harmony in notation software.
       if (t === 0) {
-        for (const chord of bar.chords) {
+        for (const chord of barChords(bar, tracks[t].id)) {
           lines.push(...renderHarmony(chord));
         }
       }
 
-      lines.push(...renderMeasureNotes(bar.notes, barTs.beatsPerMeasure, useFlats));
+      // Each part carries only its own instrument's notes.
+      lines.push(
+        ...renderMeasureNotes(barNotes(bar, tracks[t].id), barTs.beatsPerMeasure, useFlats)
+      );
 
       lines.push('    </measure>');
     });

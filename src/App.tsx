@@ -13,7 +13,12 @@ import { useSegmentShortcuts } from '@/hooks/useSegmentShortcuts';
 import { useFollowPlayhead } from '@/hooks/useFollowPlayhead';
 import { editorStore } from '@/store/editorStore';
 import { songTimeToBeat } from '@/engine/scheduler';
-import { getBarIndexAtBeat, getTotalBeats, MIN_SEGMENT_BEATS } from '@/engine/timeline';
+import {
+  barContent,
+  getBarIndexAtBeat,
+  getTotalBeats,
+  MIN_SEGMENT_BEATS,
+} from '@/engine/timeline';
 import { midiToNoteLabel } from '@/engine/chords';
 import type { Bar, NoteName, ScaleType, TimeSignature } from '@/types/music';
 import {
@@ -52,6 +57,8 @@ function App() {
   const updateBarScale = projectStore(s => s.updateBarScale);
 
   const selectedBarId = selectionStore(s => s.selectedBarId);
+  const selectedTrackId = selectionStore(s => s.selectedTrackId);
+  const selectTrack = selectionStore(s => s.selectTrack);
   // The inspector speaks about one block, so it shows nothing while several are
   // selected — the keyboard shortcuts are what act on the whole selection.
   const selectedSegmentId = selectionStore(soleSelectedSegmentId);
@@ -86,7 +93,19 @@ function App() {
     }
   }, [project, selectedBarId, selectBar]);
 
-  const selectedSegment = selectedBar?.chords.find(c => c.id === selectedSegmentId);
+  // Likewise the first instrument, so the timeline always has somewhere to drop a
+  // block. Also re-homes the selection when the selected instrument is removed.
+  useEffect(() => {
+    if (!project || project.tracks.length === 0) return;
+    if (selectedTrackId && project.tracks.some(t => t.id === selectedTrackId)) return;
+    selectTrack(project.tracks[0].id);
+  }, [project, selectedTrackId, selectTrack]);
+
+  const selectedBarContent =
+    selectedBar && selectedTrackId ? barContent(selectedBar, selectedTrackId) : null;
+  const selectedSegment = selectedBarContent?.chords.find(c => c.id === selectedSegmentId);
+  const selectedBarSegmentCount = selectedBarContent?.chords.length ?? 0;
+  const selectedBarNoteCount = selectedBarContent?.notes.length ?? 0;
 
   // Playback config
   const playbackConfig = project
@@ -94,7 +113,7 @@ function App() {
         bpm: project.bpm,
         timeSignature: project.timeSignature,
         bars: project.bars,
-        tracks: ['main'],
+        tracks: project.tracks,
         loopStart: project.loopStart ?? null,
         loopEnd: project.loopEnd ?? null,
         loopEnabled: project.loopEnabled ?? false,
@@ -178,6 +197,8 @@ function App() {
               <PianoRoll
                 bars={project.bars}
                 selectedBarId={selectedBar.id}
+                tracks={project.tracks}
+                selectedTrackId={selectedTrackId}
                 playheadBeat={playheadBeat}
                 pixelsPerBeat={PIXELS_PER_BEAT}
                 pixelsPerOctave={120}
@@ -283,10 +304,12 @@ function App() {
 
               {/* Bar Info */}
               <div className="pt-2 border-t border-gray-700 space-y-2">
+                {/* Counts for the instrument being edited, not the whole bar —
+                    this panel sits beside a timeline showing only that one. */}
                 <div className="text-xs text-gray-400">
-                  {selectedBar.chords.length} segment
-                  {selectedBar.chords.length !== 1 ? 's' : ''} · {selectedBar.notes.length} note
-                  {selectedBar.notes.length !== 1 ? 's' : ''}
+                  {selectedBarSegmentCount} segment
+                  {selectedBarSegmentCount !== 1 ? 's' : ''} · {selectedBarNoteCount} note
+                  {selectedBarNoteCount !== 1 ? 's' : ''}
                 </div>
                 <button
                   onClick={addBar}

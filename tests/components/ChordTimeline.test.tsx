@@ -7,7 +7,7 @@ import { editorStore } from '@/store/editorStore';
 import { getPaletteItems } from '@/engine/palette';
 import type { PaletteItem } from '@/engine/palette';
 import type { ChordSegment } from '@/types/music';
-import { DEFAULT_SNAP_BEATS } from '@/engine/timeline';
+import { barChords, barNotes, DEFAULT_SNAP_BEATS } from '@/engine/timeline';
 import { PIANO_KEYS_WIDTH, PIXELS_PER_BEAT } from '@/utils/constants';
 
 /** Minimal stand-in for the DataTransfer jsdom does not implement. */
@@ -30,13 +30,18 @@ function bars() {
   return projectStore.getState().project!.bars;
 }
 
+/** The instrument the timeline is editing — the Piano every project starts with. */
+function trackId(): string {
+  return projectStore.getState().project!.tracks[0].id;
+}
+
 function segments(): ChordSegment[] {
-  return bars().flatMap(b => b.chords);
+  return bars().flatMap(b => barChords(b, trackId()));
 }
 
 /** `id@start` for a bar's blocks, so placement assertions read at a glance. */
 function layout(barIndex: number): string[] {
-  return bars()[barIndex].chords.map(c => `${c.id}@${c.startBeat}`);
+  return barChords(bars()[barIndex], trackId()).map(c => `${c.id}@${c.startBeat}`);
 }
 
 /**
@@ -111,6 +116,8 @@ describe('ChordTimeline', () => {
     projectStore.getState().createProject();
     projectStore.getState().addBar();
     projectStore.getState().addBar();
+    // The timeline edits one instrument, so it needs one selected to show lanes.
+    selectionStore.getState().selectTrack(trackId());
   });
 
   afterEach(() => {
@@ -182,7 +189,7 @@ describe('ChordTimeline', () => {
     dropAt(bars()[0].id, cMajorChords()[0], 0);
 
     // C major triad in the middle-C octave.
-    expect(bars()[0].notes.map(n => n.pitch)).toEqual([60, 64, 67]);
+    expect(barNotes(bars()[0], trackId()).map(n => n.pitch)).toEqual([60, 64, 67]);
   });
 
   describe('grid snapping', () => {
@@ -238,7 +245,7 @@ describe('ChordTimeline', () => {
       dropAt(bars()[0].id, cMajorChords()[0], 2);
 
       expect(segments()[0].startBeat).toBe(2);
-      expect(bars()[0].notes.every(n => n.startBeat === 2)).toBe(true);
+      expect(barNotes(bars()[0], trackId()).every(n => n.startBeat === 2)).toBe(true);
     });
 
     it('pushes the block it is dropped on to the right', () => {
@@ -287,7 +294,7 @@ describe('ChordTimeline', () => {
 
       dragBlock(id, bars()[1].id, 0, 1);
 
-      expect(bars()[0].chords).toHaveLength(0);
+      expect(barChords(bars()[0], trackId())).toHaveLength(0);
       expect(layout(1)).toEqual([`${id}@1`]);
     });
 
@@ -350,7 +357,7 @@ describe('ChordTimeline', () => {
 
       dragBlock(first, bars()[1].id, 1, 0);
 
-      expect(bars()[0].chords).toHaveLength(0);
+      expect(barChords(bars()[0], trackId())).toHaveLength(0);
       expect(layout(1)).toEqual([`${first}@0`, `${second}@1`]);
     });
 
@@ -511,7 +518,7 @@ describe('ChordTimeline', () => {
 
     const block = screen.getByTestId(`chord-block-${segments()[0].id}`);
     expect(within(block).getByText('E4')).toBeInTheDocument();
-    expect(bars()[0].notes.map(n => n.pitch)).toEqual([64]);
+    expect(barNotes(bars()[0], trackId()).map(n => n.pitch)).toEqual([64]);
   });
 
   it('badges a chord segment with its octave, but not a note segment', () => {
@@ -534,7 +541,7 @@ describe('ChordTimeline', () => {
     expect(screen.getByTestId(`octave-badge-${low.id}`)).toHaveTextContent('oct 3');
     expect(screen.getByTestId(`octave-badge-${high.id}`)).toHaveTextContent('oct 6');
     // And the generated notes really are three octaves apart.
-    const pitches = bars()[0].notes.map(n => n.pitch);
+    const pitches = barNotes(bars()[0], trackId()).map(n => n.pitch);
     expect(pitches.slice(3)).toEqual(pitches.slice(0, 3).map(p => p + 36));
   });
 
@@ -583,7 +590,7 @@ describe('ChordTimeline', () => {
     fireEvent.click(screen.getByLabelText('Remove segment'));
 
     expect(segments()).toHaveLength(0);
-    expect(bars()[0].notes).toHaveLength(0);
+    expect(barNotes(bars()[0], trackId())).toHaveLength(0);
   });
 
   it('sizes each block to its duration and places it at its start beat', () => {
@@ -623,7 +630,7 @@ describe('ChordTimeline', () => {
     fireEvent.pointerUp(window, { clientX: PIXELS_PER_BEAT, pointerId: 1 });
 
     expect(segments()[0].duration).toBe(2);
-    expect(bars()[0].notes[0].duration).toBe(2);
+    expect(barNotes(bars()[0], trackId())[0].duration).toBe(2);
     // The block must widen with it, or the timeline stops matching the piano roll.
     expect(screen.getByTestId(`chord-block-${id}`)).toHaveStyle({
       width: `${2 * PIXELS_PER_BEAT}px`,

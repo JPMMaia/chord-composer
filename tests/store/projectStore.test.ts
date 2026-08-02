@@ -1,6 +1,18 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { projectStore } from '@/store/projectStore';
 import { Bar, ChordSegment, NoteName, ScaleType, TimeSignature } from '@/types/music';
+import { barChords, barNotes } from '@/engine/timeline';
+import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
+
+/**
+ * The instrument these tests write to: the Piano every project is created with.
+ *
+ * Read live rather than captured, because most tests call `createProject` in their
+ * own setup and each one mints a fresh instrument id.
+ */
+function trackId(): string {
+  return projectStore.getState().project!.tracks[0].id;
+}
 
 /** Build a chord segment without having to spell out every optional field. */
 function chordSegment(overrides: Partial<ChordSegment> = {}): ChordSegment {
@@ -16,7 +28,7 @@ function chordSegment(overrides: Partial<ChordSegment> = {}): ChordSegment {
 
 /** Beats occupied in a bar, i.e. where the next block butts up against the last. */
 function endOf(bar: Bar): number {
-  return bar.chords.reduce((max, c) => Math.max(max, (c.startBeat ?? 0) + c.duration), 0);
+  return barChords(bar, trackId()).reduce((max, c) => Math.max(max, (c.startBeat ?? 0) + c.duration), 0);
 }
 
 /**
@@ -31,24 +43,24 @@ function appendSegment(segment: ChordSegment): void {
   for (const bar of project.bars) {
     const capacity = (bar.timeSignature ?? project.timeSignature).beatsPerMeasure;
     if (endOf(bar) + segment.duration <= capacity) {
-      state().insertSegment(bar.id, endOf(bar), segment);
+      state().insertSegment(bar.id, endOf(bar), segment, trackId());
       return;
     }
   }
 
   state().addBar();
   const bars = state().project!.bars;
-  state().insertSegment(bars[bars.length - 1].id, 0, segment);
+  state().insertSegment(bars[bars.length - 1].id, 0, segment, trackId());
 }
 
 /** The bar holding a given segment, or undefined. */
 function barOf(segmentId: string): Bar | undefined {
-  return projectStore.getState().project!.bars.find(b => b.chords.some(c => c.id === segmentId));
+  return projectStore.getState().project!.bars.find(b => barChords(b, trackId()).some(c => c.id === segmentId));
 }
 
 /** `id@start` for every segment in a bar, so placement assertions read at a glance. */
 function layout(bar: Bar): string[] {
-  return bar.chords.map(c => `${c.id}@${c.startBeat}`);
+  return barChords(bar, trackId()).map(c => `${c.id}@${c.startBeat}`);
 }
 
 describe('projectStore', () => {
@@ -90,9 +102,17 @@ describe('projectStore', () => {
       expect(projectStore.getState().project!.bars).toEqual([]);
     });
 
-    it('creates an empty tracks array', () => {
+    // A project with no instruments has nowhere to put a chord, so one is created
+    // up front rather than waiting for the user to add it.
+    it('creates one Piano instrument', () => {
       projectStore.getState().createProject();
-      expect(projectStore.getState().project!.tracks).toEqual([]);
+      const tracks = projectStore.getState().project!.tracks;
+
+      expect(tracks).toHaveLength(1);
+      expect(tracks[0].name).toBe('Piano');
+      expect(tracks[0].instrument).toBe(DEFAULT_INSTRUMENT_ID);
+      expect(tracks[0].muted).toBe(false);
+      expect(tracks[0].visible).toBe(true);
     });
 
     it('generates a unique project id', () => {
@@ -256,8 +276,8 @@ describe('projectStore', () => {
     it('creates empty chords and notes arrays', () => {
       projectStore.getState().addBar();
       const bar = projectStore.getState().project!.bars[0];
-      expect(bar.chords).toEqual([]);
-      expect(bar.notes).toEqual([]);
+      expect(barChords(bar, trackId())).toEqual([]);
+      expect(barNotes(bar, trackId())).toEqual([]);
     });
 
     it('creates multiple bars correctly', () => {
@@ -328,8 +348,8 @@ describe('projectStore', () => {
       projectStore.getState().updateBarScale(barId, { root: 'D', type: 'minor' });
       const bar = projectStore.getState().project!.bars[0];
       expect(bar.barIndex).toBe(0);
-      expect(bar.chords).toEqual([]);
-      expect(bar.notes).toEqual([]);
+      expect(barChords(bar, trackId())).toEqual([]);
+      expect(barNotes(bar, trackId())).toEqual([]);
     });
 
     it('throws when bar id does not exist', () => {
@@ -377,8 +397,8 @@ describe('projectStore', () => {
       projectStore.getState().setBarTimeSignature(barId, { beatsPerMeasure: 3, beatUnit: 4 });
 
       const bars = projectStore.getState().project!.bars;
-      expect(bars[0].chords.length).toBe(3);
-      expect(bars[1].chords.length).toBe(1);
+      expect(barChords(bars[0], trackId()).length).toBe(3);
+      expect(barChords(bars[1], trackId()).length).toBe(1);
     });
 
     it('rejects an invalid time signature', () => {
@@ -404,39 +424,39 @@ describe('projectStore', () => {
     const firstBarId = () => projectStore.getState().project!.bars[0].id;
 
     it('inserts a segment at the beat it was dropped on', () => {
-      projectStore.getState().insertSegment(firstBarId(), 2, chordSegment({ id: 'a' }));
+      projectStore.getState().insertSegment(firstBarId(), 2, chordSegment({ id: 'a' }), trackId());
       expect(layout(projectStore.getState().project!.bars[0])).toEqual(['a@2']);
     });
 
     it('leaves the space before a segment as silence', () => {
-      projectStore.getState().insertSegment(firstBarId(), 2, chordSegment({ id: 'a' }));
-      const notes = projectStore.getState().project!.bars[0].notes;
+      projectStore.getState().insertSegment(firstBarId(), 2, chordSegment({ id: 'a' }), trackId());
+      const notes = barNotes(projectStore.getState().project!.bars[0], trackId());
       expect(notes.every(n => n.startBeat === 2)).toBe(true);
     });
 
     it('snaps nothing itself — it places exactly where it is told', () => {
       // Snapping is the caller's job, so an unsnapped beat survives intact.
-      projectStore.getState().insertSegment(firstBarId(), 1.5, chordSegment({ id: 'a' }));
-      expect(projectStore.getState().project!.bars[0].chords[0].startBeat).toBe(1.5);
+      projectStore.getState().insertSegment(firstBarId(), 1.5, chordSegment({ id: 'a' }), trackId());
+      expect(barChords(projectStore.getState().project!.bars[0], trackId())[0].startBeat).toBe(1.5);
     });
 
     it('clamps a drop that would cross the bar line', () => {
       projectStore
         .getState()
-        .insertSegment(firstBarId(), 3.5, chordSegment({ id: 'wide', duration: 2 }));
+        .insertSegment(firstBarId(), 3.5, chordSegment({ id: 'wide', duration: 2 }), trackId());
       expect(layout(projectStore.getState().project!.bars[0])).toEqual(['wide@2']);
     });
 
     it('pushes the block it lands on to the right', () => {
       appendSegment(chordSegment({ id: 'a' }));
       appendSegment(chordSegment({ id: 'b' }));
-      projectStore.getState().insertSegment(firstBarId(), 0, chordSegment({ id: 'new' }));
+      projectStore.getState().insertSegment(firstBarId(), 0, chordSegment({ id: 'new' }), trackId());
       expect(layout(projectStore.getState().project!.bars[0])).toEqual(['new@0', 'a@1', 'b@2']);
     });
 
     it('spills the last block into the next bar when the ripple fills the bar', () => {
       for (let i = 0; i < 4; i++) appendSegment(chordSegment({ id: `s${i}` }));
-      projectStore.getState().insertSegment(firstBarId(), 0, chordSegment({ id: 'new' }));
+      projectStore.getState().insertSegment(firstBarId(), 0, chordSegment({ id: 'new' }), trackId());
       const bars = projectStore.getState().project!.bars;
       expect(bars).toHaveLength(2);
       expect(layout(bars[0])).toEqual(['new@0', 's0@1', 's1@2', 's2@3']);
@@ -446,23 +466,23 @@ describe('projectStore', () => {
     it('generates the triad notes for a chord segment', () => {
       projectStore
         .getState()
-        .insertSegment(firstBarId(), 0, chordSegment({ root: 'C', quality: 'major' }));
-      const notes = projectStore.getState().project!.bars[0].notes;
+        .insertSegment(firstBarId(), 0, chordSegment({ root: 'C', quality: 'major' }), trackId());
+      const notes = barNotes(projectStore.getState().project!.bars[0], trackId());
       expect(notes.map(n => n.pitch)).toEqual([60, 64, 67]);
     });
 
     it('generates four notes for a seventh chord', () => {
       projectStore
         .getState()
-        .insertSegment(firstBarId(), 0, chordSegment({ root: 'C', quality: 'maj7' }));
-      expect(projectStore.getState().project!.bars[0].notes.length).toBe(4);
+        .insertSegment(firstBarId(), 0, chordSegment({ root: 'C', quality: 'maj7' }), trackId());
+      expect(barNotes(projectStore.getState().project!.bars[0], trackId()).length).toBe(4);
     });
 
     it('generates exactly one note for a note segment', () => {
       projectStore
         .getState()
-        .insertSegment(firstBarId(), 0, chordSegment({ kind: 'note', pitch: 62 }));
-      const notes = projectStore.getState().project!.bars[0].notes;
+        .insertSegment(firstBarId(), 0, chordSegment({ kind: 'note', pitch: 62 }), trackId());
+      const notes = barNotes(projectStore.getState().project!.bars[0], trackId());
       expect(notes.length).toBe(1);
       expect(notes[0].pitch).toBe(62);
     });
@@ -471,15 +491,15 @@ describe('projectStore', () => {
       for (let i = 0; i < 4; i++) {
         appendSegment(chordSegment({ id: `s${i}`, root: 'C', quality: 'major' }));
       }
-      projectStore.getState().insertSegment(firstBarId(), 0, chordSegment({ id: 'new' }));
+      projectStore.getState().insertSegment(firstBarId(), 0, chordSegment({ id: 'new' }), trackId());
       const bars = projectStore.getState().project!.bars;
-      expect(bars[1].notes.map(n => n.pitch)).toEqual([60, 64, 67]);
-      expect(bars[1].notes[0].startBeat).toBe(0);
+      expect(barNotes(bars[1], trackId()).map(n => n.pitch)).toEqual([60, 64, 67]);
+      expect(barNotes(bars[1], trackId())[0].startBeat).toBe(0);
     });
 
     it('ignores an unknown bar id', () => {
-      projectStore.getState().insertSegment('nope', 0, chordSegment({ id: 'a' }));
-      expect(projectStore.getState().project!.bars[0].chords).toEqual([]);
+      projectStore.getState().insertSegment('nope', 0, chordSegment({ id: 'a' }), trackId());
+      expect(barChords(projectStore.getState().project!.bars[0], trackId())).toEqual([]);
     });
   });
 
@@ -493,14 +513,14 @@ describe('projectStore', () => {
       appendSegment(chordSegment({ id: 'a' }));
       appendSegment(chordSegment({ id: 'b' }));
       projectStore.getState().removeSegment('a');
-      expect(projectStore.getState().project!.bars[0].chords.map(c => c.id)).toEqual(['b']);
+      expect(barChords(projectStore.getState().project!.bars[0], trackId()).map(c => c.id)).toEqual(['b']);
     });
 
     it('empties the generated notes when the last segment goes', () => {
       appendSegment(chordSegment({ id: 'a' }));
-      expect(projectStore.getState().project!.bars[0].notes.length).toBe(3);
+      expect(barNotes(projectStore.getState().project!.bars[0], trackId()).length).toBe(3);
       projectStore.getState().removeSegment('a');
-      expect(projectStore.getState().project!.bars[0].notes).toEqual([]);
+      expect(barNotes(projectStore.getState().project!.bars[0], trackId())).toEqual([]);
     });
 
     it('leaves the hole where a segment was, rather than closing it up', () => {
@@ -514,7 +534,7 @@ describe('projectStore', () => {
     it('ignores an unknown segment id', () => {
       appendSegment(chordSegment({ id: 'a' }));
       projectStore.getState().removeSegment('nope');
-      expect(projectStore.getState().project!.bars[0].chords.length).toBe(1);
+      expect(barChords(projectStore.getState().project!.bars[0], trackId()).length).toBe(1);
     });
   });
 
@@ -543,14 +563,14 @@ describe('projectStore', () => {
 
     it('regenerates the notes in both the bar it left and the bar it joined', () => {
       projectStore.getState().moveSegment('a', bars()[1].id, 2);
-      expect(bars()[0].notes.every(n => n.startBeat === 1)).toBe(true);
-      expect(bars()[1].notes.every(n => n.startBeat === 2)).toBe(true);
+      expect(barNotes(bars()[0], trackId()).every(n => n.startBeat === 1)).toBe(true);
+      expect(barNotes(bars()[1], trackId()).every(n => n.startBeat === 2)).toBe(true);
     });
 
     it('clamps a move that would cross the bar line', () => {
       projectStore.getState().resizeSegmentDuration('a', 2);
       projectStore.getState().moveSegment('a', bars()[0].id, 3.5);
-      expect(barOf('a')!.chords.find(c => c.id === 'a')!.startBeat).toBe(2);
+      expect(barChords(barOf('a')!, trackId()).find(c => c.id === 'a')!.startBeat).toBe(2);
     });
 
     it('pushes a block it is dropped on top of', () => {
@@ -631,8 +651,8 @@ describe('projectStore', () => {
       projectStore.getState().moveSegments([
         { segmentId: 'a', targetBarId: bars()[1].id, startBeat: 2 },
       ]);
-      expect(bars()[1].notes.every(n => n.startBeat === 2)).toBe(true);
-      expect(bars()[0].notes.some(n => n.startBeat === 0)).toBe(false);
+      expect(barNotes(bars()[1], trackId()).every(n => n.startBeat === 2)).toBe(true);
+      expect(barNotes(bars()[0], trackId()).some(n => n.startBeat === 0)).toBe(false);
     });
 
     it('skips unknown ids rather than failing the whole gesture', () => {
@@ -659,7 +679,7 @@ describe('projectStore', () => {
     const bars = () => projectStore.getState().project!.bars;
     const segmentOf = (id: string) =>
       bars()
-        .flatMap(b => b.chords)
+        .flatMap(b => barChords(b, trackId()))
         .find(c => c.id === id)!;
 
     beforeEach(() => {
@@ -670,7 +690,7 @@ describe('projectStore', () => {
       projectStore.getState().updateBarScale(bars()[1].id, { root: 'G', type: 'major' });
       projectStore
         .getState()
-        .insertSegment(bars()[1].id, 0, chordSegment({ id: 'b', root: 'G', chordSymbol: 'G' }));
+        .insertSegment(bars()[1].id, 0, chordSegment({ id: 'b', root: 'G', chordSymbol: 'G' }), trackId());
     });
 
     it('steps each segment within its own bar’s scale', () => {
@@ -713,34 +733,34 @@ describe('projectStore', () => {
     it('sets a new duration', () => {
       appendSegment(chordSegment({ id: 'a' }));
       projectStore.getState().resizeSegmentDuration('a', 2);
-      expect(projectStore.getState().project!.bars[0].chords[0].duration).toBe(2);
+      expect(barChords(projectStore.getState().project!.bars[0], trackId())[0].duration).toBe(2);
     });
 
     it('updates the generated notes duration', () => {
       appendSegment(chordSegment({ id: 'a' }));
       projectStore.getState().resizeSegmentDuration('a', 2);
-      const notes = projectStore.getState().project!.bars[0].notes;
+      const notes = barNotes(projectStore.getState().project!.bars[0], trackId());
       expect(notes.every(n => n.duration === 2)).toBe(true);
     });
 
     it('snaps to the editing grid', () => {
       appendSegment(chordSegment({ id: 'a' }));
       projectStore.getState().resizeSegmentDuration('a', 1.3);
-      expect(projectStore.getState().project!.bars[0].chords[0].duration).toBe(1.25);
+      expect(barChords(projectStore.getState().project!.bars[0], trackId())[0].duration).toBe(1.25);
     });
 
     it('clamps to the containing bar capacity', () => {
       appendSegment(chordSegment({ id: 'a' }));
       projectStore.getState().resizeSegmentDuration('a', 99);
-      expect(projectStore.getState().project!.bars[0].chords[0].duration).toBe(4);
+      expect(barChords(projectStore.getState().project!.bars[0], trackId())[0].duration).toBe(4);
     });
 
     it('caps growth at the bar line, not at the bar length', () => {
       // A block starting on beat 3 of a 4/4 bar has one beat of room, not four.
       const barId = projectStore.getState().project!.bars[0].id;
-      projectStore.getState().insertSegment(barId, 3, chordSegment({ id: 'a' }));
+      projectStore.getState().insertSegment(barId, 3, chordSegment({ id: 'a' }), trackId());
       projectStore.getState().resizeSegmentDuration('a', 99);
-      expect(projectStore.getState().project!.bars[0].chords[0].duration).toBe(1);
+      expect(barChords(projectStore.getState().project!.bars[0], trackId())[0].duration).toBe(1);
     });
 
     it('pushes later segments over the bar line when it grows', () => {
@@ -750,14 +770,14 @@ describe('projectStore', () => {
       appendSegment(chordSegment({ id: 'd' }));
       projectStore.getState().resizeSegmentDuration('a', 2);
       const bars = projectStore.getState().project!.bars;
-      expect(bars[0].chords.map(c => c.id)).toEqual(['a', 'b', 'c']);
-      expect(bars[1].chords.map(c => c.id)).toEqual(['d']);
+      expect(barChords(bars[0], trackId()).map(c => c.id)).toEqual(['a', 'b', 'c']);
+      expect(barChords(bars[1], trackId()).map(c => c.id)).toEqual(['d']);
     });
 
     it('ignores an unknown segment id', () => {
       appendSegment(chordSegment({ id: 'a' }));
       projectStore.getState().resizeSegmentDuration('nope', 2);
-      expect(projectStore.getState().project!.bars[0].chords[0].duration).toBe(1);
+      expect(barChords(projectStore.getState().project!.bars[0], trackId())[0].duration).toBe(1);
     });
   });
 
@@ -769,11 +789,11 @@ describe('projectStore', () => {
 
     it('re-interprets roman numerals against the new scale', () => {
       appendSegment(chordSegment({ id: 'a', root: undefined, quality: undefined, romanNumeral: 'I' }));
-      expect(projectStore.getState().project!.bars[0].notes.map(n => n.pitch)).toEqual([60, 64, 67]);
+      expect(barNotes(projectStore.getState().project!.bars[0], trackId()).map(n => n.pitch)).toEqual([60, 64, 67]);
 
       const barId = projectStore.getState().project!.bars[0].id;
       projectStore.getState().updateBarScale(barId, { root: 'D', type: 'major' });
-      expect(projectStore.getState().project!.bars[0].notes.map(n => n.pitch)).toEqual([62, 66, 69]);
+      expect(barNotes(projectStore.getState().project!.bars[0], trackId()).map(n => n.pitch)).toEqual([62, 66, 69]);
     });
 
     it('retunes segments that carry an explicit root and quality', () => {
@@ -786,9 +806,9 @@ describe('projectStore', () => {
       projectStore.getState().updateBarScale(barId, { root: 'D', type: 'major' });
 
       const bar = projectStore.getState().project!.bars[0];
-      expect(bar.chords[0].root).toBe('D');
-      expect(bar.chords[0].chordSymbol).toBe('D');
-      expect(bar.notes.map(n => n.pitch)).toEqual([62, 66, 69]);
+      expect(barChords(bar, trackId())[0].root).toBe('D');
+      expect(barChords(bar, trackId())[0].chordSymbol).toBe('D');
+      expect(barNotes(bar, trackId()).map(n => n.pitch)).toEqual([62, 66, 69]);
     });
 
     it('follows the new scale when the degree quality changes', () => {
@@ -799,9 +819,9 @@ describe('projectStore', () => {
       projectStore.getState().updateBarScale(barId, { root: 'A', type: 'naturalMinor' });
 
       const bar = projectStore.getState().project!.bars[0];
-      expect(bar.chords[0].chordSymbol).toBe('B°');
+      expect(barChords(bar, trackId())[0].chordSymbol).toBe('B°');
       // B diminished: B, D, F.
-      expect(bar.notes.map(n => n.pitch)).toEqual([71, 74, 77]);
+      expect(barNotes(bar, trackId()).map(n => n.pitch)).toEqual([71, 74, 77]);
     });
 
     it('leaves other bars notes untouched', () => {
@@ -809,7 +829,7 @@ describe('projectStore', () => {
       appendSegment(chordSegment({ id: 'a', root: 'C', quality: 'major' }));
       const barId = projectStore.getState().project!.bars[1].id;
       projectStore.getState().updateBarScale(barId, { root: 'G', type: 'major' });
-      expect(projectStore.getState().project!.bars[0].notes.map(n => n.pitch)).toEqual([60, 64, 67]);
+      expect(barNotes(projectStore.getState().project!.bars[0], trackId()).map(n => n.pitch)).toEqual([60, 64, 67]);
     });
   });
 
@@ -896,7 +916,7 @@ describe('projectStore', () => {
 
     /** The segment with this id, wherever in the project it lives. */
     const segmentOf = (id: string): ChordSegment =>
-      state().project!.bars.flatMap(b => b.chords).find(c => c.id === id)!;
+      state().project!.bars.flatMap(b => barChords(b, trackId())).find(c => c.id === id)!;
 
     beforeEach(() => {
       state().createProject();
@@ -919,7 +939,7 @@ describe('projectStore', () => {
         state().updateBarScale(bars[1].id, { root: 'A', type: 'naturalMinor' });
 
         const segment = chordSegment({ root: 'G', romanNumeral: 'VII', chordSymbol: 'G' });
-        state().insertSegment(state().project!.bars[1].id, 0, segment);
+        state().insertSegment(state().project!.bars[1].id, 0, segment, trackId());
 
         state().stepSegmentPitch(segment.id, 1);
 
@@ -930,12 +950,12 @@ describe('projectStore', () => {
       it('regenerates the bar\'s notes so the roll follows', () => {
         const segment = chordSegment({ romanNumeral: 'I', chordSymbol: 'C', octave: 4 });
         appendSegment(segment);
-        expect(barOf(segment.id)!.notes.map(n => n.pitch)).toEqual([60, 64, 67]);
+        expect(barNotes(barOf(segment.id)!, trackId()).map(n => n.pitch)).toEqual([60, 64, 67]);
 
         state().stepSegmentPitch(segment.id, 1);
 
         // Dm at octave 4.
-        expect(barOf(segment.id)!.notes.map(n => n.pitch)).toEqual([62, 65, 69]);
+        expect(barNotes(barOf(segment.id)!, trackId()).map(n => n.pitch)).toEqual([62, 65, 69]);
       });
 
       it('ignores an unknown segment id', () => {
@@ -953,7 +973,7 @@ describe('projectStore', () => {
         state().shiftSegmentOctave(segment.id, 1);
 
         expect(segmentOf(segment.id).pitch).toBe(72);
-        expect(barOf(segment.id)!.notes.map(n => n.pitch)).toEqual([72]);
+        expect(barNotes(barOf(segment.id)!, trackId()).map(n => n.pitch)).toEqual([72]);
       });
 
       it('moves a chord down a register', () => {
@@ -963,7 +983,7 @@ describe('projectStore', () => {
         state().shiftSegmentOctave(segment.id, -1);
 
         expect(segmentOf(segment.id).octave).toBe(3);
-        expect(barOf(segment.id)!.notes.map(n => n.pitch)).toEqual([48, 52, 55]);
+        expect(barNotes(barOf(segment.id)!, trackId()).map(n => n.pitch)).toEqual([48, 52, 55]);
       });
 
       it('ignores an unknown segment id', () => {
@@ -980,12 +1000,12 @@ describe('projectStore', () => {
 
         state().cycleSegmentInversion(segment.id);
         expect(segmentOf(segment.id).inversion).toBe(1);
-        expect(barOf(segment.id)!.notes.map(n => n.pitch)).toEqual([64, 67, 72]);
+        expect(barNotes(barOf(segment.id)!, trackId()).map(n => n.pitch)).toEqual([64, 67, 72]);
 
         state().cycleSegmentInversion(segment.id);
         state().cycleSegmentInversion(segment.id);
         expect(segmentOf(segment.id).inversion).toBe(0);
-        expect(barOf(segment.id)!.notes.map(n => n.pitch)).toEqual([60, 64, 67]);
+        expect(barNotes(barOf(segment.id)!, trackId()).map(n => n.pitch)).toEqual([60, 64, 67]);
       });
 
       it('ignores an unknown segment id', () => {
@@ -993,6 +1013,100 @@ describe('projectStore', () => {
         state().cycleSegmentInversion('nope');
         expect(state().project).toBe(before);
       });
+    });
+  });
+
+  describe('instruments', () => {
+    const state = () => projectStore.getState();
+    const tracks = () => state().project!.tracks;
+    /** The second instrument, added by the setup below. */
+    const second = () => tracks()[1].id;
+
+    beforeEach(() => {
+      state().createProject();
+      state().addBar();
+      state().addTrack('Strings');
+    });
+
+    it('adds an instrument on the default sound', () => {
+      expect(tracks()).toHaveLength(2);
+      expect(tracks()[1].name).toBe('Strings');
+      expect(tracks()[1].instrument).toBe(DEFAULT_INSTRUMENT_ID);
+    });
+
+    it('gives each instrument its own colour', () => {
+      expect(tracks()[0].color).not.toBe(tracks()[1].color);
+    });
+
+    it('changes an instrument sound without touching the others', () => {
+      state().setTrackInstrument(second(), 'string_ensemble_1');
+
+      expect(tracks()[1].instrument).toBe('string_ensemble_1');
+      expect(tracks()[0].instrument).toBe(DEFAULT_INSTRUMENT_ID);
+    });
+
+    it('toggles mute and visibility independently', () => {
+      state().toggleTrackMute(second());
+      expect(tracks()[1].muted).toBe(true);
+      expect(tracks()[1].visible).toBe(true);
+
+      state().toggleTrackVisible(second());
+      expect(tracks()[1].muted).toBe(true);
+      expect(tracks()[1].visible).toBe(false);
+
+      state().toggleTrackVisible(second());
+      expect(tracks()[1].visible).toBe(true);
+    });
+
+    it('ignores an unknown instrument id rather than throwing', () => {
+      expect(() => state().toggleTrackMute('nope')).not.toThrow();
+      expect(() => state().setTrackInstrument('nope', 'flute')).not.toThrow();
+      expect(() => state().removeTrack('nope')).not.toThrow();
+    });
+
+    // The whole point of the per-instrument content model: writing to one
+    // instrument must be invisible to every other.
+    it('keeps each instrument\'s segments separate', () => {
+      const barId = state().project!.bars[0].id;
+      state().insertSegment(barId, 0, chordSegment({ id: 'piano-1' }), trackId());
+      state().insertSegment(barId, 0, chordSegment({ id: 'strings-1' }), second());
+
+      const bar = state().project!.bars[0];
+      expect(barChords(bar, trackId()).map(c => c.id)).toEqual(['piano-1']);
+      expect(barChords(bar, second()).map(c => c.id)).toEqual(['strings-1']);
+    });
+
+    it('generates notes for each instrument from its own segments', () => {
+      const barId = state().project!.bars[0].id;
+      state().insertSegment(barId, 0, chordSegment({ root: 'C', quality: 'major' }), trackId());
+      state().insertSegment(barId, 0, chordSegment({ root: 'D', quality: 'minor' }), second());
+
+      const bar = state().project!.bars[0];
+      expect(barNotes(bar, trackId()).map(n => n.pitch)).toEqual([60, 64, 67]);
+      expect(barNotes(bar, second()).map(n => n.pitch)).toEqual([62, 65, 69]);
+    });
+
+    it('drops an instrument\'s content along with the instrument', () => {
+      const barId = state().project!.bars[0].id;
+      state().insertSegment(barId, 0, chordSegment({ id: 'piano-1' }), trackId());
+      state().insertSegment(barId, 0, chordSegment({ id: 'strings-1' }), second());
+      const removed = second();
+
+      state().removeTrack(removed);
+
+      expect(tracks()).toHaveLength(1);
+      expect(state().project!.bars[0].content[removed]).toBeUndefined();
+      // The instrument that stayed keeps everything it had.
+      expect(barChords(state().project!.bars[0], trackId()).map(c => c.id)).toEqual(['piano-1']);
+    });
+
+    it('refuses a segment aimed at an instrument that does not exist', () => {
+      const barId = state().project!.bars[0].id;
+      const before = state().project;
+
+      state().insertSegment(barId, 0, chordSegment({ id: 'orphan' }), 'no-such-track');
+
+      expect(state().project).toBe(before);
     });
   });
 });

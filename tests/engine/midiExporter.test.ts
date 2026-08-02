@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { projectToMidi, midiToProject } from '@/engine/midiExporter';
 import { Project, Bar, Track, Note, ChordSegment } from '@/types/music';
 import { generateId } from '@/utils/id';
+import { OTHER_TRACK_ID, soloContent, TEST_TRACK_ID } from '../helpers/tracks';
 
 function createTestProject(overrides?: Partial<Project>): Project {
   const now = new Date('2024-01-01T00:00:00.000Z');
@@ -14,7 +15,9 @@ function createTestProject(overrides?: Partial<Project>): Project {
     keyMode: 'major',
     tracks: [
       {
-        id: generateId(),
+        // Matches the key `soloContent` writes, so the exporter's per-instrument
+        // lookup finds this fixture's music.
+        id: TEST_TRACK_ID,
         name: 'Piano',
         instrument: 'acoustic_grand_piano',
         volume: 0.8,
@@ -28,15 +31,14 @@ function createTestProject(overrides?: Partial<Project>): Project {
         id: generateId(),
         barIndex: 0,
         scale: { root: 'C', type: 'major' },
-        chords: [
+        content: soloContent([
           { id: generateId(), romanNumeral: 'I', chordSymbol: 'C', duration: 2, root: 'C', quality: 'major' },
           { id: generateId(), romanNumeral: 'V', chordSymbol: 'G', duration: 2, root: 'G', quality: 'major' },
-        ],
-        notes: [
+        ], [
           { id: generateId(), pitch: 60, startBeat: 0, duration: 1, velocity: 100 },
           { id: generateId(), pitch: 64, startBeat: 1, duration: 1, velocity: 90 },
           { id: generateId(), pitch: 67, startBeat: 2, duration: 2, velocity: 85 },
-        ],
+        ]),
       },
     ],
     createdAt: now,
@@ -124,7 +126,7 @@ describe('midiExporter', () => {
     });
 
     it('handles project with no notes', () => {
-      const project = createTestProject({ bars: [{ id: generateId(), barIndex: 0, scale: { root: 'C', type: 'major' }, chords: [], notes: [] }] });
+      const project = createTestProject({ bars: [{ id: generateId(), barIndex: 0, scale: { root: 'C', type: 'major' }, content: soloContent([], []) }] });
       const midiBytes = projectToMidi(project);
 
       expect(midiBytes).toBeInstanceOf(Uint8Array);
@@ -148,11 +150,10 @@ describe('midiExporter', () => {
           id: generateId(),
           barIndex: 0,
           scale: { root: 'C', type: 'major' },
-          chords: [],
-          notes: [
+          content: soloContent([], [
             { id: generateId(), pitch: 60, startBeat: 0, duration: 1, velocity: 100 },
             { id: generateId(), pitch: 72, startBeat: 1, duration: 1, velocity: 80 },
-          ],
+          ]),
         }],
       });
 
@@ -166,11 +167,10 @@ describe('midiExporter', () => {
           id: generateId(),
           barIndex: 0,
           scale: { root: 'C', type: 'major' },
-          chords: [],
-          notes: [
+          content: soloContent([], [
             { id: generateId(), pitch: 60, startBeat: 0, duration: 1, velocity: 127 },
             { id: generateId(), pitch: 64, startBeat: 1, duration: 1, velocity: 50 },
-          ],
+          ]),
         }],
       });
 
@@ -224,6 +224,65 @@ describe('midiExporter', () => {
     });
   });
 
+  // Before instruments, every track chunk was written the same notes. Each one now
+  // carries only its own, plus a Program Change naming its sound.
+  describe('instruments', () => {
+    /** Note-on events across every track chunk, tagged with their channel. */
+    const twoInstrumentProject = () =>
+      createTestProject({
+        tracks: [
+          { id: TEST_TRACK_ID, name: 'Piano', instrument: 'acoustic_grand_piano', volume: 1, pan: 0, muted: false, solo: false, visible: true },
+          { id: OTHER_TRACK_ID, name: 'Strings', instrument: 'string_ensemble_1', volume: 1, pan: 0, muted: false, solo: false, visible: true },
+        ],
+        bars: [
+          {
+            id: generateId(),
+            barIndex: 0,
+            scale: { root: 'C', type: 'major' },
+            content: {
+              [TEST_TRACK_ID]: {
+                chords: [],
+                notes: [{ id: generateId(), pitch: 60, startBeat: 0, duration: 1, velocity: 100 }],
+              },
+              [OTHER_TRACK_ID]: {
+                chords: [],
+                notes: [{ id: generateId(), pitch: 72, startBeat: 0, duration: 1, velocity: 100 }],
+              },
+            },
+          },
+        ],
+      });
+
+    it('writes one chunk per instrument', () => {
+      expect(countTrackHeaders(projectToMidi(twoInstrumentProject()))).toBe(2);
+    });
+
+    it('gives each instrument only its own notes', () => {
+      // Track 0 is scanned by the existing helper; it must not carry the strings' note.
+      const onsets = scanNoteOnTicks(projectToMidi(twoInstrumentProject()));
+
+      expect(onsets.map(o => o.pitch)).toEqual([60]);
+    });
+
+    it('names each instrument sound with a program change', () => {
+      const programs = scanTrack0(projectToMidi(twoInstrumentProject()))
+        .filter(e => (e.status & 0xf0) === 0xc0)
+        .map(e => e.body[0]);
+
+      // GM program 0 is the acoustic grand.
+      expect(programs).toEqual([0]);
+    });
+
+    it('round-trips an instrument sound through export and import', () => {
+      const restored = midiToProject(projectToMidi(twoInstrumentProject()));
+
+      expect(restored.tracks.map(t => t.instrument)).toEqual([
+        'acoustic_grand_piano',
+        'string_ensemble_1',
+      ]);
+    });
+  });
+
   describe('per-bar time signatures', () => {
     /** A bar carrying one note on its downbeat, so its start tick is observable. */
     const barWith = (barIndex: number, ts: { beatsPerMeasure: number; beatUnit: number } | undefined, pitch: number): Bar => ({
@@ -231,8 +290,7 @@ describe('midiExporter', () => {
       barIndex,
       timeSignature: ts,
       scale: { root: 'C', type: 'major' },
-      chords: [],
-      notes: [{ id: generateId(), pitch, startBeat: 0, duration: 1, velocity: 100 }],
+      content: soloContent([], [{ id: generateId(), pitch, startBeat: 0, duration: 1, velocity: 100 }]),
     });
 
     it('emits one time-signature event when every bar shares a meter', () => {
@@ -286,8 +344,7 @@ describe('midiExporter', () => {
         id: generateId(),
         barIndex: 0,
         scale: { root: 'C', type: 'major' },
-        chords: [],
-        notes: [{ id: generateId(), pitch: 60, startBeat: 2, duration: 1, velocity: 100 }],
+        content: soloContent([], [{ id: generateId(), pitch: 60, startBeat: 2, duration: 1, velocity: 100 }]),
       };
       const onsets = scanNoteOnTicks(projectToMidi(createTestProject({ bars: [bar] })));
 
@@ -331,9 +388,14 @@ function scanTrack0(data: Uint8Array): { tick: number; status: number; metaType?
       continue;
     }
 
-    const body = Array.from(data.subarray(offset, offset + 2));
+    // Program Change (0xC0) and Channel Pressure (0xD0) carry a single data byte;
+    // every other channel message carries two. Assuming two for all of them walks
+    // the stream out of alignment the moment an instrument's program is written.
+    const high = status & 0xf0;
+    const length = high === 0xc0 || high === 0xd0 ? 1 : 2;
+    const body = Array.from(data.subarray(offset, offset + length));
     events.push({ tick, status, body });
-    offset += 2;
+    offset += length;
   }
 
   return events;

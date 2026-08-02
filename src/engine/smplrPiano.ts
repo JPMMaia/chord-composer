@@ -1,47 +1,38 @@
 import { SplendidGrandPiano } from 'smplr';
 import type { Instrument, ScheduledNote } from '@/engine/instrument';
+import { createInstrumentBus, MASTER_GAIN, type InstrumentBus } from '@/engine/instrumentBus';
 
 /**
  * A sampled acoustic grand, via smplr's SplendidGrandPiano.
+ *
+ * Kept alongside the general soundfont adapter — rather than routing the piano
+ * through GM program 0 like every other sound — because this is a markedly better
+ * piano, and the piano is the instrument every project starts with.
  *
  * Samples are fetched from smplr's CDN on first load, so the very first Play in a
  * session waits on the network; the browser caches them afterwards.
  */
 
-/**
- * Headroom. A chord segment sounds every note of the chord at once, and several
- * segments can overlap, so summing voices at full scale clips. 0.7 leaves room
- * for a handful of simultaneous notes without a limiter.
- */
-export const MASTER_GAIN = 0.7;
+export { MASTER_GAIN };
 
 export class SmplrPianoInstrument implements Instrument {
   readonly name = 'Acoustic Grand Piano';
 
   private ctx: AudioContext;
-  private masterGain: GainNode;
-  private limiter: DynamicsCompressorNode;
+  private bus: InstrumentBus;
   private piano: ReturnType<typeof SplendidGrandPiano> | null = null;
   private loadPromise: Promise<void> | null = null;
   private loaded = false;
   private disposed = false;
 
-  constructor(audioContext: AudioContext) {
+  /**
+   * @param destination - Where to render. Omitted, the instrument builds its own
+   *   limiter and wires to the context destination, which is right for a lone
+   *   instrument; the pool passes its shared limiter instead.
+   */
+  constructor(audioContext: AudioContext, destination?: AudioNode) {
     this.ctx = audioContext;
-
-    // master -> limiter -> destination. The limiter is what keeps a six-note chord
-    // from clipping when its voices sum, rather than trusting the gain alone.
-    this.limiter = this.ctx.createDynamicsCompressor();
-    this.limiter.threshold.value = -6;
-    this.limiter.knee.value = 0;
-    this.limiter.ratio.value = 20;
-    this.limiter.attack.value = 0.003;
-    this.limiter.release.value = 0.25;
-    this.limiter.connect(this.ctx.destination);
-
-    this.masterGain = this.ctx.createGain();
-    this.masterGain.gain.value = MASTER_GAIN;
-    this.masterGain.connect(this.limiter);
+    this.bus = createInstrumentBus(audioContext, destination);
   }
 
   now(): number {
@@ -60,7 +51,7 @@ export class SmplrPianoInstrument implements Instrument {
     if (this.loadPromise) return this.loadPromise;
 
     this.piano = SplendidGrandPiano(this.ctx, {
-      destination: this.masterGain,
+      destination: this.bus.input,
     });
 
     this.loadPromise = this.piano.ready.then(() => {
@@ -91,8 +82,7 @@ export class SmplrPianoInstrument implements Instrument {
   }
 
   setVolume(volume: number): void {
-    const clamped = Math.max(0, Math.min(1, volume));
-    this.masterGain.gain.value = clamped * MASTER_GAIN;
+    this.bus.setVolume(volume);
   }
 
   dispose(): void {
@@ -100,7 +90,6 @@ export class SmplrPianoInstrument implements Instrument {
     this.disposed = true;
     this.piano?.dispose();
     this.piano = null;
-    this.masterGain.disconnect();
-    this.limiter.disconnect();
+    this.bus.disconnect();
   }
 }

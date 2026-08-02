@@ -13,6 +13,32 @@ import { Project, Bar, Track, Note, ChordSegment, TimeSignature } from '@/types/
 import { generateId } from '@/utils/id';
 
 // Helper to create a minimal valid project for testing
+/**
+ * The instrument fixtures hang their material on. Fixed rather than generated so
+ * that a bar's `content` key and its track's id are the same literal on the page.
+ */
+const FIXTURE_TRACK_ID = 'track-fixture';
+
+/** Bar content for the fixture instrument. */
+function fixtureContent(
+  chords: Bar['content'][string]['chords'] = [],
+  notes: Bar['content'][string]['notes'] = []
+): Bar['content'] {
+  return { [FIXTURE_TRACK_ID]: { chords, notes } };
+}
+
+/**
+ * The content of a bar that holds exactly one instrument's material.
+ *
+ * Used by the legacy-file tests, where the instrument is synthesised on load and
+ * its id is therefore not something the fixture gets to choose.
+ */
+function soleContent(bar: Bar) {
+  const entries = Object.values(bar.content);
+  expect(entries).toHaveLength(1);
+  return entries[0];
+}
+
 function createTestProject(overrides?: Partial<Project>): Project {
   const now = new Date('2024-01-01T00:00:00.000Z');
   return {
@@ -24,13 +50,14 @@ function createTestProject(overrides?: Partial<Project>): Project {
     keyMode: 'major',
     tracks: [
       {
-        id: generateId(),
+        id: FIXTURE_TRACK_ID,
         name: 'Piano',
         instrument: 'acoustic_grand_piano',
         volume: 0.8,
         pan: 0,
         muted: false,
         solo: false,
+        visible: true,
       },
     ],
     bars: [
@@ -38,14 +65,18 @@ function createTestProject(overrides?: Partial<Project>): Project {
         id: generateId(),
         barIndex: 0,
         scale: { root: 'C', type: 'major' },
-        chords: [
-          { id: generateId(), romanNumeral: 'I', chordSymbol: 'C', duration: 4, root: 'C', quality: 'major' },
-        ],
-        notes: [
-          { id: generateId(), pitch: 60, startBeat: 0, duration: 1, velocity: 100 },
-          { id: generateId(), pitch: 64, startBeat: 1, duration: 1, velocity: 90 },
-          { id: generateId(), pitch: 67, startBeat: 2, duration: 2, velocity: 85 },
-        ],
+        content: {
+          [FIXTURE_TRACK_ID]: {
+            chords: [
+              { id: generateId(), romanNumeral: 'I', chordSymbol: 'C', duration: 4, root: 'C', quality: 'major' },
+            ],
+            notes: [
+              { id: generateId(), pitch: 60, startBeat: 0, duration: 1, velocity: 100 },
+              { id: generateId(), pitch: 64, startBeat: 1, duration: 1, velocity: 90 },
+              { id: generateId(), pitch: 67, startBeat: 2, duration: 2, velocity: 85 },
+            ],
+          },
+        },
       },
     ],
     createdAt: now,
@@ -111,8 +142,8 @@ describe('fileIO', () => {
       const json = serializeProject(project);
       const parsed = JSON.parse(json);
       expect(parsed.bars[0].barIndex).toBe(0);
-      expect(parsed.bars[0].notes).toHaveLength(3);
-      expect(parsed.bars[0].chords).toHaveLength(1);
+      expect(parsed.bars[0].content[FIXTURE_TRACK_ID].notes).toHaveLength(3);
+      expect(parsed.bars[0].content[FIXTURE_TRACK_ID].chords).toHaveLength(1);
     });
 
     it('handles empty project (no tracks, no bars)', () => {
@@ -150,10 +181,10 @@ describe('fileIO', () => {
       const json = serializeProject(project);
       const deserialized = deserializeProject(json);
 
-      expect(deserialized.bars[0].notes).toHaveLength(3);
-      expect(deserialized.bars[0].notes[0].pitch).toBe(60);
-      expect(deserialized.bars[0].notes[0].startBeat).toBe(0);
-      expect(deserialized.bars[0].notes[0].velocity).toBe(100);
+      expect(deserialized.bars[0].content[FIXTURE_TRACK_ID].notes).toHaveLength(3);
+      expect(deserialized.bars[0].content[FIXTURE_TRACK_ID].notes[0].pitch).toBe(60);
+      expect(deserialized.bars[0].content[FIXTURE_TRACK_ID].notes[0].startBeat).toBe(0);
+      expect(deserialized.bars[0].content[FIXTURE_TRACK_ID].notes[0].velocity).toBe(100);
     });
 
     it('preserves chord data after round-trip', () => {
@@ -161,9 +192,9 @@ describe('fileIO', () => {
       const json = serializeProject(project);
       const deserialized = deserializeProject(json);
 
-      expect(deserialized.bars[0].chords[0].romanNumeral).toBe('I');
-      expect(deserialized.bars[0].chords[0].chordSymbol).toBe('C');
-      expect(deserialized.bars[0].chords[0].duration).toBe(4);
+      expect(deserialized.bars[0].content[FIXTURE_TRACK_ID].chords[0].romanNumeral).toBe('I');
+      expect(deserialized.bars[0].content[FIXTURE_TRACK_ID].chords[0].chordSymbol).toBe('C');
+      expect(deserialized.bars[0].content[FIXTURE_TRACK_ID].chords[0].duration).toBe(4);
     });
 
     it('throws on invalid JSON string', () => {
@@ -192,9 +223,9 @@ describe('fileIO', () => {
     it('handles project with multiple bars', () => {
       const project = createTestProject({
         bars: [
-          { id: generateId(), barIndex: 0, scale: { root: 'C', type: 'major' }, chords: [], notes: [] },
-          { id: generateId(), barIndex: 1, scale: { root: 'F', type: 'major' }, chords: [], notes: [] },
-          { id: generateId(), barIndex: 2, scale: { root: 'G', type: 'major' }, chords: [], notes: [] },
+          { id: generateId(), barIndex: 0, scale: { root: 'C', type: 'major' }, content: fixtureContent() },
+          { id: generateId(), barIndex: 1, scale: { root: 'F', type: 'major' }, content: fixtureContent() },
+          { id: generateId(), barIndex: 2, scale: { root: 'G', type: 'major' }, content: fixtureContent() },
         ],
       });
       const json = serializeProject(project);
@@ -251,9 +282,19 @@ describe('fileIO', () => {
     });
 
     it('allows project with no tracks', () => {
-      const project = createTestProject({ tracks: [] });
+      const project = createTestProject({ tracks: [], bars: [] });
       const result = validateProject(project);
       expect(result.valid).toBe(true);
+    });
+
+    // Content keyed by an instrument that is not in the project would be both
+    // silent and invisible, so it is caught rather than carried around.
+    it('rejects bar content belonging to no instrument', () => {
+      const project = createTestProject({ tracks: [] });
+      const result = validateProject(project);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors.join(' ')).toContain('unknown instrument');
     });
 
     it('allows project with no bars', () => {
@@ -413,26 +454,24 @@ describe('fileIO', () => {
             barIndex: 0,
             timeSignature: { beatsPerMeasure: 3, beatUnit: 4 },
             scale: { root: 'C', type: 'major' },
-            chords: [
+            content: fixtureContent([
               { id: 'seg-1', kind: 'chord', romanNumeral: 'viiø7', chordSymbol: 'Bø7', duration: 2, root: 'B', quality: 'halfDim7' },
               { id: 'seg-2', kind: 'note', duration: 1, pitch: 64, root: 'E' },
-            ],
-            notes: [],
+            ], []),
           },
           {
             id: 'bar-b',
             barIndex: 1,
             scale: { root: 'C', type: 'major' },
-            chords: [],
-            notes: [],
+            content: fixtureContent([], []),
           },
         ],
       });
     }
 
-    it('declares schema version 1.4', () => {
+    it('declares schema version 1.5', () => {
       const parsed = JSON.parse(serializeProject(createTestProject()));
-      expect(parsed.version).toBe('1.4');
+      expect(parsed.version).toBe('1.5');
     });
 
     it('round-trips the play range and repeat flag', () => {
@@ -474,18 +513,18 @@ describe('fileIO', () => {
 
     it('round-trips a segment octave', () => {
       const project = revampProject();
-      project.bars[0].chords[0].octave = 2;
+      project.bars[0].content[FIXTURE_TRACK_ID].chords[0].octave = 2;
       const restored = deserializeProject(serializeProject(project));
 
-      expect(restored.bars[0].chords[0].octave).toBe(2);
+      expect(restored.bars[0].content[FIXTURE_TRACK_ID].chords[0].octave).toBe(2);
     });
 
     it('leaves a pre-1.3 segment without an octave, so it reads as 4', () => {
       const json = JSON.parse(serializeProject(revampProject()));
-      for (const chord of json.bars[0].chords) delete chord.octave;
+      for (const chord of json.bars[0].content[FIXTURE_TRACK_ID].chords) delete chord.octave;
 
       const restored = deserializeProject(JSON.stringify({ ...json, version: '1.2' }));
-      expect(restored.bars[0].chords[0].octave).toBeUndefined();
+      expect(restored.bars[0].content[FIXTURE_TRACK_ID].chords[0].octave).toBeUndefined();
     });
 
     it('round-trips per-bar time signatures', () => {
@@ -498,7 +537,7 @@ describe('fileIO', () => {
 
     it('round-trips segment kind and pitch', () => {
       const restored = deserializeProject(serializeProject(revampProject()));
-      const [chordSeg, noteSeg] = restored.bars[0].chords;
+      const [chordSeg, noteSeg] = restored.bars[0].content[FIXTURE_TRACK_ID].chords;
 
       expect(chordSeg).toMatchObject({ kind: 'chord', quality: 'halfDim7', root: 'B' });
       expect(chordSeg.pitch).toBeUndefined();
@@ -514,7 +553,7 @@ describe('fileIO', () => {
     it('drops a per-bar time signature that is not a legal meter', () => {
       const json = JSON.stringify({
         ...JSON.parse(serializeProject(createTestProject())),
-        bars: [{ id: 'bar-a', barIndex: 0, timeSignature: { beatsPerMeasure: 4, beatUnit: 5 }, scale: { root: 'C', type: 'major' }, chords: [], notes: [] }],
+        bars: [{ id: 'bar-a', barIndex: 0, timeSignature: { beatsPerMeasure: 4, beatUnit: 5 }, scale: { root: 'C', type: 'major' }, content: fixtureContent() }],
       });
 
       expect(deserializeProject(json).bars[0].timeSignature).toBeUndefined();
@@ -548,8 +587,114 @@ describe('fileIO', () => {
       const restored = deserializeProject(legacy);
 
       expect(restored.bars[0].timeSignature).toBeUndefined();
-      expect(restored.bars[0].chords[0]).toMatchObject({ kind: 'chord', root: 'C', duration: 4 });
-      expect(restored.bars[0].notes).toHaveLength(1);
+      expect(soleContent(restored.bars[0]).chords[0]).toMatchObject({ kind: 'chord', root: 'C', duration: 4 });
+      expect(soleContent(restored.bars[0]).notes).toHaveLength(1);
+    });
+  });
+
+  // The regression that matters most: every project written before instruments
+  // existed had exactly one timbre, and must still open with its music intact.
+  describe('schema 1.5 instruments', () => {
+    /** A 1.4 file: flat bar arrays, no instrument list. */
+    const legacy14 = () =>
+      JSON.stringify({
+        version: '1.4',
+        id: 'p1',
+        name: 'Pre-instruments',
+        bpm: 100,
+        timeSignature: { beatsPerMeasure: 4, beatUnit: 4 },
+        key: 'C',
+        keyMode: 'major',
+        tracks: [],
+        bars: [
+          {
+            id: 'bar-a',
+            barIndex: 0,
+            scale: { root: 'C', type: 'major' },
+            chords: [
+              { id: 'c1', kind: 'chord', startBeat: 0, romanNumeral: 'I', chordSymbol: 'C', duration: 2, root: 'C', quality: 'major' },
+            ],
+            notes: [
+              { id: 'n1', pitch: 60, startBeat: 0, duration: 2, velocity: 100 },
+              { id: 'n2', pitch: 64, startBeat: 0, duration: 2, velocity: 100 },
+            ],
+          },
+        ],
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-01-01T00:00:00.000Z',
+      });
+
+    it('gives a 1.4 file one Piano instrument to hang its music on', () => {
+      const restored = deserializeProject(legacy14());
+
+      expect(restored.tracks).toHaveLength(1);
+      expect(restored.tracks[0].name).toBe('Piano');
+      expect(restored.tracks[0].instrument).toBe('acoustic_grand_piano');
+      expect(restored.tracks[0].visible).toBe(true);
+    });
+
+    it('loads a 1.4 file with its segments and notes intact', () => {
+      const restored = deserializeProject(legacy14());
+      const content = soleContent(restored.bars[0]);
+
+      expect(content.chords).toHaveLength(1);
+      expect(content.chords[0]).toMatchObject({ id: 'c1', root: 'C', quality: 'major', duration: 2 });
+      expect(content.notes.map(n => n.pitch)).toEqual([60, 64]);
+    });
+
+    it('keys a 1.4 file\'s content to the instrument it synthesised', () => {
+      const restored = deserializeProject(legacy14());
+      expect(Object.keys(restored.bars[0].content)).toEqual([restored.tracks[0].id]);
+    });
+
+    it('reads the same legacy file the same way twice', () => {
+      // A generated id here would make an unchanged file look edited on reload.
+      const first = deserializeProject(legacy14());
+      const second = deserializeProject(legacy14());
+      expect(first.tracks[0].id).toBe(second.tracks[0].id);
+    });
+
+    it('keeps a legacy file\'s own tracks and puts the music on the first', () => {
+      const withTracks = JSON.parse(legacy14());
+      withTracks.tracks = [
+        { id: 'the-part', name: 'Lead', volume: 1, pan: 0, muted: false, solo: false },
+        { id: 'other', name: 'Second', volume: 1, pan: 0, muted: false, solo: false },
+      ];
+
+      const restored = deserializeProject(JSON.stringify(withTracks));
+
+      expect(restored.tracks.map(t => t.id)).toEqual(['the-part', 'other']);
+      // A pre-1.5 track named no sound, so it reads as the piano it always was.
+      expect(restored.tracks[0].instrument).toBe('acoustic_grand_piano');
+      expect(Object.keys(restored.bars[0].content)).toEqual(['the-part']);
+    });
+
+    it('round-trips two instruments independently at 1.5', () => {
+      const project = createTestProject({
+        tracks: [
+          { id: 'a', name: 'Piano', instrument: 'acoustic_grand_piano', volume: 1, pan: 0, muted: false, solo: false, visible: true },
+          { id: 'b', name: 'Strings', instrument: 'string_ensemble_1', volume: 1, pan: 0, muted: true, solo: false, visible: false },
+        ],
+        bars: [
+          {
+            id: 'bar-a',
+            barIndex: 0,
+            scale: { root: 'C', type: 'major' },
+            content: {
+              a: { chords: [{ id: 'ca', kind: 'chord', startBeat: 0, duration: 1, root: 'C', quality: 'major' }], notes: [] },
+              b: { chords: [{ id: 'cb', kind: 'chord', startBeat: 2, duration: 1, root: 'G', quality: 'major' }], notes: [] },
+            },
+          },
+        ],
+      });
+
+      const restored = deserializeProject(serializeProject(project));
+
+      expect(restored.tracks[1].instrument).toBe('string_ensemble_1');
+      expect(restored.tracks[1].muted).toBe(true);
+      expect(restored.tracks[1].visible).toBe(false);
+      expect(restored.bars[0].content.a.chords.map(c => c.id)).toEqual(['ca']);
+      expect(restored.bars[0].content.b.chords.map(c => c.id)).toEqual(['cb']);
     });
   });
 
@@ -562,11 +707,10 @@ describe('fileIO', () => {
             id: 'bar-a',
             barIndex: 0,
             scale: { root: 'C', type: 'major' },
-            chords: [
+            content: fixtureContent([
               { id: 'seg-1', kind: 'chord', startBeat: 0, duration: 1, root: 'C', quality: 'major' },
               { id: 'seg-2', kind: 'chord', startBeat: 3, duration: 1, root: 'G', quality: 'major' },
-            ],
-            notes: [],
+            ], []),
           },
         ],
       });
@@ -574,12 +718,12 @@ describe('fileIO', () => {
 
     it('round-trips the beat a segment starts on', () => {
       const restored = deserializeProject(serializeProject(spacedProject()));
-      expect(restored.bars[0].chords.map(c => c.startBeat)).toEqual([0, 3]);
+      expect(restored.bars[0].content[FIXTURE_TRACK_ID].chords.map(c => c.startBeat)).toEqual([0, 3]);
     });
 
     it('keeps a segment on beat 0 rather than losing it as a falsy value', () => {
       const parsed = JSON.parse(serializeProject(spacedProject()));
-      expect(parsed.bars[0].chords[0].startBeat).toBe(0);
+      expect(parsed.bars[0].content[FIXTURE_TRACK_ID].chords[0].startBeat).toBe(0);
     });
 
     it('leaves a position-less segment unpositioned, for the store to pack', () => {
@@ -593,17 +737,16 @@ describe('fileIO', () => {
             id: 'bar-a',
             barIndex: 0,
             scale: { root: 'C', type: 'major' },
-            chords: [
+            content: fixtureContent([
               { id: 'c1', kind: 'chord', duration: 2, root: 'C', quality: 'major' },
               { id: 'c2', kind: 'chord', duration: 2, root: 'G', quality: 'major' },
-            ],
-            notes: [],
+            ], []),
           },
         ],
       });
 
       const restored = deserializeProject(legacy);
-      expect(restored.bars[0].chords.every(c => c.startBeat === undefined)).toBe(true);
+      expect(restored.bars[0].content[FIXTURE_TRACK_ID].chords.every(c => c.startBeat === undefined)).toBe(true);
     });
 
     it('ignores a start beat that is not a number', () => {
@@ -614,13 +757,12 @@ describe('fileIO', () => {
             id: 'bar-a',
             barIndex: 0,
             scale: { root: 'C', type: 'major' },
-            chords: [{ id: 'c1', kind: 'chord', startBeat: 'two', duration: 1 }],
-            notes: [],
+            content: fixtureContent([{ id: 'c1', kind: 'chord', startBeat: 'two', duration: 1 }], []),
           },
         ],
       });
 
-      expect(deserializeProject(json).bars[0].chords[0].startBeat).toBeUndefined();
+      expect(soleContent(deserializeProject(json).bars[0]).chords[0].startBeat).toBeUndefined();
     });
   });
 

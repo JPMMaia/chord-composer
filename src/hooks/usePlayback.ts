@@ -1,7 +1,8 @@
 import { useRef, useCallback, useEffect, useState } from 'react';
 import { InstrumentPool, isTrackAudible } from '@/engine/instrumentPool';
-import { calculateNoteTiming, getLoopDuration } from '@/engine/playback';
+import { createTimingCache, getLoopDuration } from '@/engine/playback';
 import type { NoteTiming, PlaybackConfig } from '@/engine/playback';
+import type { Bar } from '@/types/music';
 import {
   LOOKAHEAD_SECONDS,
   TICK_MS,
@@ -53,9 +54,16 @@ export function usePlayback(config: PlaybackConfig) {
   /**
    * The config is rebuilt on every render by the caller, so the scheduling loop
    * reads it from a ref. Otherwise every keystroke would tear down the interval.
+   *
+   * The note list is derived from this ref on every pass rather than captured at
+   * Play, which is what lets an edit made mid-playback be heard from the next
+   * scheduling window instead of only at the next Play.
    */
   const configRef = useRef(config);
   configRef.current = config;
+
+  /** Memoised `calculateNoteTiming` for this run. Null while stopped. */
+  const timingsRef = useRef<((bars: Bar[]) => NoteTiming[]) | null>(null);
 
   const clearTimer = useCallback(() => {
     if (timerRef.current !== null) {
@@ -68,70 +76,71 @@ export function usePlayback(config: PlaybackConfig) {
    * One scheduling pass: hand the instrument every note between where we left off
    * and the look-ahead horizon, then advance the playhead.
    */
-  const tick = useCallback(
-    (timings: NoteTiming[]) => {
-      const pool = poolRef.current;
-      if (!pool) return;
+  const tick = useCallback(() => {
+    const pool = poolRef.current;
+    if (!pool) return;
 
-      const cfg = configRef.current;
-      const elapsed = pool.now() - songStartClockRef.current;
-      const loopDuration = getLoopDuration(cfg);
-      const loopFrom = rangeStart(cfg);
-
-      const horizon = elapsed + LOOKAHEAD_SECONDS;
-      /** Song time at which playback ends or wraps. */
-      const endSong = loopFrom + loopDuration;
-
-      const due = notesInWindow({
-        timings,
-        fromSong: scheduledUpToRef.current,
-        toSong: Math.min(horizon, endSong),
+    const cfg = configRef.current;
+    // Re-derived here, not at Play: an edit since the last pass is already in the
+    // config, and a note it changed is only ever dispatched once because
+    // `scheduledUpToRef` moves forward only.
+    const timings = timingsRef.current?.(cfg.bars) ?? [];
+    const elapsed = pool.now() - songStartClockRef.current;
+    const loopDuration = getLoopDuration(cfg);
+    const loopFrom = rangeStart(cfg);
+  
+    const horizon = elapsed + LOOKAHEAD_SECONDS;
+    /** Song time at which playback ends or wraps. */
+    const endSong = loopFrom + loopDuration;
+  
+    const due = notesInWindow({
+      timings,
+      fromSong: scheduledUpToRef.current,
+      toSong: Math.min(horizon, endSong),
+    });
+  
+    // Mute and solo are read here, per note, rather than baked into `timings`,
+    // so toggling either during playback is heard on the next tick.
+    const audible = new Set(
+      cfg.tracks.filter(t => isTrackAudible(t, cfg.tracks)).map(t => t.id)
+    );
+  
+    for (const note of due) {
+      if (!audible.has(note.trackId)) continue;
+  
+      pool.get(note.trackId)?.schedule({
+        midiNote: note.midiNote,
+        velocity: note.velocity,
+        when: toClockTime(note.startTime, songStartClockRef.current),
+        duration: note.duration,
       });
-
-      // Mute and solo are read here, per note, rather than baked into `timings`,
-      // so toggling either during playback is heard on the next tick.
-      const audible = new Set(
-        cfg.tracks.filter(t => isTrackAudible(t, cfg.tracks)).map(t => t.id)
-      );
-
-      for (const note of due) {
-        if (!audible.has(note.trackId)) continue;
-
-        pool.get(note.trackId)?.schedule({
-          midiNote: note.midiNote,
-          velocity: note.velocity,
-          when: toClockTime(note.startTime, songStartClockRef.current),
-          duration: note.duration,
-        });
-      }
-
-      scheduledUpToRef.current = Math.max(scheduledUpToRef.current, horizon);
-
-      // Reaching the end either wraps the loop or ends playback. Wrapping shifts the
-      // frame of reference forward by one loop length rather than resetting it to
-      // `now`, so the wrap lands on the beat instead of wherever the tick fired.
-      if (elapsed >= endSong) {
-        if (cfg.loopEnabled) {
-          songStartClockRef.current += loopDuration;
-          scheduledUpToRef.current = loopFrom;
-          setCurrentTime(loopFrom);
-          return;
-        }
-
-        clearTimer();
-        pool.stopAll();
-        setIsPlaying(false);
-        // Back to the start of the range rather than of the song, so pressing Play
-        // again repeats what was just heard.
+    }
+  
+    scheduledUpToRef.current = Math.max(scheduledUpToRef.current, horizon);
+  
+    // Reaching the end either wraps the loop or ends playback. Wrapping shifts the
+    // frame of reference forward by one loop length rather than resetting it to
+    // `now`, so the wrap lands on the beat instead of wherever the tick fired.
+    if (elapsed >= endSong) {
+      if (cfg.loopEnabled) {
+        songStartClockRef.current += loopDuration;
+        scheduledUpToRef.current = loopFrom;
         setCurrentTime(loopFrom);
-        resumeFromRef.current = 0;
         return;
       }
+  
+      clearTimer();
+      pool.stopAll();
+      setIsPlaying(false);
+      // Back to the start of the range rather than of the song, so pressing Play
+      // again repeats what was just heard.
+      setCurrentTime(loopFrom);
+      resumeFromRef.current = 0;
+      return;
+    }
 
-      setCurrentTime(Math.max(0, Math.min(elapsed, endSong)));
-    },
-    [clearTimer]
-  );
+    setCurrentTime(Math.max(0, Math.min(elapsed, endSong)));
+  }, [clearTimer]);
 
   const play = useCallback(async () => {
     if (startingRef.current) return;
@@ -154,7 +163,9 @@ export function usePlayback(config: PlaybackConfig) {
       const pool = poolRef.current;
 
       // Reconcile before loading: an instrument added or re-voiced since the last
-      // Play has to exist before there is anything to wait for.
+      // Play has to exist before there is anything to wait for. Deliberately only
+      // here, unlike the note list: building an instrument means downloading its
+      // samples, which is not something to start from inside a scheduling pass.
       pool.ensure(configRef.current.tracks);
 
       if (ctx.state === 'suspended') {
@@ -179,7 +190,13 @@ export function usePlayback(config: PlaybackConfig) {
       // to half a second old — which would be plainly audible.
       syncVst3Clock();
 
-      const timings = calculateNoteTiming(configRef.current);
+      // Tempo is fixed for the run here; everything else about the notes is read
+      // afresh on each pass.
+      timingsRef.current = createTimingCache(
+        configRef.current.bpm,
+        configRef.current.timeSignature
+      );
+
       // A range confines playback whether or not repeat is on, so a Play from a
       // stopped transport starts at the range rather than at the top of the song.
       const resumeFrom = Math.max(resumeFromRef.current, rangeStart(configRef.current));
@@ -194,8 +211,8 @@ export function usePlayback(config: PlaybackConfig) {
       setCurrentTime(resumeFrom);
 
       clearTimer();
-      tick(timings);
-      timerRef.current = setInterval(() => tick(timings), TICK_MS);
+      tick();
+      timerRef.current = setInterval(tick, TICK_MS);
     } finally {
       startingRef.current = false;
     }

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   calculateNoteTiming,
+  createTimingCache,
   getLoopDuration,
   calculateMetronomeBeats,
   type MetronomeClick,
@@ -167,6 +168,47 @@ describe('playback', () => {
 
       // Bar 1 starts at beat 3, note sits a beat into it.
       expect(timings[0].startTime).toBe(4);
+    });
+  });
+
+  // The scheduling loop asks for the timings on every pass so a mid-playback edit
+  // is heard; the cache is what keeps that from re-walking the project 20×/second.
+  describe('createTimingCache', () => {
+    const fourFour: TimeSignature = { beatsPerMeasure: 4, beatUnit: 4 };
+    const bars: Bar[] = [
+      makeBar(0, 4, [{ id: 'n1', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }]),
+    ];
+
+    it('reuses the previous result for the same bars', () => {
+      const timingsFor = createTimingCache(60, fourFour);
+
+      // Identity, not equality: a fresh array would mean the walk ran again.
+      expect(timingsFor(bars)).toBe(timingsFor(bars));
+    });
+
+    it('re-derives when the bars are replaced by an edit', () => {
+      const timingsFor = createTimingCache(60, fourFour);
+      expect(timingsFor(bars).map(t => t.midiNote)).toEqual([60]);
+
+      const edited: Bar[] = [
+        makeBar(0, 4, [
+          { id: 'n1', pitch: 62, startBeat: 0, duration: 1, velocity: 100 },
+          { id: 'n2', pitch: 65, startBeat: 2, duration: 1, velocity: 100 },
+        ]),
+      ];
+
+      expect(timingsFor(edited).map(t => t.midiNote)).toEqual([62, 65]);
+      expect(timingsFor(edited).map(t => t.startTime)).toEqual([0, 2]);
+    });
+
+    it('keeps the tempo it was built with', () => {
+      const timingsFor = createTimingCache(120, fourFour);
+      const edited: Bar[] = [
+        makeBar(0, 4, [{ id: 'n1', pitch: 60, startBeat: 2, duration: 1, velocity: 100 }]),
+      ];
+
+      // 120 BPM: half a second a beat.
+      expect(timingsFor(edited)[0].startTime).toBe(1);
     });
   });
 

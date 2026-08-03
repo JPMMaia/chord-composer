@@ -316,6 +316,88 @@ describe('usePlayback', () => {
     expect(scheduled.filter(n => n.midiNote === 60).length).toBeGreaterThan(1);
   });
 
+  // Editing the timeline used to be inaudible until the next Play, because the note
+  // list was snapshotted into the interval closure.
+  describe('editing while playing', () => {
+    /** Play with a config the test can swap, as the App does on every store change. */
+    function renderWithConfig(initial: PlaybackConfig) {
+      return renderHook(({ cfg }) => usePlayback(cfg), { initialProps: { cfg: initial } });
+    }
+
+    it('plays a note added ahead of the playhead', async () => {
+      const { result, rerender } = renderWithConfig(config);
+      await startPlayback(result);
+      await advance(1);
+
+      // A new bars array is what every store mutation produces.
+      rerender({
+        cfg: {
+          ...config,
+          bars: [
+            makeBar(0, [
+              makeNote(60, 0),
+              makeNote(62, 1),
+              makeNote(64, 2),
+              makeNote(65, 3),
+              makeNote(70, 3.5),
+            ]),
+          ],
+        },
+      });
+
+      await advance(3);
+      expect(scheduled.filter(n => n.midiNote === 70)).toHaveLength(1);
+    });
+
+    it('plays the new pitch when a note ahead of the playhead is re-voiced', async () => {
+      const { result, rerender } = renderWithConfig(config);
+      await startPlayback(result);
+      await advance(1);
+
+      rerender({
+        cfg: {
+          ...config,
+          bars: [
+            makeBar(0, [makeNote(60, 0), makeNote(62, 1), makeNote(64, 2), makeNote(77, 3)]),
+          ],
+        },
+      });
+
+      await advance(3);
+      const pitches = scheduled.map(n => n.midiNote);
+      expect(pitches).toContain(77);
+      expect(pitches).not.toContain(65);
+    });
+
+    // The guard against the obvious way to get this wrong: rebuilding the note list
+    // mid-run must not re-dispatch what has already gone to the instrument.
+    it('does not replay notes it has already scheduled', async () => {
+      const { result, rerender } = renderWithConfig(config);
+      await startPlayback(result);
+      await advance(2.5);
+
+      rerender({
+        cfg: {
+          ...config,
+          bars: [
+            makeBar(0, [
+              makeNote(60, 0),
+              makeNote(62, 1),
+              makeNote(64, 2),
+              makeNote(65, 3),
+              makeNote(70, 3.5),
+            ]),
+          ],
+        },
+      });
+
+      await advance(2);
+      for (const pitch of [60, 62, 64, 65, 70]) {
+        expect(scheduled.filter(n => n.midiNote === pitch)).toHaveLength(1);
+      }
+    });
+  });
+
   describe('play range', () => {
     /** Two bars, so a range over the second one has something before it to skip. */
     const twoBars: PlaybackConfig = {

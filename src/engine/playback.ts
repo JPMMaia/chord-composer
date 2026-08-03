@@ -42,8 +42,9 @@ function beatDuration(bpm: number): number {
  * length of everything before it rather than `barIndex × beatsPerMeasure`.
  *
  * Every instrument's notes are included regardless of mute and solo: the result is
- * computed once per Play, and filtering here would freeze the mute state at that
- * moment. Whether a note is actually sounded is decided when it is dispatched.
+ * re-derived only when the bars change, and filtering here would freeze the mute
+ * state at that moment. Whether a note is actually sounded is decided when it is
+ * dispatched.
  */
 export function calculateNoteTiming(config: PlaybackConfig): NoteTiming[] {
   const beatDur = beatDuration(config.bpm);
@@ -66,6 +67,41 @@ export function calculateNoteTiming(config: PlaybackConfig): NoteTiming[] {
   }
 
   return timings;
+}
+
+/**
+ * A `calculateNoteTiming` that recomputes only when the bars actually change.
+ *
+ * Every store mutation replaces the `bars` array, so identity is a sound key: the
+ * scheduling loop can ask for the timings on every tick — and so hear an edit made
+ * mid-playback — while still paying for the walk only once per edit.
+ *
+ * Tempo is fixed at construction rather than read per call. It scales every
+ * `startTime`, so letting it change mid-run would move the notes out from under a
+ * playhead that has already passed them.
+ */
+export function createTimingCache(
+  bpm: number,
+  timeSignature: TimeSignature
+): (bars: Bar[]) => NoteTiming[] {
+  let lastBars: Bar[] | null = null;
+  let lastTimings: NoteTiming[] = [];
+
+  return bars => {
+    if (bars !== lastBars) {
+      lastBars = bars;
+      lastTimings = calculateNoteTiming({
+        bpm,
+        timeSignature,
+        bars,
+        tracks: [],
+        loopStart: null,
+        loopEnd: null,
+        loopEnabled: false,
+      });
+    }
+    return lastTimings;
+  };
 }
 
 /**

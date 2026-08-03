@@ -20,13 +20,9 @@ import {
   getTotalBeats,
   MIN_SEGMENT_BEATS,
 } from '@/engine/timeline';
-import type { Bar, NoteName, ScaleType, TimeSignature } from '@/types/music';
-import {
-  NOTE_NAMES,
-  PIANO_KEYS_WIDTH,
-  PIXELS_PER_BEAT,
-  SCALE_TYPES,
-} from '@/utils/constants';
+import { projectScale } from '@/engine/scales';
+import type { Bar, TimeSignature } from '@/types/music';
+import { PIANO_KEYS_WIDTH, PIXELS_PER_BEAT } from '@/utils/constants';
 
 /**
  * The bars a play range covers, as "2–4" or just "2" for a range inside one bar.
@@ -51,7 +47,6 @@ function App() {
   const setBpm = projectStore(s => s.setBpm);
   const addBar = projectStore(s => s.addBar);
   const removeBar = projectStore(s => s.removeBar);
-  const updateBarScale = projectStore(s => s.updateBarScale);
 
   const selectedBarId = selectionStore(s => s.selectedBarId);
   const selectedTrackId = selectionStore(s => s.selectedTrackId);
@@ -78,9 +73,20 @@ function App() {
     }
   }, [project, createProject, addBar]);
 
+  // Open a piece in its own key. Keyed on the project id rather than the key
+  // itself, so this seeds on create and on load but never fights the palette
+  // dropdown afterwards — moving the palette to another key is the point of it.
+  const projectId = project?.id;
+  useEffect(() => {
+    if (!projectId) return;
+    const opened = projectStore.getState().project;
+    if (!opened) return;
+    editorStore.getState().setPaletteScale(projectScale(opened.key, opened.keyMode));
+  }, [projectId]);
+
   const selectedBar = project?.bars.find(b => b.id === selectedBarId);
 
-  // Auto-select the first bar so the palette always has a scale to work from.
+  // Auto-select the first bar so the piano roll and bar panel have one to show.
   useEffect(() => {
     if (project && project.bars.length > 0 && !selectedBarId) {
       selectBar(project.bars[0].id);
@@ -181,7 +187,9 @@ function App() {
 
         {/* Center — palette strip, chord timeline, piano roll */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          {selectedBar && <ScalePalette scale={selectedBar.scale} />}
+          {/* Ungated by the bar cursor: the palette carries its own key, so it has
+              material to offer whether or not a bar is selected. */}
+          <ScalePalette />
 
           <ChordTimeline />
 
@@ -228,52 +236,8 @@ function App() {
 
           {selectedBar && (
             <div className="p-3 space-y-4">
-              {/* Scale Settings */}
-              <div>
-                <label className="block text-xs text-gray-400 mb-1" htmlFor="bar-root">
-                  Root Note
-                </label>
-                <select
-                  id="bar-root"
-                  value={selectedBar.scale.root}
-                  onChange={e =>
-                    updateBarScale(selectedBar.id, {
-                      root: e.target.value as NoteName,
-                      type: selectedBar.scale.type,
-                    })
-                  }
-                  className="w-full px-2 py-1.5 text-sm bg-gray-700 border border-gray-600 rounded text-gray-200 focus:outline-none focus:border-indigo-500"
-                >
-                  {NOTE_NAMES.map(note => (
-                    <option key={note} value={note}>{note}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs text-gray-400 mb-1" htmlFor="bar-scale-type">
-                  Scale Type
-                </label>
-                <select
-                  id="bar-scale-type"
-                  value={selectedBar.scale.type}
-                  onChange={e =>
-                    updateBarScale(selectedBar.id, {
-                      root: selectedBar.scale.root,
-                      type: e.target.value as ScaleType,
-                    })
-                  }
-                  className="w-full px-2 py-1.5 text-sm bg-gray-700 border border-gray-600 rounded text-gray-200 focus:outline-none focus:border-indigo-500"
-                >
-                  {SCALE_TYPES.map(type => (
-                    <option key={type} value={type}>
-                      {type.replace(/([A-Z])/g, ' $1').trim()}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Bar Info */}
+              {/* Bar Info. No key here: it belongs to the blocks, and is edited in
+                  the palette for new ones and the inspector for existing ones. */}
               <div className="pt-2 border-t border-gray-700 space-y-2">
                 {/* Counts for the instrument being edited, not the whole bar —
                     this panel sits beside a timeline showing only that one. */}

@@ -1,6 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { ScalePalette } from '@/components/ScalePalette';
+import { editorStore } from '@/store/editorStore';
 import type { Scale } from '@/types/music';
 
 const C_MAJOR: Scale = { root: 'C', type: 'major' };
@@ -42,8 +43,14 @@ function makeDataTransfer() {
 }
 
 describe('ScalePalette', () => {
+  // The palette's key is store state now, not a prop, and the store outlives a
+  // single test — so each case starts from the same key.
+  beforeEach(() => {
+    editorStore.getState().setPaletteScale(C_MAJOR);
+  });
+
   it('defaults to chords mode and renders each degree as "Label (Numeral)"', () => {
-    render(<ScalePalette scale={C_MAJOR} />);
+    render(<ScalePalette />);
 
     expect(blockTexts()).toEqual([
       'C (I)', 'Dm (ii)', 'Em (iii)', 'F (IV)', 'G (V)', 'Am (vi)', 'B° (vii°)',
@@ -51,7 +58,7 @@ describe('ScalePalette', () => {
   });
 
   it('switches to notes mode, naming each note with its octave', () => {
-    render(<ScalePalette scale={C_MAJOR} />);
+    render(<ScalePalette />);
 
     fireEvent.change(screen.getByLabelText('Palette mode'), { target: { value: 'notes' } });
 
@@ -61,14 +68,14 @@ describe('ScalePalette', () => {
   });
 
   it('defaults to octave 4 and states it beside the blocks', () => {
-    render(<ScalePalette scale={C_MAJOR} />);
+    render(<ScalePalette />);
 
     expect((screen.getByLabelText('Octave') as HTMLSelectElement).value).toBe('4');
     expect(screen.getByText(/octave 4/)).toBeInTheDocument();
   });
 
   it('rebuilds note blocks in the chosen octave', () => {
-    render(<ScalePalette scale={C_MAJOR} />);
+    render(<ScalePalette />);
     fireEvent.change(screen.getByLabelText('Palette mode'), { target: { value: 'notes' } });
     fireEvent.change(screen.getByLabelText('Octave'), { target: { value: '6' } });
 
@@ -78,7 +85,7 @@ describe('ScalePalette', () => {
   });
 
   it('keeps chord symbols bare but carries the chosen octave in the payload', () => {
-    render(<ScalePalette scale={C_MAJOR} />);
+    render(<ScalePalette />);
     fireEvent.change(screen.getByLabelText('Octave'), { target: { value: '2' } });
 
     // The symbol must stay parseable by `chordFromSymbol`, so the octave is not
@@ -94,7 +101,7 @@ describe('ScalePalette', () => {
   });
 
   it('switches to seventh chords mode', () => {
-    render(<ScalePalette scale={C_MAJOR} />);
+    render(<ScalePalette />);
 
     fireEvent.change(screen.getByLabelText('Palette mode'), { target: { value: 'sevenths' } });
 
@@ -104,21 +111,32 @@ describe('ScalePalette', () => {
     ]);
   });
 
-  it('follows the scale it is given', () => {
-    const { rerender } = render(<ScalePalette scale={C_MAJOR} />);
+  it('restocks itself from its own root and scale dropdowns', () => {
+    render(<ScalePalette />);
     expect(blockTexts()[0]).toBe('C (I)');
 
-    rerender(<ScalePalette scale={A_MINOR} />);
+    fireEvent.change(screen.getByLabelText('Root Note'), { target: { value: 'A' } });
+    fireEvent.change(screen.getByLabelText('Scale Type'), { target: { value: 'naturalMinor' } });
+
     expect(blockTexts().slice(0, 2)).toEqual(['Am (i)', 'B° (ii°)']);
+    expect(editorStore.getState().paletteScale).toEqual(A_MINOR);
+  });
+
+  it('follows the palette scale in the store', () => {
+    render(<ScalePalette />);
+    expect(blockTexts()[0]).toBe('C (I)');
+
+    fireEvent.change(screen.getByLabelText('Root Note'), { target: { value: 'G' } });
+    expect(blockTexts()[0]).toBe('G (I)');
   });
 
   it('captions the strip with the scale name', () => {
-    render(<ScalePalette scale={C_MAJOR} />);
-    expect(screen.getByText(/C Major/i)).toBeInTheDocument();
+    render(<ScalePalette />);
+    expect(screen.getByTestId('palette-caption')).toHaveTextContent('C Major');
   });
 
   it('writes the palette item onto the drag payload', () => {
-    render(<ScalePalette scale={C_MAJOR} />);
+    render(<ScalePalette />);
     const dataTransfer = makeDataTransfer();
 
     fireEvent.dragStart(block('Dm (ii)'), { dataTransfer });
@@ -131,7 +149,7 @@ describe('ScalePalette', () => {
   });
 
   it('carries a pitch on note blocks', () => {
-    render(<ScalePalette scale={C_MAJOR} />);
+    render(<ScalePalette />);
     fireEvent.change(screen.getByLabelText('Palette mode'), { target: { value: 'notes' } });
 
     const dataTransfer = makeDataTransfer();

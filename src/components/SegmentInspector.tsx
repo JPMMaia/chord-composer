@@ -2,6 +2,8 @@ import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { findSegment } from '@/engine/timeline';
 import { resolveSegmentChord } from '@/engine/chordOperations';
+import { projectScale, segmentScale } from '@/engine/scales';
+import { ScaleSelect } from '@/components/ScaleSelect';
 import { voicedPitches } from '@/engine/voicing';
 import { CHORD_INTERVALS, midiToNoteLabel } from '@/engine/chords';
 import { describePosition, formatNoteValue } from '@/engine/meterDisplay';
@@ -129,6 +131,7 @@ export function SegmentInspector() {
   const toggleSegmentsDoubling = projectStore(s => s.toggleSegmentsDoubling);
   const setSegmentsBreak = projectStore(s => s.setSegmentsBreak);
   const clearSegmentsVoicing = projectStore(s => s.clearSegmentsVoicing);
+  const setSegmentsScale = projectStore(s => s.setSegmentsScale);
 
   const located = project
     ? selectedSegmentIds
@@ -150,13 +153,21 @@ export function SegmentInspector() {
   const chords = located.filter(l => l.segment.kind !== 'note');
   const first = located[0];
 
-  // Each chord is resolved against the scale of the bar it actually sits in, so a
+  const fallbackScale = projectScale(project.key, project.keyMode);
+  const scaleOf = (segment: ChordSegment) => segmentScale(segment, fallbackScale);
+
+  // Each chord is resolved against the key it was actually written in, so a
   // selection spanning keys still counts its tones correctly.
   const toneCounts = chords.map(
-    l => CHORD_INTERVALS[resolveSegmentChord(l.segment, l.bar.scale).quality].length
+    l => CHORD_INTERVALS[resolveSegmentChord(l.segment, scaleOf(l.segment)).quality].length
   );
   const toneCount = sharedValue(toneCounts);
   const perToneControls = toneCount !== undefined && chords.length > 0;
+
+  // Root and type are shared separately: a selection agreeing on one but not the
+  // other should still show the half it agrees on.
+  const sharedRoot = sharedValue(segments.map(s => scaleOf(s).root));
+  const sharedType = sharedValue(segments.map(s => scaleOf(s).type));
 
   return (
     <div className="pt-2 border-t border-gray-700 space-y-3" data-testid="segment-inspector">
@@ -167,6 +178,18 @@ export function SegmentInspector() {
           first.bar.timeSignature ?? project.timeSignature ?? DEFAULT_TIME_SIGNATURE
         }
       />
+
+      {/* Outside the chords-only branch below: a note is written in a key too, and
+          retuning one moves it to the same degree of the new scale. */}
+      <Section label="Key">
+        <ScaleSelect
+          idPrefix="segment"
+          layout="stacked"
+          root={sharedRoot}
+          type={sharedType}
+          onChange={patch => setSegmentsScale(ids, patch)}
+        />
+      </Section>
 
       {chords.length === 0 ? (
         <p className="text-xs text-gray-500">A single note has no chord tones to voice.</p>
@@ -223,7 +246,8 @@ export function SegmentInspector() {
                   <VoiceRow
                     key={tone}
                     tone={tone}
-                    location={first}
+                    segment={first.segment}
+                    scale={scaleOf(first.segment)}
                     single={chords.length === 1}
                     onStep={offset => setSegmentsToneOffset(ids, tone, offset)}
                   />
@@ -339,17 +363,19 @@ function Identity({
  */
 function VoiceRow({
   tone,
-  location,
+  segment,
+  scale,
   single,
   onStep,
 }: {
   tone: number;
-  location: { segment: ChordSegment; bar: { scale: Scale } };
+  segment: ChordSegment;
+  /** The key the segment is written in, for resolving a numeral-only chord. */
+  scale: Scale;
   single: boolean;
   onStep: (offsetOctaves: number) => void;
 }) {
-  const { segment, bar } = location;
-  const { quality, rootSemitone } = resolveSegmentChord(segment, bar.scale);
+  const { quality, rootSemitone } = resolveSegmentChord(segment, scale);
   const baseMidi = ((segment.octave ?? 4) + 1) * 12 + rootSemitone;
   const offset = segment.voicing?.offsets?.[tone] ?? 0;
 

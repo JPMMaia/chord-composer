@@ -18,12 +18,14 @@ import { soloContent, TEST_TRACK_ID } from "../helpers/tracks";
 const TS_4_4: TimeSignature = { beatsPerMeasure: 4, beatUnit: 4 };
 const TS_3_4: TimeSignature = { beatsPerMeasure: 3, beatUnit: 4 };
 
+/** The key most of these cases work in — passed in now that bars have none. */
+const C_MAJOR: Scale = { root: "C", type: "major" };
+
 /** A bar carrying exactly the given segments. */
 const barWith = (chords: ChordSegment[], timeSignature?: TimeSignature): Bar => ({
   id: generateId(),
   barIndex: 0,
   timeSignature,
-  scale: { root: "C", type: "major" },
   content: soloContent(chords),
 });
 
@@ -33,7 +35,6 @@ const makeBar = (barIndex: number, beatsPerMeasure: number): Bar => ({
   id: generateId(),
   barIndex,
   timeSignature: { beatsPerMeasure, beatUnit: 4 },
-  scale: { root: "C", type: "major" },
   content: soloContent(),
 });
 
@@ -52,7 +53,7 @@ describe("chordOperations", () => {
   describe("splitBarIntoChords", () => {
     it("splits a 4/4 bar into 4 quarter-note chords", () => {
       const bar = makeBar(0, 4);
-      const result = splitBarIntoChords(bar, 4);
+      const result = splitBarIntoChords(bar, C_MAJOR, 4);
       expect(result).toHaveLength(4);
       result.forEach((chord) => {
         expect(chord.duration).toBe(1);
@@ -61,7 +62,7 @@ describe("chordOperations", () => {
 
     it("splits a 4/4 bar into 2 half-note chords", () => {
       const bar = makeBar(0, 4);
-      const result = splitBarIntoChords(bar, 2);
+      const result = splitBarIntoChords(bar, C_MAJOR, 2);
       expect(result).toHaveLength(2);
       result.forEach((chord) => {
         expect(chord.duration).toBe(2);
@@ -70,7 +71,7 @@ describe("chordOperations", () => {
 
     it("splits a 3/4 bar into 3 quarter-note chords", () => {
       const bar = makeBar(0, 3);
-      const result = splitBarIntoChords(bar, 3);
+      const result = splitBarIntoChords(bar, C_MAJOR, 3);
       expect(result).toHaveLength(3);
       result.forEach((chord) => {
         expect(chord.duration).toBe(1);
@@ -79,14 +80,14 @@ describe("chordOperations", () => {
 
     it("preserves total duration equals bar length", () => {
       const bar = makeBar(0, 4);
-      const result = splitBarIntoChords(bar, 3);
+      const result = splitBarIntoChords(bar, C_MAJOR, 3);
       const totalDuration = result.reduce((sum, c) => sum + c.duration, 0);
       expect(totalDuration).toBe(4);
     });
 
     it("voices each degree from the scale's root note", () => {
-      const bar: Bar = { ...makeBar(0, 4), scale: { root: "D", type: "major" } };
-      const result = splitBarIntoChords(bar, 7);
+      const bar = makeBar(0, 4);
+      const result = splitBarIntoChords(bar, { root: "D", type: "major" }, 7);
       // The seventh degree of D major is a C#, above the D tonic, so it belongs in
       // octave 5 rather than dropping a semitone below its own key.
       expect(result.map((c) => c.root)).toEqual([
@@ -97,20 +98,20 @@ describe("chordOperations", () => {
 
     it("throws if chordCount is less than 1", () => {
       const bar = makeBar(0, 4);
-      expect(() => splitBarIntoChords(bar, 0)).toThrow();
-      expect(() => splitBarIntoChords(bar, -1)).toThrow();
+      expect(() => splitBarIntoChords(bar, C_MAJOR, 0)).toThrow();
+      expect(() => splitBarIntoChords(bar, C_MAJOR, -1)).toThrow();
     });
 
     it("throws when the chords would be finer than a segment can be", () => {
       // The limit is the grid, not the beat count: sixteen sixteenths fit a 4/4 bar.
       const bar = makeBar(0, 4);
-      expect(splitBarIntoChords(bar, 16)).toHaveLength(16);
-      expect(() => splitBarIntoChords(bar, 17)).toThrow();
+      expect(splitBarIntoChords(bar, C_MAJOR, 16)).toHaveLength(16);
+      expect(() => splitBarIntoChords(bar, C_MAJOR, 17)).toThrow();
     });
 
     it("splits a 6/8 bar into six eighths", () => {
       const bar = barWith([], { beatsPerMeasure: 6, beatUnit: 8 });
-      const result = splitBarIntoChords(bar, 6);
+      const result = splitBarIntoChords(bar, C_MAJOR, 6);
 
       expect(result).toHaveLength(6);
       // Six eighths, not six quarters — the bar is three beats long, like 3/4.
@@ -120,7 +121,7 @@ describe("chordOperations", () => {
 
     it("assigns diatonic chord symbols based on bar scale", () => {
       const bar = makeBar(0, 4);
-      const result = splitBarIntoChords(bar, 4);
+      const result = splitBarIntoChords(bar, C_MAJOR, 4);
       // Should assign I, ii, iii, IV for C major
       expect(result[0].romanNumeral).toBe("I");
       expect(result[1].romanNumeral).toBe("ii");
@@ -129,11 +130,8 @@ describe("chordOperations", () => {
     });
 
     it("assigns correct romans for minor scale", () => {
-      const bar: Bar = {
-        ...makeBar(0, 4),
-        scale: { root: "A", type: "naturalMinor" },
-      };
-      const result = splitBarIntoChords(bar, 4);
+      const bar = makeBar(0, 4);
+      const result = splitBarIntoChords(bar, { root: "A", type: "naturalMinor" }, 4);
       expect(result[0].romanNumeral).toBe("i");
       expect(result[1].romanNumeral).toBe("ii°");
       expect(result[2].romanNumeral).toBe("III");
@@ -142,7 +140,7 @@ describe("chordOperations", () => {
 
     it("generates unique IDs for each chord", () => {
       const bar = makeBar(0, 4);
-      const result = splitBarIntoChords(bar, 4);
+      const result = splitBarIntoChords(bar, C_MAJOR, 4);
       const ids = result.map((c) => c.id);
       expect(new Set(ids).size).toBe(4);
     });
@@ -210,21 +208,21 @@ describe("chordOperations", () => {
   describe("generateNotesFromSegments", () => {
     it("generates a triad for a chord spanning the bar", () => {
       const bar = barWith([makeChord("I", 4)]);
-      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
       // C major triad in octave 4: C4, E4, G4 = MIDI 60, 64, 67
       expect(result.map((n) => n.pitch).sort((a, b) => a - b)).toEqual([60, 64, 67]);
     });
 
     it("lays consecutive chords out at the right start beats", () => {
       const bar = barWith([makeChord("I", 2), makeChord("V", 2)]);
-      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
       expect(result.filter((n) => n.startBeat === 0)).toHaveLength(3);
       expect(result.filter((n) => n.startBeat === 2)).toHaveLength(3);
     });
 
     it("gives notes the duration of their chord", () => {
       const bar = barWith([makeChord("I", 2)]);
-      generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4).forEach((note) => {
+      generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4).forEach((note) => {
         expect(note.duration).toBe(2);
       });
     });
@@ -233,7 +231,7 @@ describe("chordOperations", () => {
       const bar = barWith([
         { id: generateId(), kind: "chord", root: "C", quality: "major", octave: 6, duration: 4 },
       ]);
-      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
       // C major an octave above the default: C6, E6, G6.
       expect(result.map((n) => n.pitch).sort((a, b) => a - b)).toEqual([84, 88, 91]);
     });
@@ -243,7 +241,7 @@ describe("chordOperations", () => {
         { id: generateId(), kind: "chord", startBeat: 0, root: "C", quality: "major", octave: 5, duration: 2 },
         { id: generateId(), kind: "chord", startBeat: 2, root: "C", quality: "major", octave: 6, duration: 2 },
       ]);
-      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
       const low = result.filter((n) => n.startBeat === 0).map((n) => n.pitch).sort((a, b) => a - b);
       const high = result.filter((n) => n.startBeat === 2).map((n) => n.pitch).sort((a, b) => a - b);
       expect(high).toEqual(low.map((p) => p + 12));
@@ -252,22 +250,22 @@ describe("chordOperations", () => {
     it("falls back to the octave argument for a segment written without one", () => {
       const bar = barWith([makeChord("I", 4)]);
       expect(barChords(bar, TEST_TRACK_ID)[0].octave).toBeUndefined();
-      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
       expect(result.map((n) => n.pitch).sort((a, b) => a - b)).toEqual([60, 64, 67]);
     });
 
     it("returns an empty array for a bar with no segments", () => {
-      expect(generateNotesFromSegments([], barWith([]), TS_4_4, 4)).toEqual([]);
+      expect(generateNotesFromSegments([], barWith([]), C_MAJOR, TS_4_4, 4)).toEqual([]);
     });
 
     it("does not throw when segments overrun the bar", () => {
       const bar = barWith([makeChord("I", 3), makeChord("V", 3)]);
-      expect(() => generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4)).not.toThrow();
+      expect(() => generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4)).not.toThrow();
     });
 
     it("generates the correct notes for a ii chord (Dm)", () => {
       const bar = barWith([makeChord("ii", 4)]);
-      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
       // Dm triad: D4, F4, A4 = MIDI 62, 65, 69
       expect(result.map((n) => n.pitch).sort((a, b) => a - b)).toEqual([62, 65, 69]);
     });
@@ -276,7 +274,7 @@ describe("chordOperations", () => {
       const bar = barWith([
         { id: generateId(), kind: "chord", root: "G", quality: "dominant7", duration: 4 },
       ]);
-      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
       // G7: G4 B4 D5 F5 = 67, 71, 74, 77
       expect(result.map((n) => n.pitch).sort((a, b) => a - b)).toEqual([67, 71, 74, 77]);
     });
@@ -285,7 +283,7 @@ describe("chordOperations", () => {
       const bar = barWith([
         { id: generateId(), kind: "note", pitch: 64, duration: 2 },
       ]);
-      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
       expect(result).toHaveLength(1);
       expect(result[0].pitch).toBe(64);
       expect(result[0].duration).toBe(2);
@@ -297,33 +295,33 @@ describe("chordOperations", () => {
         { id: generateId(), kind: "note", pitch: 60, duration: 1 },
         makeChord("V", 1),
       ]);
-      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
       expect(result.filter((n) => n.startBeat === 0)).toHaveLength(1);
       expect(result.filter((n) => n.startBeat === 1)).toHaveLength(3);
     });
 
     it("honours the bar's own time signature", () => {
       const bar = barWith([makeChord("I", 1), makeChord("V", 1), makeChord("I", 1)], TS_3_4);
-      expect(() => generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4)).not.toThrow();
-      expect(generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4)).toHaveLength(9);
+      expect(() => generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4)).not.toThrow();
+      expect(generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4)).toHaveLength(9);
     });
 
     it("assigns unique IDs to generated notes", () => {
       const bar = barWith([makeChord("I", 4)]);
-      const ids = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4).map((n) => n.id);
+      const ids = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4).map((n) => n.id);
       expect(new Set(ids).size).toBe(ids.length);
     });
 
     it("sets velocity to default (100) for all notes", () => {
       const bar = barWith([makeChord("I", 4)]);
-      generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4).forEach((note) => {
+      generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4).forEach((note) => {
         expect(note.velocity).toBe(100);
       });
     });
 
     it("places notes at the segment's own start beat", () => {
       const bar = barWith([{ ...makeChord("I", 1), startBeat: 3 }]);
-      generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4).forEach((note) => {
+      generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4).forEach((note) => {
         expect(note.startBeat).toBe(3);
       });
     });
@@ -334,7 +332,7 @@ describe("chordOperations", () => {
         { ...makeChord("I", 1), startBeat: 0 },
         { ...makeChord("V", 1), startBeat: 2 },
       ]);
-      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
       expect(result.map((n) => n.startBeat).sort()).toEqual([0, 0, 0, 2, 2, 2]);
       expect(result.some((n) => n.startBeat > 0 && n.startBeat < 2)).toBe(false);
     });
@@ -344,7 +342,7 @@ describe("chordOperations", () => {
       const bar = barWith([
         { ...makeChord("I", 4), voicing: { offsets: [0, -1, 0] } },
       ]);
-      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
       expect(result.map((n) => n.pitch)).toEqual([52, 60, 67]);
     });
 
@@ -352,7 +350,7 @@ describe("chordOperations", () => {
       const bar = barWith([
         { ...makeChord("I", 4), voicing: { doublings: [{ tone: 0, octaves: -1 }] } },
       ]);
-      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
       expect(result.map((n) => n.pitch)).toEqual([48, 60, 64, 67]);
     });
 
@@ -360,7 +358,7 @@ describe("chordOperations", () => {
       const bar = barWith([
         { ...makeChord("I", 3), voicing: { break: { mode: "arpeggio", pattern: "up" } } },
       ]);
-      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
       expect(result.map((n) => n.startBeat)).toEqual([0, 1, 2]);
       expect(result.map((n) => n.pitch)).toEqual([60, 64, 67]);
     });
@@ -372,7 +370,7 @@ describe("chordOperations", () => {
           voicing: { break: { mode: "strum", spreadBeats: 0.25, direction: "up" } },
         },
       ]);
-      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
       expect(result.map((n) => n.startBeat)).toEqual([0, 0.25, 0.5]);
       result.forEach((note) => {
         expect(note.startBeat + note.duration).toBeCloseTo(4, 10);
@@ -389,7 +387,7 @@ describe("chordOperations", () => {
           voicing: { break: { mode: "arpeggio", pattern: "upDown" } },
         },
       ]);
-      generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4).forEach((note) => {
+      generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4).forEach((note) => {
         expect(note.startBeat).toBeGreaterThanOrEqual(3);
         expect(note.startBeat + note.duration).toBeLessThanOrEqual(4 + 1e-9);
       });
@@ -406,7 +404,7 @@ describe("chordOperations", () => {
           voicing: { offsets: [-1], break: { mode: "arpeggio", pattern: "up" } },
         },
       ]);
-      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
       expect(result).toHaveLength(1);
       expect(result[0]).toMatchObject({ pitch: 60, startBeat: 0, duration: 4 });
     });
@@ -415,12 +413,12 @@ describe("chordOperations", () => {
       // Refitting owns moving this into the next bar; rendering it here would
       // double it up.
       const bar = barWith([{ ...makeChord("I", 1), startBeat: 4 }]);
-      expect(generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4)).toEqual([]);
+      expect(generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4)).toEqual([]);
     });
 
     it("packs positionless segments, as projects saved before free placement meant", () => {
       const bar = barWith([makeChord("I", 2), makeChord("V", 2)]);
-      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4, 4);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
       expect(result.filter((n) => n.startBeat === 0)).toHaveLength(3);
       expect(result.filter((n) => n.startBeat === 2)).toHaveLength(3);
     });
@@ -892,7 +890,7 @@ describe("chordOperations", () => {
         },
       ]);
       // E4 G4 C5 rather than C4 E4 G4.
-      expect(generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4).map((n) => n.pitch)).toEqual([64, 67, 72]);
+      expect(generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4).map((n) => n.pitch)).toEqual([64, 67, 72]);
     });
 
     it("keeps root position when a segment carries no inversion", () => {
@@ -907,7 +905,7 @@ describe("chordOperations", () => {
           duration: 1,
         },
       ]);
-      expect(generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, TS_4_4).map((n) => n.pitch)).toEqual([60, 64, 67]);
+      expect(generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4).map((n) => n.pitch)).toEqual([60, 64, 67]);
     });
   });
 });

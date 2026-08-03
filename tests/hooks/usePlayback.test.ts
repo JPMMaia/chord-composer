@@ -83,7 +83,6 @@ const makeBar = (barIndex: number, notes: Note[]): Bar => ({
   id: `bar-${barIndex}`,
   barIndex,
   timeSignature: { beatsPerMeasure: 4, beatUnit: 4 },
-  scale: { root: 'C', type: 'major' },
   content: soloContent([], notes),
 });
 

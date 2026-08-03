@@ -30,7 +30,6 @@ function createTestProject(overrides?: Partial<Project>): Project {
       {
         id: generateId(),
         barIndex: 0,
-        scale: { root: 'C', type: 'major' },
         content: soloContent([
           { id: generateId(), romanNumeral: 'I', chordSymbol: 'C', duration: 2, root: 'C', quality: 'major' },
           { id: generateId(), romanNumeral: 'V', chordSymbol: 'G', duration: 2, root: 'G', quality: 'major' },
@@ -118,7 +117,6 @@ describe('musicxmlExporter', () => {
           {
             id: generateId(),
             barIndex: 0,
-            scale: { root: 'C', type: 'major' },
             content: soloContent([{ id: generateId(), romanNumeral: 'I', chordSymbol: 'C', duration: 4, root: 'C', quality: 'major' }], [
               { id: generateId(), pitch: 60, startBeat: 0, duration: 2, velocity: 100 },
               { id: generateId(), pitch: 64, startBeat: 2, duration: 2, velocity: 90 },
@@ -127,7 +125,6 @@ describe('musicxmlExporter', () => {
           {
             id: generateId(),
             barIndex: 1,
-            scale: { root: 'C', type: 'major' },
             content: soloContent([{ id: generateId(), romanNumeral: 'V', chordSymbol: 'G', duration: 4, root: 'G', quality: 'major' }], [
               { id: generateId(), pitch: 67, startBeat: 0, duration: 2, velocity: 100 },
               { id: generateId(), pitch: 71, startBeat: 2, duration: 2, velocity: 85 },
@@ -147,7 +144,6 @@ describe('musicxmlExporter', () => {
         bars: [{
           id: generateId(),
           barIndex: 0,
-          scale: { root: 'C', type: 'major' },
           content: soloContent([{ id: generateId(), romanNumeral: 'I', chordSymbol: 'C', duration: 4, root: 'C', quality: 'major' }], []),
         }],
       });
@@ -212,7 +208,6 @@ describe('musicxmlExporter', () => {
         bars: [{
           id: generateId(),
           barIndex: 0,
-          scale: { root: 'C', type: 'major' },
           content: soloContent([], [
             { id: generateId(), pitch: 60, startBeat: 0, duration: 1, velocity: 100 }, // C4
             { id: generateId(), pitch: 63, startBeat: 1, duration: 1, velocity: 90 },  // Db4
@@ -234,7 +229,6 @@ describe('musicxmlExporter', () => {
       id: generateId(),
       barIndex,
       timeSignature,
-      scale: { root: 'C', type: 'major' },
       content: soloContent([], []),
     });
 
@@ -288,7 +282,6 @@ describe('musicxmlExporter', () => {
           {
             id: generateId(),
             barIndex: 0,
-            scale: { root: 'C', type: 'major' },
             content: soloContent([], [
               { id: generateId(), pitch: 60, startBeat: 2, duration: 1, velocity: 100 },
             ]),
@@ -308,7 +301,6 @@ describe('musicxmlExporter', () => {
           {
             id: generateId(),
             barIndex: 0,
-            scale: { root: 'C', type: 'major' },
             content: soloContent([], [
               { id: generateId(), pitch: 60, startBeat: 0, duration: 1, velocity: 100 },
               { id: generateId(), pitch: 67, startBeat: 3, duration: 1, velocity: 100 },
@@ -327,7 +319,6 @@ describe('musicxmlExporter', () => {
     const barOfNotes = (notes: { pitch: number; startBeat: number; duration: number }[]): Bar => ({
       id: generateId(),
       barIndex: 0,
-      scale: { root: 'C', type: 'major' },
       content: soloContent(
         [],
         notes.map(n => ({ id: generateId(), velocity: 100, ...n }))

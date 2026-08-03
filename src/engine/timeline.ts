@@ -477,8 +477,9 @@ export function findSegment(bars: Bar[], segmentId: string): SegmentLocation | n
 }
 
 /**
- * Build a fresh empty bar, inheriting the scale and meter of the bar before it so
- * that overflowing into new territory does not silently change key or metre.
+ * Build a fresh empty bar, inheriting the meter of the bar before it so that
+ * overflowing into new territory does not silently change metre. Key needs no
+ * inheriting: it travels with the blocks that spill in.
  */
 function createBar(index: number, existing: Bar[]): Bar {
   const previous = existing[existing.length - 1];
@@ -486,7 +487,6 @@ function createBar(index: number, existing: Bar[]): Bar {
     id: generateId(),
     barIndex: index,
     timeSignature: previous?.timeSignature,
-    scale: previous ? { ...previous.scale } : { root: 'C', type: 'major' },
     content: {},
   };
 }

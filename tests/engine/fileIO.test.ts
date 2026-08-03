@@ -64,7 +64,6 @@ function createTestProject(overrides?: Partial<Project>): Project {
       {
         id: generateId(),
         barIndex: 0,
-        scale: { root: 'C', type: 'major' },
         content: {
           [FIXTURE_TRACK_ID]: {
             chords: [
@@ -223,9 +222,9 @@ describe('fileIO', () => {
     it('handles project with multiple bars', () => {
       const project = createTestProject({
         bars: [
-          { id: generateId(), barIndex: 0, scale: { root: 'C', type: 'major' }, content: fixtureContent() },
-          { id: generateId(), barIndex: 1, scale: { root: 'F', type: 'major' }, content: fixtureContent() },
-          { id: generateId(), barIndex: 2, scale: { root: 'G', type: 'major' }, content: fixtureContent() },
+          { id: generateId(), barIndex: 0, content: fixtureContent() },
+          { id: generateId(), barIndex: 1, content: fixtureContent() },
+          { id: generateId(), barIndex: 2, content: fixtureContent() },
         ],
       });
       const json = serializeProject(project);
@@ -453,7 +452,6 @@ describe('fileIO', () => {
             id: 'bar-a',
             barIndex: 0,
             timeSignature: { beatsPerMeasure: 3, beatUnit: 4 },
-            scale: { root: 'C', type: 'major' },
             content: fixtureContent([
               { id: 'seg-1', kind: 'chord', romanNumeral: 'viiø7', chordSymbol: 'Bø7', duration: 2, root: 'B', quality: 'halfDim7' },
               { id: 'seg-2', kind: 'note', duration: 1, pitch: 64, root: 'E' },
@@ -462,16 +460,15 @@ describe('fileIO', () => {
           {
             id: 'bar-b',
             barIndex: 1,
-            scale: { root: 'C', type: 'major' },
             content: fixtureContent([], []),
           },
         ],
       });
     }
 
-    it('declares schema version 1.7', () => {
+    it('declares schema version 1.8', () => {
       const parsed = JSON.parse(serializeProject(createTestProject()));
-      expect(parsed.version).toBe('1.7');
+      expect(parsed.version).toBe('1.8');
     });
 
     describe('voicing', () => {
@@ -482,7 +479,6 @@ describe('fileIO', () => {
             {
               id: 'bar-a',
               barIndex: 0,
-              scale: { root: 'C', type: 'major' },
               content: fixtureContent(
                 [
                   {
@@ -620,6 +616,49 @@ describe('fileIO', () => {
       expect(restored.bars[0].content[FIXTURE_TRACK_ID].chords[0].octave).toBeUndefined();
     });
 
+    it('round-trips a segment key', () => {
+      const project = revampProject();
+      project.bars[0].content[FIXTURE_TRACK_ID].chords[0].scale = {
+        root: 'F',
+        type: 'lydian',
+      };
+      const restored = deserializeProject(serializeProject(project));
+
+      expect(restored.bars[0].content[FIXTURE_TRACK_ID].chords[0].scale).toEqual({
+        root: 'F',
+        type: 'lydian',
+      });
+    });
+
+    it('pushes a pre-1.8 bar key down onto its segments', () => {
+      const json = JSON.parse(serializeProject(revampProject()));
+      // What a 1.7 file looked like: one key per bar, none on any segment.
+      json.bars[0].scale = { root: 'A', type: 'naturalMinor' };
+      json.bars[1].scale = { root: 'E', type: 'phrygian' };
+      for (const bar of json.bars) {
+        for (const chord of bar.content[FIXTURE_TRACK_ID].chords) delete chord.scale;
+      }
+
+      const restored = deserializeProject(JSON.stringify({ ...json, version: '1.7' }));
+
+      for (const chord of restored.bars[0].content[FIXTURE_TRACK_ID].chords) {
+        expect(chord.scale).toEqual({ root: 'A', type: 'naturalMinor' });
+      }
+      for (const chord of restored.bars[1].content[FIXTURE_TRACK_ID].chords) {
+        expect(chord.scale).toEqual({ root: 'E', type: 'phrygian' });
+      }
+    });
+
+    it('leaves a segment keyless when the pre-1.8 bar key is unreadable', () => {
+      const json = JSON.parse(serializeProject(revampProject()));
+      json.bars[0].scale = { root: 'H', type: 'major' };
+      for (const chord of json.bars[0].content[FIXTURE_TRACK_ID].chords) delete chord.scale;
+
+      const restored = deserializeProject(JSON.stringify({ ...json, version: '1.7' }));
+      // Keyless reads as the project key rather than inventing something.
+      expect(restored.bars[0].content[FIXTURE_TRACK_ID].chords[0].scale).toBeUndefined();
+    });
+
     it('round-trips per-bar time signatures', () => {
       const restored = deserializeProject(serializeProject(revampProject()));
 
@@ -646,7 +685,7 @@ describe('fileIO', () => {
     it('drops a per-bar time signature that is not a legal meter', () => {
       const json = JSON.stringify({
         ...JSON.parse(serializeProject(createTestProject())),
-        bars: [{ id: 'bar-a', barIndex: 0, timeSignature: { beatsPerMeasure: 4, beatUnit: 5 }, scale: { root: 'C', type: 'major' }, content: fixtureContent() }],
+        bars: [{ id: 'bar-a', barIndex: 0, timeSignature: { beatsPerMeasure: 4, beatUnit: 5 }, content: fixtureContent() }],
       });
 
       expect(deserializeProject(json).bars[0].timeSignature).toBeUndefined();
@@ -668,7 +707,6 @@ describe('fileIO', () => {
           {
             id: 'bar-a',
             barIndex: 0,
-            scale: { root: 'C', type: 'major' },
             chords: [{ id: 'c1', romanNumeral: 'I', chordSymbol: 'C', duration: 4, root: 'C', quality: 'major' }],
             notes: [{ id: 'n1', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }],
           },
@@ -703,7 +741,6 @@ describe('fileIO', () => {
           {
             id: 'bar-a',
             barIndex: 0,
-            scale: { root: 'C', type: 'major' },
             chords: [
               { id: 'c1', kind: 'chord', startBeat: 0, romanNumeral: 'I', chordSymbol: 'C', duration: 2, root: 'C', quality: 'major' },
             ],
@@ -772,7 +809,6 @@ describe('fileIO', () => {
           {
             id: 'bar-a',
             barIndex: 0,
-            scale: { root: 'C', type: 'major' },
             content: {
               a: { chords: [{ id: 'ca', kind: 'chord', startBeat: 0, duration: 1, root: 'C', quality: 'major' }], notes: [] },
               b: { chords: [{ id: 'cb', kind: 'chord', startBeat: 2, duration: 1, root: 'G', quality: 'major' }], notes: [] },
@@ -799,7 +835,6 @@ describe('fileIO', () => {
           {
             id: 'bar-a',
             barIndex: 0,
-            scale: { root: 'C', type: 'major' },
             content: fixtureContent([
               { id: 'seg-1', kind: 'chord', startBeat: 0, duration: 1, root: 'C', quality: 'major' },
               { id: 'seg-2', kind: 'chord', startBeat: 3, duration: 1, root: 'G', quality: 'major' },
@@ -829,7 +864,6 @@ describe('fileIO', () => {
           {
             id: 'bar-a',
             barIndex: 0,
-            scale: { root: 'C', type: 'major' },
             content: fixtureContent([
               { id: 'c1', kind: 'chord', duration: 2, root: 'C', quality: 'major' },
               { id: 'c2', kind: 'chord', duration: 2, root: 'G', quality: 'major' },
@@ -849,7 +883,6 @@ describe('fileIO', () => {
           {
             id: 'bar-a',
             barIndex: 0,
-            scale: { root: 'C', type: 'major' },
             content: fixtureContent([{ id: 'c1', kind: 'chord', startBeat: 'two', duration: 1 }], []),
           },
         ],

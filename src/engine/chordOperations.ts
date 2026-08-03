@@ -10,6 +10,7 @@ import {
   degreeRegisterShift,
   getScalePitches,
   octaveForDegree,
+  segmentScale,
 } from '@/engine/scales';
 import { breakChord, voicedPitches } from '@/engine/voicing';
 import { getBarBeats, MIN_SEGMENT_BEATS, withStartBeats } from '@/engine/timeline';
@@ -25,9 +26,13 @@ import {
 
 /**
  * Split a bar into equal-duration chord segments with diatonic chords.
- * Each chord gets a Roman numeral based on the bar's scale.
+ * Each chord gets a Roman numeral based on the given scale, and carries it.
  *
- * @param bar - The bar to split.
+ * The scale is passed in rather than read off the bar: key belongs to a segment
+ * now, so the bar contributes only its meter.
+ *
+ * @param bar - The bar to split, for its meter.
+ * @param scale - The key to build the chords in.
  * @param chordCount - Number of chord segments to create.
  * @param projectTs - Project time signature, used when the bar has none.
  * @param baseOctave - Register of the scale's root note; degrees above it rise from
@@ -36,6 +41,7 @@ import {
  */
 export function splitBarIntoChords(
   bar: Bar,
+  scale: Scale,
   chordCount: number,
   projectTs: TimeSignature = DEFAULT_TIME_SIGNATURE,
   baseOctave: number = 4
@@ -55,7 +61,7 @@ export function splitBarIntoChords(
         `${MIN_SEGMENT_BEATS} per chord)`
     );
   }
-  const diatonicChords = getDiatonicChords(bar.scale);
+  const diatonicChords = getDiatonicChords(scale);
   const chords: ChordSegment[] = [];
 
   for (let i = 0; i < chordCount; i++) {
@@ -68,7 +74,8 @@ export function splitBarIntoChords(
       duration: beatsPerChord,
       root: chordInfo.root,
       quality: chordInfo.quality,
-      octave: octaveForDegree(bar.scale, NOTE_NAMES.indexOf(chordInfo.root), baseOctave),
+      octave: octaveForDegree(scale, NOTE_NAMES.indexOf(chordInfo.root), baseOctave),
+      scale,
     });
   }
 
@@ -121,10 +128,12 @@ export function reorderChords(
  *
  * Takes the segments rather than reading them off the bar, because a bar holds one
  * list per instrument and this runs once per instrument. The bar is still needed
- * for the scale and meter every instrument shares.
+ * for the meter every instrument shares — but not for the key, which each segment
+ * carries, so two blocks in one bar can be voiced in different scales.
  *
  * @param chords - The segments to voice, from one instrument's content.
- * @param bar - The bar they sit in, for its scale and meter.
+ * @param bar - The bar they sit in, for its meter.
+ * @param fallbackScale - Key for segments carrying none of their own.
  * @param projectTs - Project time signature, used when the bar has none.
  * @param octave - Fallback octave for chord segments that carry none of their own.
  * @returns The notes for this instrument in this bar, in segment order.
@@ -132,6 +141,7 @@ export function reorderChords(
 export function generateNotesFromSegments(
   chords: ChordSegment[],
   bar: Bar,
+  fallbackScale: Scale,
   projectTs: TimeSignature,
   octave: number = 4
 ): Note[] {
@@ -161,7 +171,10 @@ export function generateNotesFromSegments(
       continue;
     }
 
-    const { quality, rootSemitone } = resolveSegmentChord(segment, bar.scale);
+    const { quality, rootSemitone } = resolveSegmentChord(
+      segment,
+      segmentScale(segment, fallbackScale)
+    );
     // The segment's own register wins; the parameter is the fallback for
     // segments written before the palette could choose an octave.
     const baseMidi = ((segment.octave ?? octave) + 1) * 12 + rootSemitone;

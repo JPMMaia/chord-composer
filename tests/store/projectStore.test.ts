@@ -248,12 +248,11 @@ describe('projectStore', () => {
       projectStore.getState().createProject();
     });
 
-    it('adds a bar with the project current key/scale', () => {
+    it('adds an empty bar', () => {
       projectStore.getState().addBar();
       const bars = projectStore.getState().project!.bars;
       expect(bars.length).toBe(1);
-      expect(bars[0].scale.root).toBe('C');
-      expect(bars[0].scale.type).toBe('major');
+      expect(bars[0].content).toEqual({});
     });
 
     it('increments barIndex sequentially', () => {
@@ -326,46 +325,6 @@ describe('projectStore', () => {
         projectStore.getState().removeBar(bar.id);
       }
       expect(projectStore.getState().project!.bars.length).toBe(0);
-    });
-  });
-
-  describe('updateBarScale', () => {
-    beforeEach(() => {
-      projectStore.getState().createProject();
-      projectStore.getState().addBar();
-    });
-
-    it('updates the scale of an existing bar', () => {
-      const barId = projectStore.getState().project!.bars[0].id;
-      projectStore.getState().updateBarScale(barId, { root: 'G', type: 'major' });
-      const bar = projectStore.getState().project!.bars[0];
-      expect(bar.scale.root).toBe('G');
-      expect(bar.scale.type).toBe('major');
-    });
-
-    it('preserves bar index and other properties', () => {
-      const barId = projectStore.getState().project!.bars[0].id;
-      projectStore.getState().updateBarScale(barId, { root: 'D', type: 'minor' });
-      const bar = projectStore.getState().project!.bars[0];
-      expect(bar.barIndex).toBe(0);
-      expect(barChords(bar, trackId())).toEqual([]);
-      expect(barNotes(bar, trackId())).toEqual([]);
-    });
-
-    it('throws when bar id does not exist', () => {
-      expect(() => projectStore.getState().updateBarScale('nonexistent', { root: 'C', type: 'major' })).toThrow('Bar not found');
-    });
-
-    it('handles flat root notes', () => {
-      const barId = projectStore.getState().project!.bars[0].id;
-      projectStore.getState().updateBarScale(barId, { root: 'Eb', type: 'naturalMinor' });
-      expect(projectStore.getState().project!.bars[0].scale.root).toBe('Eb');
-    });
-
-    it('handles all scale types', () => {
-      const barId = projectStore.getState().project!.bars[0].id;
-      projectStore.getState().updateBarScale(barId, { root: 'C', type: 'blues' });
-      expect(projectStore.getState().project!.bars[0].scale.type).toBe('blues');
     });
   });
 
@@ -687,13 +646,24 @@ describe('projectStore', () => {
       projectStore.getState().addBar();
       projectStore.getState().addBar();
       appendSegment(chordSegment({ id: 'a' }));
-      projectStore.getState().updateBarScale(bars()[1].id, { root: 'G', type: 'major' });
+      // 'b' is written in G major, 'a' in the project's C — the two keys are what
+      // makes "each within its own" mean anything below.
       projectStore
         .getState()
-        .insertSegment(bars()[1].id, 0, chordSegment({ id: 'b', root: 'G', chordSymbol: 'G' }), trackId());
+        .insertSegment(
+          bars()[1].id,
+          0,
+          chordSegment({
+            id: 'b',
+            root: 'G',
+            chordSymbol: 'G',
+            scale: { root: 'G', type: 'major' },
+          }),
+          trackId()
+        );
     });
 
-    it('steps each segment within its own bar’s scale', () => {
+    it('steps each segment within its own key', () => {
       projectStore.getState().stepSegmentsPitch(['a', 'b'], 1);
       expect(segmentOf('a').root).toBe('D');
       expect(segmentOf('b').root).toBe('A');
@@ -781,7 +751,13 @@ describe('projectStore', () => {
     });
   });
 
-  describe('updateBarScale note regeneration', () => {
+  describe('setSegmentsScale note regeneration', () => {
+    const segmentOf = (id: string) =>
+      projectStore
+        .getState()
+        .project!.bars.flatMap(b => barChords(b, trackId()))
+        .find(c => c.id === id)!;
+
     beforeEach(() => {
       projectStore.getState().createProject();
       projectStore.getState().addBar();
@@ -791,8 +767,7 @@ describe('projectStore', () => {
       appendSegment(chordSegment({ id: 'a', root: undefined, quality: undefined, romanNumeral: 'I' }));
       expect(barNotes(projectStore.getState().project!.bars[0], trackId()).map(n => n.pitch)).toEqual([60, 64, 67]);
 
-      const barId = projectStore.getState().project!.bars[0].id;
-      projectStore.getState().updateBarScale(barId, { root: 'D', type: 'major' });
+      projectStore.getState().setSegmentsScale(['a'], { root: 'D', type: 'major' });
       expect(barNotes(projectStore.getState().project!.bars[0], trackId()).map(n => n.pitch)).toEqual([62, 66, 69]);
     });
 
@@ -802,8 +777,7 @@ describe('projectStore', () => {
       appendSegment(
         chordSegment({ id: 'a', romanNumeral: 'I', root: 'C', quality: 'major', chordSymbol: 'C' })
       );
-      const barId = projectStore.getState().project!.bars[0].id;
-      projectStore.getState().updateBarScale(barId, { root: 'D', type: 'major' });
+      projectStore.getState().setSegmentsScale(['a'], { root: 'D', type: 'major' });
 
       const bar = projectStore.getState().project!.bars[0];
       expect(barChords(bar, trackId())[0].root).toBe('D');
@@ -815,8 +789,7 @@ describe('projectStore', () => {
       appendSegment(
         chordSegment({ id: 'a', romanNumeral: 'ii', root: 'D', quality: 'minor', chordSymbol: 'Dm' })
       );
-      const barId = projectStore.getState().project!.bars[0].id;
-      projectStore.getState().updateBarScale(barId, { root: 'A', type: 'naturalMinor' });
+      projectStore.getState().setSegmentsScale(['a'], { root: 'A', type: 'naturalMinor' });
 
       const bar = projectStore.getState().project!.bars[0];
       expect(barChords(bar, trackId())[0].chordSymbol).toBe('B°');
@@ -824,12 +797,62 @@ describe('projectStore', () => {
       expect(barNotes(bar, trackId()).map(n => n.pitch)).toEqual([71, 74, 77]);
     });
 
-    it('leaves other bars notes untouched', () => {
-      projectStore.getState().addBar();
-      appendSegment(chordSegment({ id: 'a', root: 'C', quality: 'major' }));
-      const barId = projectStore.getState().project!.bars[1].id;
-      projectStore.getState().updateBarScale(barId, { root: 'G', type: 'major' });
-      expect(barNotes(projectStore.getState().project!.bars[0], trackId()).map(n => n.pitch)).toEqual([60, 64, 67]);
+    it('records the key on the segment, so a second edit retunes from it', () => {
+      appendSegment(
+        chordSegment({ id: 'a', romanNumeral: 'I', root: 'C', quality: 'major', chordSymbol: 'C' })
+      );
+      projectStore.getState().setSegmentsScale(['a'], { root: 'D', type: 'major' });
+      expect(segmentOf('a').scale).toEqual({ root: 'D', type: 'major' });
+
+      // Retuning from D, not from the C it was written in: the tonic of E major,
+      // not the supertonic that reading a stale key would give.
+      projectStore.getState().setSegmentsScale(['a'], { root: 'E', type: 'major' });
+      expect(segmentOf('a').chordSymbol).toBe('E');
+    });
+
+    it('changes the type across a selection without disturbing its roots', () => {
+      appendSegment(
+        chordSegment({
+          id: 'a',
+          romanNumeral: 'I',
+          root: 'C',
+          quality: 'major',
+          scale: { root: 'C', type: 'major' },
+        })
+      );
+      appendSegment(
+        chordSegment({
+          id: 'b',
+          romanNumeral: 'I',
+          root: 'G',
+          quality: 'major',
+          scale: { root: 'G', type: 'major' },
+        })
+      );
+      projectStore.getState().setSegmentsScale(['a', 'b'], { type: 'naturalMinor' });
+
+      expect(segmentOf('a').scale).toEqual({ root: 'C', type: 'naturalMinor' });
+      expect(segmentOf('b').scale).toEqual({ root: 'G', type: 'naturalMinor' });
+      expect(segmentOf('a').chordSymbol).toBe('Cm');
+      expect(segmentOf('b').chordSymbol).toBe('Gm');
+    });
+
+    it('leaves unselected segments in the same bar untouched', () => {
+      appendSegment(chordSegment({ id: 'a', romanNumeral: 'I', root: 'C', quality: 'major' }));
+      appendSegment(chordSegment({ id: 'b', romanNumeral: 'I', root: 'C', quality: 'major' }));
+      projectStore.getState().setSegmentsScale(['a'], { root: 'G', type: 'major' });
+
+      expect(segmentOf('a').root).toBe('G');
+      expect(segmentOf('b').root).toBe('C');
+      expect(segmentOf('b').scale).toBeUndefined();
+    });
+
+    it('leaves the project untouched when no id matches', () => {
+      appendSegment(chordSegment({ id: 'a' }));
+      const before = projectStore.getState().project;
+      projectStore.getState().setSegmentsScale(['nope'], { root: 'G', type: 'major' });
+      projectStore.getState().setSegmentsScale([], { root: 'G', type: 'major' });
+      expect(projectStore.getState().project).toBe(before);
     });
   });
 
@@ -934,11 +957,13 @@ describe('projectStore', () => {
         expect(segmentOf(segment.id)).toMatchObject({ root: 'D', romanNumeral: 'ii' });
       });
 
-      it('reads the scale of the bar the segment is actually in', () => {
-        const bars = state().project!.bars;
-        state().updateBarScale(bars[1].id, { root: 'A', type: 'naturalMinor' });
-
-        const segment = chordSegment({ root: 'G', romanNumeral: 'VII', chordSymbol: 'G' });
+      it('reads the key the segment is actually written in', () => {
+        const segment = chordSegment({
+          root: 'G',
+          romanNumeral: 'VII',
+          chordSymbol: 'G',
+          scale: { root: 'A', type: 'naturalMinor' },
+        });
         state().insertSegment(state().project!.bars[1].id, 0, segment, trackId());
 
         state().stepSegmentPitch(segment.id, 1);
@@ -1096,13 +1121,16 @@ describe('projectStore', () => {
         expect(barNotes(barOf(segment.id)!, trackId()).map(n => n.startBeat)).toEqual([0, 1, 2]);
       });
 
-      it('applies to a whole selection spanning bars in different keys', () => {
-        const bars = state().project!.bars;
-        state().updateBarScale(bars[1].id, { root: 'A', type: 'naturalMinor' });
-
+      it('applies to a whole selection spanning different keys', () => {
         const first = chordSegment({ octave: 4 });
         appendSegment(first);
-        const second = chordSegment({ root: 'A', quality: 'minor', romanNumeral: 'i', octave: 4 });
+        const second = chordSegment({
+          root: 'A',
+          quality: 'minor',
+          romanNumeral: 'i',
+          octave: 4,
+          scale: { root: 'A', type: 'naturalMinor' },
+        });
         state().insertSegment(state().project!.bars[1].id, 0, second, trackId());
 
         state().setSegmentsSpacing([first.id, second.id], 'drop2');

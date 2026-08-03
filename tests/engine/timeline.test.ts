@@ -33,7 +33,6 @@ const makeBar = (
   id: `bar-${barIndex}`,
   barIndex,
   timeSignature,
-  scale: { root: "C", type: "major" },
   content: soloContent(chords),
 });
 
@@ -416,15 +415,13 @@ describe("timeline", () => {
       expect(flattenSegments(result, TEST_TRACK_ID)).toHaveLength(11);
     });
 
-    it("preserves each bar's notes, scale, id and meter", () => {
+    it("preserves each bar's notes, id and meter", () => {
       const bars = [makeBar(0, [seg("a", 1, 0)], TS_3_4)];
       bars[0].content[TEST_TRACK_ID].notes = [
         { id: "n1", pitch: 60, startBeat: 0, duration: 1, velocity: 100 },
       ];
-      bars[0].scale = { root: "D", type: "dorian" };
       const result = refitBars(bars, TS_4_4);
       expect(barNotes(result[0], TEST_TRACK_ID)).toHaveLength(1);
-      expect(result[0].scale).toEqual({ root: "D", type: "dorian" });
       expect(result[0].id).toBe("bar-0");
       expect(result[0].timeSignature).toEqual(TS_3_4);
     });
@@ -445,7 +442,6 @@ describe("timeline", () => {
       const twoTrackBar = (): Bar => ({
         id: "bar-0",
         barIndex: 0,
-        scale: { root: "C", type: "major" },
         content: {
           [TEST_TRACK_ID]: { chords: [seg("a", 2, 0), seg("b", 2, 2)], notes: [] },
           [OTHER_TRACK_ID]: { chords: [seg("x", 2, 0), seg("y", 2, 2)], notes: [] },

@@ -28,7 +28,6 @@ const makeBar = (barIndex: number, beats: number, notes: Note[] = []): Bar => ({
   id: `bar-${barIndex}`,
   barIndex,
   timeSignature: { beatsPerMeasure: beats, beatUnit: 4 },
-  scale: { root: 'C', type: 'major' },
   content: soloContent([], notes),
 });
 
@@ -36,7 +35,6 @@ const makeBar = (barIndex: number, beats: number, notes: Note[] = []): Bar => ({
 const makeInheritingBar = (barIndex: number, notes: Note[] = []): Bar => ({
   id: `bar-${barIndex}`,
   barIndex,
-  scale: { root: 'C', type: 'major' },
   content: soloContent([], notes),
 });
 
@@ -293,7 +291,6 @@ describe('playback', () => {
       id: 'bar-0',
       barIndex: 0,
       timeSignature: { beatsPerMeasure: 4, beatUnit: 4 },
-      scale: { root: 'C', type: 'major' },
       content: {
         [TEST_TRACK_ID]: {
           chords: [],

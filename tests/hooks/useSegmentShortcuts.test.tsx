@@ -142,13 +142,11 @@ describe('useSegmentShortcuts', () => {
 
   describe('with several segments selected', () => {
     /**
-     * One chord in each bar, with bar 2 rekeyed to G major — so a shortcut that
+     * One chord in each bar, the second written in G major — so a shortcut that
      * reached for a single shared scale would be caught here.
      */
     function chordInEachBar(): [ChordSegment, ChordSegment] {
       state().addBar();
-      const bars = state().project!.bars;
-      state().updateBarScale(bars[1].id, { root: 'G', type: 'major' });
 
       const first = placeChord({ id: 'seg-1' });
       const second: ChordSegment = {
@@ -160,13 +158,14 @@ describe('useSegmentShortcuts', () => {
         chordSymbol: 'G',
         octave: 4,
         duration: 1,
+        scale: { root: 'G', type: 'major' },
       };
       state().insertSegment(state().project!.bars[1].id, 0, second, trackId());
       selectionStore.getState().setSelectedSegments([first.id, second.id]);
       return [first, second];
     }
 
-    it('steps every selected chord within its own bar’s scale', () => {
+    it('steps every selected chord within its own key', () => {
       const [first, second] = chordInEachBar();
       renderHook(() => useSegmentShortcuts());
 

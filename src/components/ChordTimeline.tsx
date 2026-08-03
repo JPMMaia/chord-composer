@@ -162,6 +162,7 @@ export const ChordTimeline: React.FC = () => {
 
   const snapBeats = editorStore(s => s.snapBeats);
   const setSnapBeats = editorStore(s => s.setSnapBeats);
+  const paletteScale = editorStore(s => s.paletteScale);
   const scrollX = editorStore(s => s.scrollX);
   const setScrollX = editorStore(s => s.setScrollX);
 
@@ -431,7 +432,9 @@ export const ChordTimeline: React.FC = () => {
     insertSegment(
       bar.id,
       snapBeat(beatAt(e), snapBeats),
-      paletteItemToSegment(item, DROP_DURATION_BEATS),
+      // The palette's key rather than the item's own: the block is written in
+      // whatever the strip is currently offering, and carries that from here on.
+      paletteItemToSegment(item, DROP_DURATION_BEATS, paletteScale),
       selectedTrackId
     );
     selectBar(bar.id);
@@ -702,9 +705,6 @@ export const ChordTimeline: React.FC = () => {
                       </option>
                     ))}
                   </select>
-                </div>
-                <div className="text-[10px] text-gray-400 truncate">
-                  {bar.scale.root} {bar.scale.type.replace(/([A-Z])/g, ' $1').trim()}
                 </div>
                 {/* Two bars of the same width may be in different metres, so say how
                     this one counts: 3/4 is three quarters, 6/8 two beats of three. */}

@@ -256,6 +256,106 @@ describe('SegmentInspector', () => {
     expect(pitchesOf(segment.id)).toEqual(original);
   });
 
+  describe('key', () => {
+    it('retunes the selected chord and records its new key', () => {
+      const segment = placeAndSelect(chordSegment({ scale: { root: 'C', type: 'major' } }));
+      expect(pitchesOf(segment.id)).toEqual([60, 64, 67]);
+
+      render(<SegmentInspector />);
+      fireEvent.change(screen.getByLabelText('Root Note'), { target: { value: 'D' } });
+
+      expect(segmentOf(segment.id).scale).toEqual({ root: 'D', type: 'major' });
+      expect(segmentOf(segment.id).chordSymbol).toBe('D');
+      expect(pitchesOf(segment.id)).toEqual([62, 66, 69]);
+    });
+
+    // The whole point of the key living on the segment rather than the bar.
+    it('leaves the other blocks in the same bar alone', () => {
+      const selected = chordSegment({ id: 'sel', duration: 1 });
+      const neighbour = chordSegment({ id: 'nb', duration: 1 });
+      state().insertSegment(bars()[0].id, 0, selected, trackId());
+      state().insertSegment(bars()[0].id, 1, neighbour, trackId());
+      selectionStore.getState().selectSegment(selected.id);
+
+      render(<SegmentInspector />);
+      fireEvent.change(screen.getByLabelText('Root Note'), { target: { value: 'G' } });
+
+      expect(segmentOf('sel').root).toBe('G');
+      expect(segmentOf('nb').root).toBe('C');
+    });
+
+    it('shows the key a block was written in', () => {
+      placeAndSelect(chordSegment({ scale: { root: 'E', type: 'phrygian' } }));
+
+      render(<SegmentInspector />);
+
+      expect((screen.getByLabelText('Root Note') as HTMLSelectElement).value).toBe('E');
+      expect((screen.getByLabelText('Scale Type') as HTMLSelectElement).value).toBe('phrygian');
+    });
+
+    it('falls back to the project key for a block that carries none', () => {
+      placeAndSelect(chordSegment());
+
+      render(<SegmentInspector />);
+
+      expect((screen.getByLabelText('Root Note') as HTMLSelectElement).value).toBe('C');
+      expect((screen.getByLabelText('Scale Type') as HTMLSelectElement).value).toBe('major');
+    });
+
+    it('reads blank where the selected blocks disagree, per field', () => {
+      const first = chordSegment({ scale: { root: 'C', type: 'major' } });
+      const second = chordSegment({ scale: { root: 'G', type: 'major' } });
+      state().insertSegment(bars()[0].id, 0, first, trackId());
+      state().insertSegment(bars()[1].id, 0, second, trackId());
+      selectionStore.getState().setSelectedSegments([first.id, second.id]);
+
+      render(<SegmentInspector />);
+
+      // Roots differ, so the root reads blank — but both are major, so the type
+      // still states what they agree on.
+      expect((screen.getByLabelText('Root Note') as HTMLSelectElement).value).toBe('');
+      expect((screen.getByLabelText('Scale Type') as HTMLSelectElement).value).toBe('major');
+    });
+
+    it('sets the type across a mixed selection without touching its roots', () => {
+      const first = chordSegment({ id: 'a', scale: { root: 'C', type: 'major' } });
+      const second = chordSegment({
+        id: 'b',
+        root: 'G',
+        chordSymbol: 'G',
+        scale: { root: 'G', type: 'major' },
+      });
+      state().insertSegment(bars()[0].id, 0, first, trackId());
+      state().insertSegment(bars()[1].id, 0, second, trackId());
+      selectionStore.getState().setSelectedSegments([first.id, second.id]);
+
+      render(<SegmentInspector />);
+      fireEvent.change(screen.getByLabelText('Scale Type'), {
+        target: { value: 'naturalMinor' },
+      });
+
+      expect(segmentOf('a').scale).toEqual({ root: 'C', type: 'naturalMinor' });
+      expect(segmentOf('b').scale).toEqual({ root: 'G', type: 'naturalMinor' });
+    });
+
+    // A note has no chord tones, but it does sit on a scale degree.
+    it('is offered for a single note, and retunes it', () => {
+      const note: ChordSegment = {
+        id: generateId(),
+        kind: 'note',
+        pitch: 60,
+        duration: 1,
+        scale: { root: 'C', type: 'major' },
+      };
+      placeAndSelect(note);
+
+      render(<SegmentInspector />);
+      fireEvent.change(screen.getByLabelText('Root Note'), { target: { value: 'D' } });
+
+      expect(segmentOf(note.id).pitch).toBe(62);
+    });
+  });
+
   describe('a selection of several chords', () => {
     it('applies a preset to every one of them', () => {
       const first = chordSegment();

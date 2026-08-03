@@ -182,7 +182,7 @@ export function projectToMusicXML(project: Project): string {
     // A part needs at least one measure to be well-formed.
     const measures: Bar[] = bars.length > 0
       ? bars
-      : [{ id: 'empty', barIndex: 0, scale: { root: key, type: 'major' }, content: {} }];
+      : [{ id: 'empty', barIndex: 0, content: {} }];
 
     // A measure restates the metre only when it differs from the one before it.
     let previousTs: TimeSignature | null = null;

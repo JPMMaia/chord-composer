@@ -163,10 +163,20 @@ export function getPaletteItems(
 
 /**
  * Converts a palette block into a timeline segment ready to be inserted.
+ *
+ * The block is stamped with the key it was built from, so it keeps naming the same
+ * degree wherever it is dropped — and the palette can move to another key without
+ * disturbing anything already on the timeline.
+ *
  * @param item - The dragged palette item.
  * @param duration - Length of the new segment in beats.
+ * @param scale - The palette's key, which the new segment is written in.
  */
-export function paletteItemToSegment(item: PaletteItem, duration: number): ChordSegment {
+export function paletteItemToSegment(
+  item: PaletteItem,
+  duration: number,
+  scale: Scale
+): ChordSegment {
   return {
     id: generateId(),
     kind: item.kind,
@@ -177,5 +187,6 @@ export function paletteItemToSegment(item: PaletteItem, duration: number): Chord
     quality: item.quality,
     octave: item.octave,
     duration,
+    scale,
   };
 }

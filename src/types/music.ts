@@ -126,6 +126,18 @@ export interface ChordSegment {
   inversion?: number;
   quality?: ChordQuality;
   /**
+   * The key this block was written in — the scale its `romanNumeral` names a degree
+   * of, and the one a change of key retunes it away from.
+   *
+   * Distinct from `root` above, which is the *chord's* root: a ii chord in C major
+   * has `root: 'D'` and `scale: { root: 'C', type: 'major' }`.
+   *
+   * Absent in projects written before the key moved off the bar, and read as the
+   * project's own key. Loading such a project pushes the bar's key down onto its
+   * segments, so the fallback only ever covers a hand-edited file.
+   */
+  scale?: Scale;
+  /**
    * Voicing and articulation. Chord segments only — a note segment has one pitch
    * and nothing to space, double or break. Absent means the plain block chord,
    * which is what every chord sounded like before voicings existed.
@@ -189,10 +201,13 @@ export interface TrackContent {
 export interface Bar {
   id: string;
   barIndex: number;
-  /** Per-bar meter. Falls back to the project time signature when absent. */
+  /**
+   * Per-bar meter. Falls back to the project time signature when absent.
+   *
+   * Meter belongs to the bar, so every instrument shares it. Key does not: it
+   * lives on each segment, so two blocks in one bar can be in different keys.
+   */
   timeSignature?: TimeSignature;
-  /** Scale and meter belong to the bar, so every instrument shares them. */
-  scale: Scale;
   /**
    * Per-instrument content, keyed by `Track.id`. A track with no key here simply
    * has nothing in this bar; the accessors in `@/engine/timeline` read that as

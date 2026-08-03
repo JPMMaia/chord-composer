@@ -1,16 +1,12 @@
 import React, { useMemo, useState } from 'react';
-import type { Scale } from '@/types/music';
 import { getPaletteItems, type PaletteItem, type PaletteMode } from '@/engine/palette';
 import { getScaleName } from '@/engine/scales';
+import { ScaleSelect } from '@/components/ScaleSelect';
+import { editorStore } from '@/store/editorStore';
 import { MAX_SEGMENT_OCTAVE, MIN_SEGMENT_OCTAVE } from '@/utils/constants';
 
 /** MIME type carrying the full palette item across a drag. */
 export const PALETTE_DRAG_TYPE = 'application/x-palette-item';
-
-interface ScalePaletteProps {
-  /** Scale to derive blocks from — the selected bar's scale. */
-  scale: Scale;
-}
 
 const MODE_LABELS: Record<PaletteMode, string> = {
   notes: 'Notes',
@@ -30,8 +26,14 @@ const DEFAULT_PALETTE_OCTAVE = 4;
  *
  * Every block reads `Label (Numeral)` — `C (I)`, `Dm (ii)`, `G7 (V7)` — so the
  * harmonic function stays visible while switching modes swaps only the material.
+ *
+ * The key is the strip's own, not the selected bar's: choosing what to compose
+ * with is a different act from changing what an existing block is, so moving this
+ * dropdown re-stocks the palette and touches nothing already on the timeline.
  */
-export const ScalePalette: React.FC<ScalePaletteProps> = ({ scale }) => {
+export const ScalePalette: React.FC = () => {
+  const scale = editorStore(s => s.paletteScale);
+  const setPaletteScale = editorStore(s => s.setPaletteScale);
   const [mode, setMode] = useState<PaletteMode>('chords');
   // Held here, like `mode`: the chosen octave reaches the timeline inside the
   // dragged item, so nothing outside this strip needs to read it.
@@ -49,6 +51,13 @@ export const ScalePalette: React.FC<ScalePaletteProps> = ({ scale }) => {
   return (
     <div className="shrink-0 px-4 py-2 bg-gray-800 border-b border-gray-700">
       <div className="flex items-center gap-3 flex-wrap">
+        <ScaleSelect
+          idPrefix="palette"
+          root={scale.root}
+          type={scale.type}
+          onChange={patch => setPaletteScale({ ...scale, ...patch })}
+        />
+
         <label htmlFor="palette-mode" className="sr-only">
           Palette mode
         </label>
@@ -85,7 +94,7 @@ export const ScalePalette: React.FC<ScalePaletteProps> = ({ scale }) => {
 
         {/* Chord blocks keep bare symbols, so the strip states their register once
             here rather than stamping the same badge on every block. */}
-        <span className="text-xs text-gray-400">
+        <span className="text-xs text-gray-400" data-testid="palette-caption">
           {getScaleName(scale.root, scale.type)} · octave {octave}
         </span>
 

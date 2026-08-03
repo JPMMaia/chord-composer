@@ -188,6 +188,31 @@ export function getScaleName(root: NoteName, type: ScaleType): string {
 }
 
 /**
+ * The scale a project's key names — what a segment falls back to when it carries
+ * no key of its own.
+ *
+ * `Project.keyMode` only distinguishes major from minor, so this is a widening:
+ * the twelve scale types a segment may hold cannot all be expressed as a project
+ * key, and nothing tries to round-trip one back.
+ */
+export function projectScale(key: NoteName, keyMode: 'major' | 'minor'): Scale {
+  return { root: key, type: keyMode === 'minor' ? 'naturalMinor' : 'major' };
+}
+
+/**
+ * The key a segment is written in.
+ *
+ * The one place the fallback is spelled out, so every reader — note generation,
+ * the inspector, the arrow keys — agrees about what an absent key means.
+ *
+ * @param segment - The segment to read.
+ * @param fallback - The project's key, used when the segment carries none.
+ */
+export function segmentScale(segment: { scale?: Scale }, fallback: Scale): Scale {
+  return segment.scale ?? fallback;
+}
+
+/**
  * Formats a scale type enum into a human-readable label.
  */
 function formatScaleType(type: ScaleType): string {

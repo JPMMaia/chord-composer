@@ -30,7 +30,6 @@ function createTestProject(overrides?: Partial<Project>): Project {
       {
         id: generateId(),
         barIndex: 0,
-        scale: { root: 'C', type: 'major' },
         content: soloContent([
           { id: generateId(), romanNumeral: 'I', chordSymbol: 'C', duration: 2, root: 'C', quality: 'major' },
           { id: generateId(), romanNumeral: 'V', chordSymbol: 'G', duration: 2, root: 'G', quality: 'major' },
@@ -126,7 +125,7 @@ describe('midiExporter', () => {
     });
 
     it('handles project with no notes', () => {
-      const project = createTestProject({ bars: [{ id: generateId(), barIndex: 0, scale: { root: 'C', type: 'major' }, content: soloContent([], []) }] });
+      const project = createTestProject({ bars: [{ id: generateId(), barIndex: 0, content: soloContent([], []) }] });
       const midiBytes = projectToMidi(project);
 
       expect(midiBytes).toBeInstanceOf(Uint8Array);
@@ -149,7 +148,6 @@ describe('midiExporter', () => {
         bars: [{
           id: generateId(),
           barIndex: 0,
-          scale: { root: 'C', type: 'major' },
           content: soloContent([], [
             { id: generateId(), pitch: 60, startBeat: 0, duration: 1, velocity: 100 },
             { id: generateId(), pitch: 72, startBeat: 1, duration: 1, velocity: 80 },
@@ -166,7 +164,6 @@ describe('midiExporter', () => {
         bars: [{
           id: generateId(),
           barIndex: 0,
-          scale: { root: 'C', type: 'major' },
           content: soloContent([], [
             { id: generateId(), pitch: 60, startBeat: 0, duration: 1, velocity: 127 },
             { id: generateId(), pitch: 64, startBeat: 1, duration: 1, velocity: 50 },
@@ -238,7 +235,6 @@ describe('midiExporter', () => {
           {
             id: generateId(),
             barIndex: 0,
-            scale: { root: 'C', type: 'major' },
             content: {
               [TEST_TRACK_ID]: {
                 chords: [],
@@ -289,7 +285,6 @@ describe('midiExporter', () => {
       id: generateId(),
       barIndex,
       timeSignature: ts,
-      scale: { root: 'C', type: 'major' },
       content: soloContent([], [{ id: generateId(), pitch, startBeat: 0, duration: 1, velocity: 100 }]),
     });
 
@@ -387,7 +382,6 @@ describe('midiExporter', () => {
       const bar: Bar = {
         id: generateId(),
         barIndex: 0,
-        scale: { root: 'C', type: 'major' },
         content: soloContent([], [{ id: generateId(), pitch: 60, startBeat: 2, duration: 1, velocity: 100 }]),
       };
       const onsets = scanNoteOnTicks(projectToMidi(createTestProject({ bars: [bar] })));

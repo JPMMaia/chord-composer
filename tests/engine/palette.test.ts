@@ -190,7 +190,7 @@ describe("palette", () => {
   describe("paletteItemToSegment", () => {
     it("converts a chord item into a chord segment", () => {
       const item = getPaletteItems(C_MAJOR, "chords")[1]; // Dm
-      const segment = paletteItemToSegment(item, 1);
+      const segment = paletteItemToSegment(item, 1, C_MAJOR);
       expect(segment.kind).toBe("chord");
       expect(segment.duration).toBe(1);
       expect(segment.root).toBe("D");
@@ -202,7 +202,7 @@ describe("palette", () => {
 
     it("converts a note item into a one-note segment", () => {
       const item = getPaletteItems(C_MAJOR, "notes")[2]; // E
-      const segment = paletteItemToSegment(item, 2);
+      const segment = paletteItemToSegment(item, 2, C_MAJOR);
       expect(segment.kind).toBe("note");
       expect(segment.duration).toBe(2);
       expect(segment.pitch).toBe(64);
@@ -212,20 +212,28 @@ describe("palette", () => {
 
     it("carries the palette's octave onto a chord segment", () => {
       const item = getPaletteItems(C_MAJOR, "chords", 6)[0];
-      expect(paletteItemToSegment(item, 1).octave).toBe(6);
+      expect(paletteItemToSegment(item, 1, C_MAJOR).octave).toBe(6);
     });
 
     it("converts a seventh item, preserving the four-note quality", () => {
       const item = getPaletteItems(C_MAJOR, "sevenths")[4]; // G7
-      const segment = paletteItemToSegment(item, 1);
+      const segment = paletteItemToSegment(item, 1, C_MAJOR);
       expect(segment.quality).toBe("dominant7");
       expect(segment.chordSymbol).toBe("G7");
     });
 
+    // What lets the block keep naming its own degree once the palette moves on
+    // to another key, and what the inspector reads back.
+    it("stamps the palette's key onto the segment", () => {
+      const item = getPaletteItems(C_MAJOR, "chords")[1];
+      const segment = paletteItemToSegment(item, 1, { root: "A", type: "naturalMinor" });
+      expect(segment.scale).toEqual({ root: "A", type: "naturalMinor" });
+    });
+
     it("gives each produced segment a fresh unique id", () => {
       const item = getPaletteItems(C_MAJOR, "chords")[0];
-      const a = paletteItemToSegment(item, 1);
-      const b = paletteItemToSegment(item, 1);
+      const a = paletteItemToSegment(item, 1, C_MAJOR);
+      const b = paletteItemToSegment(item, 1, C_MAJOR);
       expect(a.id).not.toBe(b.id);
     });
   });

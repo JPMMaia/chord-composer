@@ -23,7 +23,6 @@ const mockBars: Bar[] = [
   {
     id: 'bar-1',
     barIndex: 0,
-    scale: { root: 'C', type: 'major' },
     content: soloContent([], [
       { id: 'n1', pitch: 60, startBeat: 0, duration: 1, velocity: 100 },
       { id: 'n2', pitch: 64, startBeat: 1, duration: 1, velocity: 100 },
@@ -33,7 +32,6 @@ const mockBars: Bar[] = [
   {
     id: 'bar-2',
     barIndex: 1,
-    scale: { root: 'C', type: 'major' },
     content: soloContent([], [
       { id: 'n4', pitch: 72, startBeat: 4, duration: 2, velocity: 100 },
     ]),
@@ -410,9 +408,9 @@ describe('PianoRoll', () => {
 
     it('places bar lines at cumulative starts across mixed meters', () => {
       const bars: Bar[] = [
-        { id: 'b0', barIndex: 0, timeSignature: { beatsPerMeasure: 3, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, content: soloContent() },
-        { id: 'b1', barIndex: 1, timeSignature: { beatsPerMeasure: 4, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, content: soloContent() },
-        { id: 'b2', barIndex: 2, timeSignature: { beatsPerMeasure: 2, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, content: soloContent() },
+        { id: 'b0', barIndex: 0, timeSignature: { beatsPerMeasure: 3, beatUnit: 4 }, content: soloContent() },
+        { id: 'b1', barIndex: 1, timeSignature: { beatsPerMeasure: 4, beatUnit: 4 }, content: soloContent() },
+        { id: 'b2', barIndex: 2, timeSignature: { beatsPerMeasure: 2, beatUnit: 4 }, content: soloContent() },
       ];
       const strokes = recordStrokes();
 
@@ -444,8 +442,8 @@ describe('PianoRoll', () => {
 
     it('draws one gridline per beat of the whole project', () => {
       const bars: Bar[] = [
-        { id: 'b0', barIndex: 0, timeSignature: { beatsPerMeasure: 3, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, content: soloContent() },
-        { id: 'b1', barIndex: 1, scale: { root: 'C', type: 'major' }, content: soloContent() },
+        { id: 'b0', barIndex: 0, timeSignature: { beatsPerMeasure: 3, beatUnit: 4 }, content: soloContent() },
+        { id: 'b1', barIndex: 1, content: soloContent() },
       ];
       const strokes = recordStrokes();
 
@@ -480,9 +478,9 @@ describe('PianoRoll', () => {
 
     /** One note per bar, all on beat 0 of their own bar and all on the same pitch. */
     const bars: Bar[] = [
-      { id: 'b0', barIndex: 0, scale: { root: 'C', type: 'major' }, content: soloContent([], [{ id: 'n0', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }]) },
-      { id: 'b1', barIndex: 1, scale: { root: 'C', type: 'major' }, content: soloContent([], [{ id: 'n1', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }]) },
-      { id: 'b2', barIndex: 2, scale: { root: 'C', type: 'major' }, content: soloContent([], [{ id: 'n2', pitch: 60, startBeat: 1, duration: 1, velocity: 100 }]) },
+      { id: 'b0', barIndex: 0, content: soloContent([], [{ id: 'n0', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }]) },
+      { id: 'b1', barIndex: 1, content: soloContent([], [{ id: 'n1', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }]) },
+      { id: 'b2', barIndex: 2, content: soloContent([], [{ id: 'n2', pitch: 60, startBeat: 1, duration: 1, velocity: 100 }]) },
     ];
 
     interface Filled { color: string; x: number; w: number }
@@ -599,7 +597,6 @@ describe('PianoRoll', () => {
         {
           id: 'b0',
           barIndex: 0,
-          scale: { root: 'C', type: 'major' },
           content: {
             [TEST_TRACK_ID]: {
               chords: [],
@@ -684,8 +681,8 @@ describe('PianoRoll', () => {
 
     it('accumulates bar starts across mixed meters', () => {
       const mixed: Bar[] = [
-        { id: 'm0', barIndex: 0, timeSignature: { beatsPerMeasure: 3, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, content: soloContent([], [{ id: 'x0', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }]) },
-        { id: 'm1', barIndex: 1, timeSignature: { beatsPerMeasure: 4, beatUnit: 4 }, scale: { root: 'C', type: 'major' }, content: soloContent([], [{ id: 'x1', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }]) },
+        { id: 'm0', barIndex: 0, timeSignature: { beatsPerMeasure: 3, beatUnit: 4 }, content: soloContent([], [{ id: 'x0', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }]) },
+        { id: 'm1', barIndex: 1, timeSignature: { beatsPerMeasure: 4, beatUnit: 4 }, content: soloContent([], [{ id: 'x1', pitch: 60, startBeat: 0, duration: 1, velocity: 100 }]) },
       ];
       // Bar 2 starts on beat 3, not beat 4, because bar 1 is in 3/4.
       const xs = noteFills('m0', mixed).map(f => f.x).sort((a, b) => a - b);
@@ -694,7 +691,7 @@ describe('PianoRoll', () => {
 
     it('scales note width with duration', () => {
       const twoBeats: Bar[] = [
-        { id: 'd0', barIndex: 0, scale: { root: 'C', type: 'major' }, content: soloContent([], [{ id: 'y0', pitch: 60, startBeat: 0, duration: 2, velocity: 100 }]) },
+        { id: 'd0', barIndex: 0, content: soloContent([], [{ id: 'y0', pitch: 60, startBeat: 0, duration: 2, velocity: 100 }]) },
       ];
       expect(noteFills('d0', twoBeats)[0].w).toBe(2 * PIXELS_PER_BEAT);
     });
@@ -799,8 +796,8 @@ describe('PianoRoll', () => {
     const PIXELS_PER_BEAT = 10;
 
     const bars: Bar[] = [
-      { id: 'b0', barIndex: 0, scale: { root: 'C', type: 'major' }, content: soloContent() },
-      { id: 'b1', barIndex: 1, scale: { root: 'C', type: 'major' }, content: soloContent() },
+      { id: 'b0', barIndex: 0, content: soloContent() },
+      { id: 'b1', barIndex: 1, content: soloContent() },
     ];
 
     function clickAt(selectedBarId: string, beat: number, onNoteClick: () => void) {
@@ -862,8 +859,8 @@ describe('PianoRoll', () => {
     const ACTIVE_FILL = 'rgba(59, 130, 246, 1)';
 
     const bars: Bar[] = [
-      { id: 'b0', barIndex: 0, scale: { root: 'C', type: 'major' }, content: soloContent([], [{ id: 'n0', pitch: 60, startBeat: 2, duration: 1, velocity: 100 }]) },
-      { id: 'b1', barIndex: 1, scale: { root: 'C', type: 'major' }, content: soloContent() },
+      { id: 'b0', barIndex: 0, content: soloContent([], [{ id: 'n0', pitch: 60, startBeat: 2, duration: 1, velocity: 100 }]) },
+      { id: 'b1', barIndex: 1, content: soloContent() },
     ];
 
     interface Drawn { color: string; x: number }

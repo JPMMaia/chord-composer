@@ -1,10 +1,21 @@
 import { create } from 'zustand';
 import { DEFAULT_SNAP_BEATS, SNAP_OPTIONS } from '@/engine/timeline';
+import type { Scale } from '@/types/music';
 
 interface EditorState {
   /** Grid resolution every timeline edit lands on, in beats. */
   snapBeats: number;
   setSnapBeats: (beats: number) => void;
+
+  /**
+   * The key being composed in: what the palette offers, what a dropped block is
+   * stamped with, and what the piano roll shades.
+   *
+   * A view setting, not part of the piece — the blocks carry their own keys — so
+   * it is not saved with the project. Opening one seeds it from the project key.
+   */
+  paletteScale: Scale;
+  setPaletteScale: (scale: Scale) => void;
 
   /** Horizontal scroll offset shared by the chord timeline and the piano roll, in pixels. */
   scrollX: number;
@@ -33,6 +44,12 @@ export const editorStore = create<EditorState>((set, get) => ({
     // rather than silently editing at some arbitrary resolution.
     if (!SNAP_OPTIONS.some(option => option.beats === beats)) return;
     set({ snapBeats: beats });
+  },
+
+  paletteScale: { root: 'C', type: 'major' },
+
+  setPaletteScale: (scale: Scale) => {
+    set({ paletteScale: { root: scale.root, type: scale.type } });
   },
 
   scrollX: 0,

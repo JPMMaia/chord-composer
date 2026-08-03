@@ -10,6 +10,7 @@ import {
 } from '@/engine/quantize';
 import { midiToNoteLabel } from '@/engine/chords';
 import { isNoteInScale } from '@/engine/scales';
+import { editorStore } from '@/store/editorStore';
 import {
   allBarNotes,
   getBarBeats,
@@ -214,10 +215,9 @@ export function PianoRoll({
     return getBarStartBeat(bars, bars.indexOf(selectedBar), timeSignature);
   }, [bars, selectedBar, timeSignature]);
 
-  const scale = useMemo(() => {
-    if (!selectedBar) return null;
-    return selectedBar.scale;
-  }, [selectedBar]);
+  // The key being composed in, not the selected bar's — bars no longer have one,
+  // and shading the roll to match the palette is what makes the two read together.
+  const scale = editorStore(s => s.paletteScale);
 
   const render = useCallback(
     (ctx: CanvasRenderingContext2D, width: number, height: number) => {
@@ -534,12 +534,9 @@ export function PianoRoll({
         return;
       }
 
-      if (scale) {
-        const pitchClass = pitch % 12;
-        if (!isNoteInScale(pitchClass, scale)) {
-          return;
-        }
-      }
+      // A click off the key being composed in is refused rather than snapped, so
+      // the roll never quietly writes a note outside the palette's scale.
+      if (!isNoteInScale(pitch % 12, scale)) return;
 
       if (!selectedBar || !selectedBarId) return;
 

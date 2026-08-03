@@ -5,6 +5,7 @@ import type {
   Note,
   NoteName,
   Project,
+  Scale,
   ScaleType,
   SegmentBreak,
   SegmentKind,
@@ -62,8 +63,15 @@ const LEGACY_TRACK_ID = 'track-legacy';
  * `vst3:` prefix means a plugin. `vst3State` is absent for every other track,
  * and for a plugin that has not been touched, which reads as "whatever the
  * plugin comes up in" — exactly what a pre-1.7 file meant.
+ *
+ * 1.8 moved the key off the bar and onto each segment, so two blocks in one bar
+ * can be in different keys. A pre-1.8 file states one scale per bar, which is
+ * what every segment in that bar was written against — so reading one pushes the
+ * bar's scale down onto its segments and the piece sounds identical. The bar's
+ * own `scale` is no longer written; a segment with no key of its own falls back
+ * to the project key.
  */
-export const SCHEMA_VERSION = '1.7';
+export const SCHEMA_VERSION = '1.8';
 
 /**
  * Validation error returned by validateProject.
@@ -139,7 +147,6 @@ export function serializeProject(project: Project): string {
       // Written only when the bar overrides the project meter, so a uniform
       // project still serialises exactly as it did under schema 1.0.
       timeSignature: b.timeSignature,
-      scale: b.scale,
       // Per-instrument from 1.5 on. The inner shape is unchanged from 1.4, so a
       // reader that understands one bar's chords understands these.
       content: Object.fromEntries(
@@ -158,6 +165,9 @@ export function serializeProject(project: Project): string {
               root: c.root,
               inversion: c.inversion,
               quality: c.quality,
+              // The key this block is written in — a bar-level `scale` is no
+              // longer written, so this is where a 1.8 file states its keys.
+              scale: c.scale,
               // Absent on an unvoiced chord, and an absent key drops out of the
               // JSON entirely — so a project nobody has voiced still serialises
               // byte for byte as it did under 1.5.
@@ -347,7 +357,27 @@ export function deserializeProject(json: string): Project {
   /** Where a pre-1.5 bar's flat arrays land: the first instrument. */
   const legacyTrackId = tracks[0].id;
 
-  const readChords = (raw: unknown, barIndex: number): ChordSegment[] =>
+  /**
+   * A scale from raw JSON, or undefined when it is absent or not a real one.
+   *
+   * A bad key is dropped rather than repaired: falling back to the project key is
+   * a defensible reading of "no key", but silently correcting `H harmonicMinor`
+   * to something would hide a broken file.
+   */
+  const readScale = (raw: unknown): Scale | undefined => {
+    if (!raw || typeof raw !== 'object') return undefined;
+    const { root, type } = raw as { root?: unknown; type?: unknown };
+    if (!VALID_NOTES.includes(root as NoteName)) return undefined;
+    if (!VALID_SCALE_TYPES.includes(type as ScaleType)) return undefined;
+    return { root: root as NoteName, type: type as ScaleType };
+  };
+
+  const readChords = (
+    raw: unknown,
+    barIndex: number,
+    /** The bar's own scale in a pre-1.8 file — what its segments were written in. */
+    legacyBarScale: Scale | undefined
+  ): ChordSegment[] =>
     Array.isArray(raw)
       ? (raw as Record<string, unknown>[]).map((c, j) => ({
           id: (c.id as string) ?? `chord-${barIndex}-${j}`,
@@ -366,6 +396,10 @@ export function deserializeProject(json: string): Project {
           root: typeof c.root === 'string' ? (c.root as NoteName) : undefined,
           inversion: typeof c.inversion === 'number' ? c.inversion : 0,
           quality: typeof c.quality === 'string' ? (c.quality as ChordQuality) : undefined,
+          // Schema 1.7 and earlier stated one key per bar. That is the key every
+          // segment in the bar was written against, so it migrates down onto each
+          // of them and the piece reads back identically.
+          scale: readScale(c.scale) ?? legacyBarScale,
           // Schema 1.5 and earlier had no voicing; an absent one means the plain
           // block chord, which is all those files could express.
           voicing: readVoicing(c.voicing),
@@ -387,17 +421,29 @@ export function deserializeProject(json: string): Project {
     ? (p.bars as Record<string, unknown>[]).map((b, i) => {
         // 1.5 and later carry `content`; anything earlier carries flat arrays that
         // belong to the one instrument those files could express.
+        // Pre-1.8 only. Both bar shapes below are handed it, so a 1.4 file's flat
+        // arrays migrate exactly as a 1.7 file's per-instrument ones do.
+        const legacyBarScale = readScale(b.scale);
+
         const content: Record<string, TrackContent> =
           b.content && typeof b.content === 'object'
             ? Object.fromEntries(
                 Object.entries(b.content as Record<string, Record<string, unknown>>).map(
                   ([trackId, raw]) => [
                     trackId,
-                    { chords: readChords(raw?.chords, i), notes: readNotes(raw?.notes, i) },
+                    {
+                      chords: readChords(raw?.chords, i, legacyBarScale),
+                      notes: readNotes(raw?.notes, i),
+                    },
                   ]
                 )
               )
-            : { [legacyTrackId]: { chords: readChords(b.chords, i), notes: readNotes(b.notes, i) } };
+            : {
+                [legacyTrackId]: {
+                  chords: readChords(b.chords, i, legacyBarScale),
+                  notes: readNotes(b.notes, i),
+                },
+              };
 
         return {
           id: (b.id as string) ?? `bar-${i}`,
@@ -406,7 +452,6 @@ export function deserializeProject(json: string): Project {
           timeSignature: isValidTimeSignature(b.timeSignature as TimeSignature | undefined)
             ? (b.timeSignature as TimeSignature)
             : undefined,
-          scale: (b.scale as { root: NoteName; type: ScaleType }) ?? { root: 'C', type: 'major' },
           content,
         };
       })
@@ -500,11 +545,17 @@ export function validateProject(project: Project): ValidationResult {
   for (let i = 0; i < (project.bars?.length ?? 0); i++) {
     const b = project.bars[i];
     if (!b.id) errors.push(`Bar ${i}: missing id.`);
-    if (!VALID_NOTES.includes(b.scale.root)) {
-      errors.push(`Bar ${i}: invalid scale root "${b.scale.root}".`);
-    }
-    if (!VALID_SCALE_TYPES.includes(b.scale.type)) {
-      errors.push(`Bar ${i}: invalid scale type "${b.scale.type}".`);
+    // A segment may omit its key to follow the project's, but not carry a bad one.
+    for (const content of Object.values(b.content ?? {})) {
+      for (const c of content.chords ?? []) {
+        if (!c.scale) continue;
+        if (!VALID_NOTES.includes(c.scale.root)) {
+          errors.push(`Bar ${i}: invalid scale root "${c.scale.root}".`);
+        }
+        if (!VALID_SCALE_TYPES.includes(c.scale.type)) {
+          errors.push(`Bar ${i}: invalid scale type "${c.scale.type}".`);
+        }
+      }
     }
     // A bar may omit its meter to follow the project's, but not carry a bad one.
     if (b.timeSignature && !isValidTimeSignature(b.timeSignature)) {

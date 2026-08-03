@@ -5,7 +5,6 @@ import type {
   ChordSegment,
   NoteName,
   Scale,
-  ScaleType,
   SegmentBreak,
   SpacingPreset,
   TimeSignature,
@@ -43,6 +42,7 @@ import {
   withToggledDoubling,
   withToneOffset,
 } from '@/engine/voicing';
+import { projectScale, segmentScale } from '@/engine/scales';
 import {
   DEFAULT_BPM,
   DEFAULT_TIME_SIGNATURE,
@@ -68,7 +68,7 @@ interface ProjectState {
   setKey: (key: NoteName, mode?: 'major' | 'minor') => void;
   addBar: () => void;
   removeBar: (barId: string) => void;
-  updateBarScale: (barId: string, scale: { root: NoteName; type: ScaleType }) => void;
+  setSegmentsScale: (segmentIds: string[], patch: Partial<Scale>) => void;
   setBarTimeSignature: (barId: string, ts: TimeSignature) => void;
   insertSegment: (
     barId: string,
@@ -119,6 +119,17 @@ interface ProjectState {
 const GENERATED_NOTE_OCTAVE = 4;
 
 /**
+ * The key a segment falls back to when it carries none of its own.
+ *
+ * Only reached by segments written before key moved off the bar and never loaded
+ * through `fileIO`, which migrates them — but every note-generating path needs an
+ * answer, so it is spelled out once here rather than defaulted per caller.
+ */
+function keyScale(project: Project): Scale {
+  return projectScale(project.key, project.keyMode);
+}
+
+/**
  * Regenerate every instrument's notes in every bar from its segments.
  *
  * A track's notes are derived state: this is what keeps the piano roll in step with
@@ -126,7 +137,11 @@ const GENERATED_NOTE_OCTAVE = 4;
  * makes overflow correct — a segment pushed across a bar line changes two bars at
  * once — and over all instruments because a refit can move any of them.
  */
-function withGeneratedNotes(bars: Bar[], projectTs: TimeSignature): Bar[] {
+function withGeneratedNotes(
+  bars: Bar[],
+  projectTs: TimeSignature,
+  fallbackScale: Scale
+): Bar[] {
   return bars.map(bar => ({
     ...bar,
     content: Object.fromEntries(
@@ -137,6 +152,7 @@ function withGeneratedNotes(bars: Bar[], projectTs: TimeSignature): Bar[] {
           notes: generateNotesFromSegments(
             content.chords,
             bar,
+            fallbackScale,
             projectTs,
             GENERATED_NOTE_OCTAVE
           ),
@@ -160,7 +176,7 @@ function applyBars(project: Project, bars: Bar[]): Project {
   const refitted = refitBars(bars, project.timeSignature, trackIds);
   return {
     ...project,
-    bars: withGeneratedNotes(refitted, project.timeSignature),
+    bars: withGeneratedNotes(refitted, project.timeSignature, keyScale(project)),
     updatedAt: new Date(),
   };
 }
@@ -208,9 +224,9 @@ function placedIn(
 /**
  * Rewrite segments in place, leaving where they sit alone.
  *
- * Each transform is handed the scale of the bar that segment actually lives in,
- * which is what lets "the next note of the scale" mean the right thing when a
- * multi-selection spans bars in different keys. Only the derived notes are
+ * Each transform is handed the key that segment is written in, which is what lets
+ * "the next note of the scale" mean the right thing when a multi-selection spans
+ * blocks in different keys. Only the derived notes are
  * resynced: none of these edits moves a block along the timeline, so unlike
  * `applyBars` there is nothing here for `refitBars` to refit.
  *
@@ -244,7 +260,7 @@ function withTransformedSegments(
           {
             ...trackContent,
             chords: trackContent.chords.map(c =>
-              targets.has(c.id) ? transform(c, bar.scale) : c
+              targets.has(c.id) ? transform(c, segmentScale(c, keyScale(project))) : c
             ),
           },
         ])
@@ -256,7 +272,7 @@ function withTransformedSegments(
 
   return {
     ...project,
-    bars: withGeneratedNotes(bars, project.timeSignature),
+    bars: withGeneratedNotes(bars, project.timeSignature, keyScale(project)),
     updatedAt: new Date(),
   };
 }
@@ -427,7 +443,6 @@ export const projectStore = create<ProjectState>((set, get) => ({
     const newBar: Bar = {
       id: generateId(),
       barIndex: project.bars.length,
-      scale: { root: project.key, type: project.keyMode === 'minor' ? 'naturalMinor' : 'major' },
       content: {},
     };
     set({
@@ -456,37 +471,20 @@ export const projectStore = create<ProjectState>((set, get) => ({
     });
   },
 
-  updateBarScale: (barId: string, scale: { root: NoteName; type: ScaleType }) => {
+  setSegmentsScale: (segmentIds: string[], patch: Partial<Scale>) => {
     const project = get().project;
     if (!project) return;
-    const barIndex = project.bars.findIndex(b => b.id === barId);
-    if (barIndex === -1) {
-      throw new Error('Bar not found');
-    }
-    const newBars = project.bars.map((b, i) => {
-      if (i !== barIndex) return b;
-      const nextScale = { root: scale.root, type: scale.type };
-      // Diatonic segments name a scale degree, so a change of scale has to move them
-      // onto the new key's chord for that degree — and their notes with them. The
-      // scale belongs to the bar, so every instrument in it is retuned.
-      return {
-        ...b,
-        scale: nextScale,
-        content: Object.fromEntries(
-          Object.entries(b.content).map(([trackId, content]) => [
-            trackId,
-            { ...content, chords: retuneSegmentsToScale(content.chords, b.scale, nextScale) },
-          ])
-        ),
-      };
+    // Diatonic segments name a scale degree, so a change of key has to move them
+    // onto the new key's chord for that degree — and their notes with them. Only
+    // the selected blocks move; their neighbours keep the key they were written in.
+    const next = withTransformedSegments(project, segmentIds, (segment, current) => {
+      // A patch rather than a whole scale, so setting the type across a selection
+      // whose roots differ leaves each block on its own root.
+      const target: Scale = { root: patch.root ?? current.root, type: patch.type ?? current.type };
+      return { ...retuneSegmentsToScale([segment], current, target)[0], scale: target };
     });
-    set({
-      project: {
-        ...project,
-        bars: withGeneratedNotes(newBars, project.timeSignature),
-        updatedAt: new Date(),
-      },
-    });
+    if (!next) return;
+    set({ project: next });
   },
 
   setBarTimeSignature: (barId: string, ts: TimeSignature) => {

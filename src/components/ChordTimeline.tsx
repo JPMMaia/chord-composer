@@ -165,6 +165,7 @@ export const ChordTimeline: React.FC = () => {
   const paletteScale = editorStore(s => s.paletteScale);
   const scrollX = editorStore(s => s.scrollX);
   const setScrollX = editorStore(s => s.setScrollX);
+  const setTimelineMouseBeat = editorStore(s => s.setTimelineMouseBeat);
 
   /** Where the insertion caret sits while a palette block hovers. */
   const [dropIndicator, setDropIndicator] = useState<{ barId: string; beat: number } | null>(null);
@@ -341,6 +342,53 @@ export const ChordTimeline: React.FC = () => {
       element.scrollLeft = scrollX;
     }
   }, [scrollX]);
+
+  // Track mouse position on the timeline ruler so paste can use it as the
+  // anchor point. The value is published as an absolute beat offset that
+  // the copy/paste hook converts into a target bar / startBeat.
+  useEffect(() => {
+    const ruler = rulerRef.current;
+    const scrollEl = scrollRef.current;
+    if (!ruler || !scrollEl) return;
+
+    const updateMouseBeat = (clientX: number) => {
+      const rect = ruler.getBoundingClientRect();
+      const beat = (clientX - rect.left) / PIXELS_PER_BEAT;
+      const totalBeats = getTotalBeats(project.bars, project.timeSignature);
+      if (clientX >= rect.left && clientX <= rect.right && Number.isFinite(beat)) {
+        setTimelineMouseBeat(Math.max(0, Math.min(beat, totalBeats)));
+      } else {
+        setTimelineMouseBeat(null);
+      }
+    };
+
+    const handlePointerMove = (e: PointerEvent) => {
+      // Only update while the pointer is within the timeline container.
+      const timeline = e.currentTarget as HTMLElement;
+      const rect = timeline.getBoundingClientRect();
+      if (e.clientX >= rect.left && e.clientX <= rect.right) {
+        updateMouseBeat(e.clientX);
+      } else {
+        setTimelineMouseBeat(null);
+      }
+    };
+
+    const handlePointerLeave = () => {
+      setTimelineMouseBeat(null);
+    };
+
+    ruler.addEventListener('pointermove', handlePointerMove);
+    scrollEl.addEventListener('pointermove', handlePointerMove);
+    scrollEl.addEventListener('pointerleave', handlePointerLeave);
+    ruler.addEventListener('pointerleave', handlePointerLeave);
+
+    return () => {
+      ruler.removeEventListener('pointermove', handlePointerMove);
+      scrollEl.removeEventListener('pointermove', handlePointerMove);
+      scrollEl.removeEventListener('pointerleave', handlePointerLeave);
+      ruler.removeEventListener('pointerleave', handlePointerLeave);
+    };
+  }, [project, setTimelineMouseBeat]);
 
   // Nothing tells the selection when a block is deleted, so it would otherwise keep
   // a dead id and arm the keyboard shortcuts over nothing. Only write on a real

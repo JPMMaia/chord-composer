@@ -23,6 +23,10 @@ interface EditorState {
   maxScrollX: number;
   /** Width of the scrolling viewport, in pixels. Zero until something measures it. */
   viewportWidth: number;
+  /** Mouse position on the timeline ruler in absolute beats (updated in ChordTimeline). */
+  timelineMouseBeat: number | null;
+  setTimelineMouseBeat: (beat: number | null) => void;
+
   setScrollX: (x: number) => void;
   setScrollExtent: (contentWidth: number, viewportWidth: number) => void;
 }
@@ -55,6 +59,11 @@ export const editorStore = create<EditorState>((set, get) => ({
   scrollX: 0,
   maxScrollX: 0,
   viewportWidth: 0,
+  timelineMouseBeat: null,
+
+  setTimelineMouseBeat: (beat: number | null) => {
+    set({ timelineMouseBeat: beat });
+  },
 
   setScrollX: (x: number) => {
     // Clamping centrally means neither the scrollbar nor the playhead-follow has

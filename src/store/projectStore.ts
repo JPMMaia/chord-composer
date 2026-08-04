@@ -1,15 +1,16 @@
 import { create } from 'zustand';
 import type {
-  Project,
   Bar,
   ChordSegment,
   NoteName,
+  Project,
   Scale,
   SegmentBreak,
   SpacingPreset,
   TimeSignature,
   Track,
 } from '@/types/music';
+import type { CopiedSegment } from './clipboardStore';
 import { generateId } from '@/utils/id';
 import {
   barChords,
@@ -118,6 +119,22 @@ interface ProjectState {
   setLoopRegion: (start: number | null, end: number | null) => void;
   /** Clone an instrument and all its chord segments. Returns the new instrument's id. */
   duplicateTrack: (sourceTrackId: string) => string | null;
+  /**
+   * Paste clipboard segments into the project.
+   *
+   * @param segments — the clipboard payload (from clipboardStore).
+   * @param trackId — the target instrument.
+   * @param offsetBarIndex — bar index to start pasting into.
+   * @param targetStartBeat — beat offset within the target bar where the
+   *   left edge of the first pasted segment should land (from the mouse cursor).
+   * @returns the ids of pasted segments, or null if nothing was pasted.
+   */
+  pasteSegments: (
+    segments: CopiedSegment[],
+    trackId: string,
+    offsetBarIndex: number,
+    targetStartBeat?: number
+  ) => string[] | null;
   toggleLoopEnabled: () => void;
   resetProject: () => void;
 }
@@ -897,6 +914,64 @@ export const projectStore = create<ProjectState>((set, get) => ({
 
     set({ project: applyBars(next, newBars) });
     return newId;
+  },
+
+  /** Paste clipboard segments into the project at the given bar offset. */
+  pasteSegments: (segments, trackId, offsetBarIndex, targetStartBeat = 0) => {
+    const project = get().project;
+    if (!project) return null;
+    if (segments.length === 0) return null;
+    if (!project.tracks.some(t => t.id === trackId)) return null;
+
+    // Ensure enough bars exist for the paste destination.
+    let bars = [...project.bars];
+    const maxSourceBar = Math.max(...segments.map(s => s.barIndex));
+    const neededBars = offsetBarIndex + (maxSourceBar - segments[0].barIndex) + 1;
+
+    // Append bars if needed, inheriting meter from the last existing bar.
+    while (bars.length < neededBars) {
+      const index = bars.length;
+      const previous = bars[index - 1];
+      bars.push({
+        id: generateId(),
+        barIndex: index,
+        timeSignature: previous?.timeSignature,
+        content: {},
+      });
+    }
+
+    // Group segments by their relative bar offset.
+    const baseBar = segments[0].barIndex;
+    // The first segment's original startBeat — used to offset all segments
+    // so that the left edge of the first pasted segment lands at the cursor.
+    const baseStartBeat = segments[0].baseStartBeat ?? segments[0].startBeat;
+    const newSegmentIds: string[] = [];
+
+    for (const copied of segments) {
+      const targetBarRelative = copied.barIndex - baseBar;
+      const targetBarIndex = offsetBarIndex + targetBarRelative;
+      const targetBar = bars[targetBarIndex];
+      if (!targetBar) continue;
+
+      const capacity = getBarBeats(targetBar, project.timeSignature);
+      // Compute the adjusted startBeat: keep the original relative spacing
+      // between segments, then shift the whole group so the first segment
+      // lands at the mouse-cursor beat (targetStartBeat).
+      const adjustedStartBeat = copied.startBeat - baseStartBeat + targetStartBeat;
+      const newSegment: ChordSegment = {
+        ...copied.segment,
+        id: generateId(),
+        startBeat: adjustedStartBeat,
+      };
+
+      bars = mapBar(bars, targetBar.id, trackId, chords =>
+        placedIn(chords, newSegment, adjustedStartBeat, capacity)
+      );
+      newSegmentIds.push(newSegment.id);
+    }
+
+    set({ project: applyBars(project, bars) });
+    return newSegmentIds.length > 0 ? newSegmentIds : null;
   },
 
   resetProject: () => {

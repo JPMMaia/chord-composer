@@ -1444,4 +1444,265 @@ describe('projectStore', () => {
       expect(result).toBeNull();
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // pasteSegments
+  // ---------------------------------------------------------------------------
+
+  describe('pasteSegments', () => {
+    const state = () => projectStore.getState();
+
+    it('returns null when no project exists', () => {
+      state().resetProject();
+      const result = state().pasteSegments([], 'track-x', 0);
+      expect(result).toBeNull();
+    });
+
+    it('returns null when segments list is empty', () => {
+      state().createProject();
+      const result = state().pasteSegments([], trackId(), 0);
+      expect(result).toBeNull();
+    });
+
+    it('returns null when target track does not exist', () => {
+      state().createProject();
+      const result = state().pasteSegments(
+        [
+          {
+            segment: { kind: 'chord' as const, duration: 1, root: 'C', quality: 'major' as const },
+            startBeat: 0,
+            barIndex: 0,
+            baseStartBeat: 0,
+          },
+        ],
+        'nope',
+        0
+      );
+      expect(result).toBeNull();
+    });
+
+    it('pastes a single segment into the target bar', () => {
+      state().createProject();
+      state().addBar(); // bar 0 at index 0
+      state().insertSegment(state().project!.bars[0].id, 0, chordSegment({ root: 'C', quality: 'major', duration: 1 }), trackId());
+      state().addBar(); // bar 1 at index 1
+
+      const before = state().project!.bars.length;
+      const ids = state().pasteSegments(
+        [
+          {
+            segment: { kind: 'chord', duration: 1, root: 'D', quality: 'minor' as const },
+            startBeat: 0,
+            barIndex: 0,
+            baseStartBeat: 0,
+          },
+        ],
+        trackId(),
+        1
+      );
+
+      expect(ids).not.toBeNull();
+      expect(ids!.length).toBe(1);
+
+      const bar = state().project!.bars[1];
+      const chords = barChords(bar, trackId());
+      expect(chords.length).toBe(1);
+      expect(chords[0].root).toBe('D');
+      expect(chords[0].quality).toBe('minor');
+      expect(chords[0].startBeat).toBe(0);
+      expect(chords[0].duration).toBe(1);
+      // Pasted segments get a fresh id.
+      expect(chords[0].id).not.toBe('seg-paste-target');
+      expect(state().project!.bars.length).toBe(before);
+    });
+
+    it('pastes a single segment at an offset within the target bar', () => {
+      state().createProject();
+      state().addBar(); // bar 0
+      state().insertSegment(state().project!.bars[0].id, 0, chordSegment({ duration: 1 }), trackId());
+      state().addBar(); // bar 1
+
+      state().pasteSegments(
+        [
+          {
+            segment: { kind: 'chord', duration: 1, root: 'E', quality: 'major' as const },
+            startBeat: 2,
+            barIndex: 0,
+            baseStartBeat: 0,
+          },
+        ],
+        trackId(),
+        1
+      );
+
+      const bar = state().project!.bars[1];
+      const chords = barChords(bar, trackId());
+      expect(chords.length).toBe(1);
+      expect(chords[0].startBeat).toBe(2);
+    });
+
+    it('offsets multiple segments so the first lands at the cursor', () => {
+      state().createProject();
+      state().addBar(); // bar 0
+      state().addBar(); // bar 1
+
+      // Paste two segments: originally at startBeat 0 and 2 in bar 0,
+      // into bar 1 with baseStartBeat 0. The offset is 0, so positions stay.
+      state().pasteSegments(
+        [
+          {
+            segment: { kind: 'chord', duration: 1, root: 'C', quality: 'major' as const },
+            startBeat: 0,
+            barIndex: 0,
+            baseStartBeat: 0,
+          },
+          {
+            segment: { kind: 'chord', duration: 1, root: 'E', quality: 'major' as const },
+            startBeat: 2,
+            barIndex: 0,
+            baseStartBeat: 0,
+          },
+        ],
+        trackId(),
+        1
+      );
+
+      const bar = state().project!.bars[1];
+      const chords = barChords(bar, trackId());
+      expect(chords.length).toBe(2);
+      expect(chords[0].startBeat).toBe(0);
+      expect(chords[1].startBeat).toBe(2);
+    });
+
+    it('shifts segments when baseStartBeat is non-zero', () => {
+      state().createProject();
+      state().addBar(); // bar 0
+      state().addBar(); // bar 1
+
+      // Segments at startBeat 1 and 3, baseStartBeat 1.
+      // Paste target is bar 1 with offsetBarIndex 1.
+      // offset = startBeat - baseStartBeat = 0 for the first segment.
+      // So first segment lands at 0, second at 2.
+      state().pasteSegments(
+        [
+          {
+            segment: { kind: 'chord', duration: 1, root: 'A', quality: 'minor' as const },
+            startBeat: 1,
+            barIndex: 0,
+            baseStartBeat: 1,
+          },
+          {
+            segment: { kind: 'chord', duration: 1, root: 'B', quality: 'minor' as const },
+            startBeat: 3,
+            barIndex: 0,
+            baseStartBeat: 1,
+          },
+        ],
+        trackId(),
+        1
+      );
+
+      const bar = state().project!.bars[1];
+      const chords = barChords(bar, trackId());
+      expect(chords.length).toBe(2);
+      // Offset: startBeat - baseStartBeat = 1 - 1 = 0 for first, 3 - 1 = 2 for second
+      expect(chords[0].startBeat).toBe(0);
+      expect(chords[1].startBeat).toBe(2);
+    });
+
+    it('appends bars when the paste destination exceeds existing bars', () => {
+      state().createProject();
+      // No bars exist yet
+
+      const before = state().project!.bars.length;
+      const ids = state().pasteSegments(
+        [
+          {
+            segment: { kind: 'chord', duration: 1, root: 'X', quality: 'major' as const },
+            startBeat: 0,
+            barIndex: 2, // bar index 2 — needs bars 0, 1, 2
+            baseStartBeat: 0,
+          },
+        ],
+        trackId(),
+        1
+      );
+
+      expect(ids).not.toBeNull();
+      expect(state().project!.bars.length).toBe(before + 2);
+      // The segment was at barIndex 2, offsetBarIndex 1, so target bar = 1 + (2 - 2) = 1
+      const targetBar = state().project!.bars[1];
+      const chords = barChords(targetBar, trackId());
+      expect(chords.length).toBe(1);
+      expect(chords[0].root).toBe('X');
+    });
+
+    it('preserves original segment properties (voicing, scale, etc.)', () => {
+      state().createProject();
+      state().addBar(); // bar 0
+      state().addBar(); // bar 1
+
+      state().pasteSegments(
+        [
+          {
+            segment: {
+              kind: 'chord',
+              duration: 2,
+              root: 'G',
+              quality: 'dominant7' as const,
+              inversion: 1,
+              octave: 5,
+              scale: { root: 'C' as NoteName, type: 'major' as ScaleType },
+              voicing: { spacing: 'open' as const },
+            },
+            startBeat: 0,
+            barIndex: 0,
+            baseStartBeat: 0,
+          },
+        ],
+        trackId(),
+        1
+      );
+
+      const bar = state().project!.bars[1];
+      const chords = barChords(bar, trackId());
+      expect(chords.length).toBe(1);
+      expect(chords[0].root).toBe('G');
+      expect(chords[0].quality).toBe('dominant7');
+      expect(chords[0].inversion).toBe(1);
+      expect(chords[0].octave).toBe(5);
+      expect(chords[0].scale).toEqual({ root: 'C', type: 'major' });
+      expect(chords[0].voicing).toEqual({ spacing: 'open' });
+    });
+
+    it('does not affect segments in other tracks', () => {
+      state().createProject();
+      state().addBar(); // bar 0
+      const otherTrackId = state().addTrack('Other');
+      state().insertSegment(state().project!.bars[0].id, 0, chordSegment({ root: 'C' }), trackId());
+      state().insertSegment(state().project!.bars[0].id, 0, chordSegment({ root: 'C' }), otherTrackId!);
+      state().addBar(); // bar 1
+
+      state().pasteSegments(
+        [
+          {
+            segment: { kind: 'chord', duration: 1, root: 'P', quality: 'major' as const },
+            startBeat: 0,
+            barIndex: 0,
+            baseStartBeat: 0,
+          },
+        ],
+        trackId(),
+        1
+      );
+
+      // Target track has the pasted segment in bar 1
+      const targetBar = state().project!.bars[1];
+      expect(barChords(targetBar, trackId()).length).toBe(1);
+      expect(barChords(targetBar, trackId())[0].root).toBe('P');
+
+      // Other track is untouched
+      expect(barChords(targetBar, otherTrackId!).length).toBe(0);
+    });
+  });
 });

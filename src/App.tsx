@@ -11,6 +11,7 @@ import { HorizontalScrollbar } from '@/components/HorizontalScrollbar';
 import { SegmentInspector } from '@/components/SegmentInspector';
 import { usePlayback } from '@/hooks/usePlayback';
 import { useSegmentShortcuts } from '@/hooks/useSegmentShortcuts';
+import { useSegmentCopyPaste } from '@/hooks/useSegmentCopyPaste';
 import { usePlaybackShortcuts } from '@/hooks/usePlaybackShortcuts';
 import { useFollowPlayhead } from '@/hooks/useFollowPlayhead';
 import { editorStore } from '@/store/editorStore';
@@ -149,6 +150,9 @@ function App() {
   // ↑/↓ step the selected block through its bar's scale, +/- move it an octave,
   // and `i` cycles a chord's inversion.
   useSegmentShortcuts();
+
+  // Ctrl+C / Ctrl+V to copy and paste selected segments.
+  useSegmentCopyPaste();
 
   // Spacebar toggles play/stop.
   usePlaybackShortcuts({ isPlaying, isLoading, onPlay: handlePlay, onStop: stop });

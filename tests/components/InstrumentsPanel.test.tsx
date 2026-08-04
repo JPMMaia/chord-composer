@@ -172,4 +172,53 @@ describe('InstrumentsPanel', () => {
     expect(barChords(bar, copyId)[0].root).toBe('C');
     expect(barChords(bar, copyId)[0].quality).toBe('major');
   });
+
+  it('renames an instrument on double-click then enter', () => {
+    render(<InstrumentsPanel />);
+    const name = within(row(firstId())).getByText('Piano');
+
+    fireEvent.doubleClick(name);
+    const input = screen.getByDisplayValue('Piano');
+    fireEvent.change(input, { target: { value: 'Grand Piano' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    expect(tracks()[0].name).toBe('Grand Piano');
+  });
+
+  it('renames an instrument on blur', () => {
+    render(<InstrumentsPanel />);
+    const name = within(row(firstId())).getByText('Piano');
+
+    fireEvent.doubleClick(name);
+    const input = screen.getByDisplayValue('Piano');
+    fireEvent.change(input, { target: { value: 'Grand Piano' } });
+    fireEvent.blur(input);
+
+    expect(tracks()[0].name).toBe('Grand Piano');
+  });
+
+  it('cancels rename on escape without changing the name', () => {
+    render(<InstrumentsPanel />);
+    const name = within(row(firstId())).getByText('Piano');
+
+    fireEvent.doubleClick(name);
+    const input = screen.getByDisplayValue('Piano');
+    fireEvent.change(input, { target: { value: 'Something Else' } });
+    fireEvent.keyDown(input, { key: 'Escape' });
+
+    expect(tracks()[0].name).toBe('Piano');
+  });
+
+  it('allows renaming an empty name', () => {
+    projectStore.getState().renameTrack(firstId(), '');
+    render(<InstrumentsPanel />);
+    const nameSpan = within(row(firstId())).getByTitle('Double-click to rename');
+
+    fireEvent.doubleClick(nameSpan);
+    const input = screen.getByDisplayValue('');
+    fireEvent.change(input, { target: { value: 'Drums' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    expect(tracks()[0].name).toBe('Drums');
+  });
 });

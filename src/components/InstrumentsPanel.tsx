@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef, useState } from 'react';
 import type { Track } from '@/types/music';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
@@ -90,9 +90,40 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
 }) => {
   const duplicateTrack = projectStore(s => s.duplicateTrack);
   const removeTrack = projectStore(s => s.removeTrack);
+  const renameTrack = projectStore(s => s.renameTrack);
   const setTrackInstrument = projectStore(s => s.setTrackInstrument);
   const toggleTrackMute = projectStore(s => s.toggleTrackMute);
   const toggleTrackVisible = projectStore(s => s.toggleTrackVisible);
+
+  const [isEditing, setIsEditing] = useState(false);
+  const [draftName, setDraftName] = useState(track.name);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  /** Commit the draft and exit edit mode. */
+  const commitRename = () => {
+    if (draftName !== track.name) {
+      renameTrack(track.id, draftName);
+    }
+    setIsEditing(false);
+  };
+
+  /** Exit edit mode without saving. */
+  const cancelRename = () => {
+    setDraftName(track.name);
+    setIsEditing(false);
+  };
+
+  /** Enter edit mode seeded with the current name. */
+  const startRename = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setDraftName(track.name);
+    setIsEditing(true);
+  };
+
+  // Focus the input when editing starts so the user can type immediately.
+  React.useEffect(() => {
+    if (isEditing) inputRef.current?.focus();
+  }, [isEditing]);
 
   // Absent means visible, so that a track from an older file — which carries no
   // flag — shows its notes rather than silently disappearing from the roll.
@@ -140,7 +171,33 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
           // say which colour this instrument owns.
           className={`w-2.5 h-2.5 rounded-sm shrink-0 ${isVisible ? '' : 'opacity-30'}`}
         />
-        <span className="flex-1 text-sm text-gray-200 truncate">{track.name}</span>
+        {isEditing ? (
+          <input
+            ref={inputRef}
+            type="text"
+            value={draftName}
+            autoFocus
+            onPointerDown={e => e.stopPropagation()}
+            onKeyDown={e => {
+              if (e.key === 'Enter') {
+                commitRename();
+              } else if (e.key === 'Escape') {
+                cancelRename();
+              }
+            }}
+            onBlur={commitRename}
+            onChange={e => setDraftName(e.target.value)}
+            className="flex-1 text-sm bg-gray-700 border border-indigo-500 rounded px-1 text-gray-200 focus:outline-none"
+          />
+        ) : (
+          <span
+            onDoubleClick={startRename}
+            title="Double-click to rename"
+            className="flex-1 text-sm text-gray-200 truncate cursor-text"
+          >
+            {track.name}
+          </span>
+        )}
 
         <button
           onPointerDown={e => e.stopPropagation()}

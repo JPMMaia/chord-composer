@@ -58,7 +58,7 @@ export const InstrumentsPanel: React.FC = () => {
           track={track}
           index={index}
           isSelected={track.id === selectedTrackId}
-          onSelect={() => selectTrack(track.id)}
+          onSelect={(id?: string) => selectTrack(id ?? track.id)}
           vst3={vst3}
         />
       ))}
@@ -76,7 +76,7 @@ interface InstrumentRowProps {
   track: Track;
   index: number;
   isSelected: boolean;
-  onSelect: () => void;
+  onSelect: (trackId?: string) => void;
   /** Empty in a browser build, and until the native scan finishes. */
   vst3: Vst3PluginsState;
 }
@@ -88,6 +88,7 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
   onSelect,
   vst3,
 }) => {
+  const duplicateTrack = projectStore(s => s.duplicateTrack);
   const removeTrack = projectStore(s => s.removeTrack);
   const setTrackInstrument = projectStore(s => s.setTrackInstrument);
   const toggleTrackMute = projectStore(s => s.toggleTrackMute);
@@ -124,7 +125,7 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
   return (
     <div
       data-testid={`instrument-row-${track.id}`}
-      onPointerDown={onSelect}
+      onPointerDown={() => onSelect()}
       // Matches the selected-bar treatment in the chord timeline, so "what is
       // selected" reads the same way in both panes.
       className={`px-3 py-2 border-b border-gray-700 cursor-pointer transition-colors ${
@@ -167,6 +168,19 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
           }`}
         >
           M
+        </button>
+
+        <button
+          onPointerDown={e => e.stopPropagation()}
+          onClick={() => {
+            const newId = duplicateTrack(track.id);
+            if (newId) onSelect(newId);
+          }}
+          title={`Duplicate ${track.name}`}
+          aria-label={`Duplicate ${track.name}`}
+          className="px-1 text-xs text-gray-400 hover:text-gray-200 transition-colors"
+        >
+          ⧉
         </button>
 
         <button

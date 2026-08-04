@@ -1272,4 +1272,176 @@ describe('projectStore', () => {
       expect(state().project).toBe(before);
     });
   });
+
+  describe('duplicateTrack', () => {
+    const state = () => projectStore.getState();
+    const tracks = () => state().project!.tracks;
+
+    beforeEach(() => {
+      state().createProject();
+      state().addBar();
+    });
+
+    it('creates a copy with " (copy)" appended to the name', () => {
+      const sourceId = trackId();
+      const newId = state().duplicateTrack(sourceId);
+
+      expect(newId).not.toBeNull();
+      expect(newId).not.toBe(sourceId);
+      expect(tracks()[1].name).toBe('Piano (copy)');
+    });
+
+    it('copies track settings from the source', () => {
+      const sourceId = trackId();
+      state().setTrackVolume(sourceId, 0.5);
+      state().setTrackPan(sourceId, 0.7);
+      state().toggleTrackMute(sourceId);
+      state().duplicateTrack(sourceId);
+
+      const copy = tracks().find(t => t.name === 'Piano (copy)')!;
+      expect(copy.volume).toBe(0.5);
+      expect(copy.pan).toBe(0.7);
+      expect(copy.muted).toBe(true);
+      expect(copy.solo).toBe(false);
+      expect(copy.instrument).toBe(DEFAULT_INSTRUMENT_ID);
+    });
+
+    it('does not copy vst3State', () => {
+      const sourceId = trackId();
+      state().project = {
+        ...state().project!,
+        tracks: state().project!.tracks.map(t =>
+          t.id === sourceId ? { ...t, vst3State: 'some-base64-data' } : t
+        ),
+      };
+      state().duplicateTrack(sourceId);
+
+      const copy = tracks().find(t => t.name === 'Piano (copy)')!;
+      expect(copy.vst3State).toBeUndefined();
+    });
+
+    it('assigns a distinct colour', () => {
+      state().duplicateTrack(trackId());
+      expect(tracks()[0].color).not.toBe(tracks()[1].color);
+    });
+
+    it('inserts the copy after the source in the track list', () => {
+      state().addTrack('Strings');
+      const source = trackId(); // Piano, index 0
+      state().duplicateTrack(source);
+
+      expect(tracks().map(t => t.name)).toEqual(['Piano', 'Piano (copy)', 'Strings']);
+    });
+
+    it('copies chord segments across all bars with new ids', () => {
+      const barId = state().project!.bars[0].id;
+      state().insertSegment(barId, 0, chordSegment({ id: 'a' }), trackId());
+      state().insertSegment(barId, 1, chordSegment({ id: 'b' }), trackId());
+
+      const newId = state().duplicateTrack(trackId());
+      expect(newId).not.toBeNull();
+
+      const bar = state().project!.bars[0];
+      const sourceChords = barChords(bar, trackId());
+      const copyChords = barChords(bar, newId!);
+
+      expect(copyChords.length).toBe(2);
+      // New ids, not the originals
+      expect(copyChords[0].id).not.toBe(sourceChords[0].id);
+      expect(copyChords[1].id).not.toBe(sourceChords[1].id);
+      // But same properties
+      expect(copyChords[0].startBeat).toBe(sourceChords[0].startBeat);
+      expect(copyChords[0].duration).toBe(sourceChords[0].duration);
+      expect(copyChords[0].root).toBe(sourceChords[0].root);
+      expect(copyChords[0].quality).toBe(sourceChords[0].quality);
+    });
+
+    it('copies segments across multiple bars', () => {
+      state().addBar();
+      const bar0 = state().project!.bars[0].id;
+      const bar1 = state().project!.bars[1].id;
+      state().insertSegment(bar0, 0, chordSegment({ id: 'a' }), trackId());
+      state().insertSegment(bar1, 2, chordSegment({ id: 'b' }), trackId());
+
+      const newId = state().duplicateTrack(trackId());
+
+      expect(barChords(state().project!.bars[0], newId!).length).toBe(1);
+      expect(barChords(state().project!.bars[1], newId!).length).toBe(1);
+      expect(barChords(state().project!.bars[1], newId!)[0].startBeat).toBe(2);
+    });
+
+    it('skips bars the source has no content in', () => {
+      state().addBar();
+      state().addBar();
+      // Only bar 0 has content; bars 1 and 2 are empty for this track
+      state().insertSegment(state().project!.bars[0].id, 0, chordSegment({ id: 'a' }), trackId());
+
+      const newId = state().duplicateTrack(trackId());
+
+      // Copy only has content in bar 0
+      expect(state().project!.bars[0].content[newId!]).toBeDefined();
+      expect(state().project!.bars[1].content[newId!]).toBeUndefined();
+      expect(state().project!.bars[2].content[newId!]).toBeUndefined();
+    });
+
+    it('regenerates notes for the copy', () => {
+      const barId = state().project!.bars[0].id;
+      state().insertSegment(barId, 0, chordSegment({ root: 'C', quality: 'major' }), trackId());
+
+      const newId = state().duplicateTrack(trackId());
+
+      const copyNotes = barNotes(state().project!.bars[0], newId!);
+      expect(copyNotes.map(n => n.pitch)).toEqual([60, 64, 67]);
+    });
+
+    it('copies voicing from source segments', () => {
+      const barId = state().project!.bars[0].id;
+      const seg = chordSegment({ id: 'a', root: 'C', quality: 'major', octave: 4 });
+      state().insertSegment(barId, 0, seg, trackId());
+      state().setSegmentSpacing(seg.id, 'drop2');
+
+      const newId = state().duplicateTrack(trackId());
+      const copySeg = barChords(state().project!.bars[0], newId!)[0];
+
+      expect(copySeg.voicing).toMatchObject({ spacing: 'drop2', offsets: [0, -1, 0] });
+    });
+
+    it('copies segment keys (scale) from source segments', () => {
+      const barId = state().project!.bars[0].id;
+      const seg = chordSegment({
+        id: 'a',
+        root: 'G',
+        quality: 'major',
+        romanNumeral: 'V',
+        scale: { root: 'C', type: 'major' },
+      });
+      state().insertSegment(barId, 0, seg, trackId());
+
+      const newId = state().duplicateTrack(trackId());
+      const copySeg = barChords(state().project!.bars[0], newId!)[0];
+
+      expect(copySeg.scale).toEqual({ root: 'C', type: 'major' });
+    });
+
+    it('leaves the source instrument untouched', () => {
+      const barId = state().project!.bars[0].id;
+      state().insertSegment(barId, 0, chordSegment({ id: 'a' }), trackId());
+
+      const before = barChords(state().project!.bars[0], trackId());
+      state().duplicateTrack(trackId());
+
+      expect(barChords(state().project!.bars[0], trackId())).toEqual(before);
+    });
+
+    it('returns null when source track id does not exist', () => {
+      const result = state().duplicateTrack('nope');
+      expect(result).toBeNull();
+    });
+
+    it('returns null when no project exists', () => {
+      state().resetProject();
+      const result = state().duplicateTrack('anything');
+      expect(result).toBeNull();
+    });
+  });
 });

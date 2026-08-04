@@ -116,6 +116,8 @@ interface ProjectState {
     target: import('@/engine/chordOperations').SegmentKindTarget
   ) => void;
   setLoopRegion: (start: number | null, end: number | null) => void;
+  /** Clone an instrument and all its chord segments. Returns the new instrument's id. */
+  duplicateTrack: (sourceTrackId: string) => string | null;
   toggleLoopEnabled: () => void;
   resetProject: () => void;
 }
@@ -839,6 +841,62 @@ export const projectStore = create<ProjectState>((set, get) => ({
   /** Show or hide this instrument's notes on the piano roll. Does not affect sound. */
   toggleTrackVisible: (trackId: string) => {
     updateTrack(get, set, trackId, t => ({ visible: t.visible === false }));
+  },
+
+  /** Clone an instrument and all its chord segments across every bar. */
+  duplicateTrack: (sourceTrackId: string) => {
+    const project = get().project;
+    if (!project) return null;
+    const source = project.tracks.find(t => t.id === sourceTrackId);
+    if (!source) return null;
+
+    const sourceIndex = project.tracks.indexOf(source);
+    const newId = generateId();
+    const newTrack: Track = {
+      id: newId,
+      name: `${source.name} (copy)`,
+      instrument: source.instrument,
+      volume: source.volume,
+      pan: source.pan,
+      muted: source.muted,
+      solo: source.solo,
+      visible: source.visible,
+      color: trackColorAt(sourceIndex + 1),
+    };
+
+    // Build the tracks array with the copy inserted after the source.
+    const newTracks = [
+      ...project.tracks.slice(0, sourceIndex + 1),
+      newTrack,
+      ...project.tracks.slice(sourceIndex + 1),
+    ];
+
+    // Deep-copy chord segments for every bar that the source has content in.
+    const newBars = project.bars.map(bar => {
+      const sourceContent = bar.content[sourceTrackId];
+      if (!sourceContent) return bar;
+
+      const clonedChords = sourceContent.chords.map(seg => ({
+        ...seg,
+        id: generateId(),
+      }));
+
+      return {
+        ...bar,
+        content: {
+          ...bar.content,
+          [newId]: { chords: clonedChords, notes: [] },
+        },
+      };
+    });
+
+    const next = {
+      ...project,
+      tracks: newTracks,
+    };
+
+    set({ project: applyBars(next, newBars) });
+    return newId;
   },
 
   resetProject: () => {

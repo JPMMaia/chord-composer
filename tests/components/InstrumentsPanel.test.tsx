@@ -3,6 +3,7 @@ import { render, screen, fireEvent, within } from '@testing-library/react';
 import { InstrumentsPanel } from '@/components/InstrumentsPanel';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
+import { barChords } from '@/engine/timeline';
 
 const tracks = () => projectStore.getState().project!.tracks;
 const firstId = () => tracks()[0].id;
@@ -135,5 +136,40 @@ describe('InstrumentsPanel', () => {
     const swatches = screen.getAllByTestId('instrument-swatch');
     expect(swatches).toHaveLength(2);
     expect(swatches[0].style.backgroundColor).not.toBe(swatches[1].style.backgroundColor);
+  });
+
+  it('duplicates an instrument', () => {
+    render(<InstrumentsPanel />);
+
+    fireEvent.click(screen.getByLabelText('Duplicate Piano'));
+
+    expect(tracks()).toHaveLength(2);
+    expect(tracks()[1].name).toBe('Piano (copy)');
+    // Auto-selected after duplication (same convention as Add).
+    expect(selectionStore.getState().selectedTrackId).toBe(tracks()[1].id);
+  });
+
+  it('duplicates an instrument and copies its chords', () => {
+    projectStore.getState().addBar();
+    const barId = projectStore.getState().project!.bars[0].id;
+    projectStore.getState().insertSegment(
+      barId,
+      0,
+      { id: 'seg1', kind: 'chord' as const, duration: 2, root: 'C' as const, quality: 'major' as const },
+      firstId()
+    );
+
+    render(<InstrumentsPanel />);
+    fireEvent.click(screen.getByLabelText('Duplicate Piano'));
+
+    const copyId = tracks()[1].id;
+    const bar = projectStore.getState().project!.bars[0];
+    expect(barChords(bar, firstId()).length).toBe(1);
+    expect(barChords(bar, copyId).length).toBe(1);
+    // The copy has a new segment id, not the original's.
+    expect(barChords(bar, copyId)[0].id).not.toBe('seg1');
+    // But same musical content.
+    expect(barChords(bar, copyId)[0].root).toBe('C');
+    expect(barChords(bar, copyId)[0].quality).toBe('major');
   });
 });

@@ -28,6 +28,7 @@ import {
   withStartBeats,
 } from '@/engine/timeline';
 import {
+  convertSegmentKind,
   cycleSegmentInversion,
   generateNotesFromSegments,
   retuneSegmentsToScale,
@@ -110,6 +111,10 @@ interface ProjectState {
   toggleSegmentsDoubling: (segmentIds: string[], tone: number, octaves: 1 | -1) => void;
   setSegmentsBreak: (segmentIds: string[], spec: SegmentBreak | null) => void;
   clearSegmentsVoicing: (segmentIds: string[]) => void;
+  convertSegmentsKind: (
+    segmentIds: string[],
+    target: import('@/engine/chordOperations').SegmentKindTarget
+  ) => void;
   setLoopRegion: (start: number | null, end: number | null) => void;
   toggleLoopEnabled: () => void;
   resetProject: () => void;
@@ -717,6 +722,16 @@ export const projectStore = create<ProjectState>((set, get) => ({
     const project = get().project;
     if (!project) return;
     const next = withTransformedSegments(project, segmentIds, withoutVoicing);
+    if (next) set({ project: next });
+  },
+
+  /** Convert segments between note, triad, and seventh kinds. */
+  convertSegmentsKind: (segmentIds, target) => {
+    const project = get().project;
+    if (!project) return;
+    const next = withTransformedSegments(project, segmentIds, (segment, scale) =>
+      convertSegmentKind(segment, scale, target)
+    );
     if (next) set({ project: next });
   },
 

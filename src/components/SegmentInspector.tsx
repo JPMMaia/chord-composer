@@ -1,7 +1,8 @@
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { findSegment } from '@/engine/timeline';
-import { resolveSegmentChord } from '@/engine/chordOperations';
+import { currentKind, resolveSegmentChord } from '@/engine/chordOperations';
+import type { SegmentKindTarget } from '@/engine/chordOperations';
 import { projectScale, segmentScale } from '@/engine/scales';
 import { ScaleSelect } from '@/components/ScaleSelect';
 import { voicedPitches } from '@/engine/voicing';
@@ -131,6 +132,7 @@ export function SegmentInspector() {
   const toggleSegmentsDoubling = projectStore(s => s.toggleSegmentsDoubling);
   const setSegmentsBreak = projectStore(s => s.setSegmentsBreak);
   const clearSegmentsVoicing = projectStore(s => s.clearSegmentsVoicing);
+  const convertSegmentsKind = projectStore(s => s.convertSegmentsKind);
   const setSegmentsScale = projectStore(s => s.setSegmentsScale);
 
   const located = project
@@ -169,6 +171,11 @@ export function SegmentInspector() {
   const sharedRoot = sharedValue(segments.map(s => scaleOf(s).root));
   const sharedType = sharedValue(segments.map(s => scaleOf(s).type));
 
+  // Derive the current kind of each segment so the dropdown can show the
+  // shared value or go blank when kinds disagree.
+  const segmentKinds = segments.map(s => currentKind(s));
+  const sharedKind = sharedValue(segmentKinds) as SegmentKindTarget | undefined;
+
   return (
     <div className="pt-2 border-t border-gray-700 space-y-3" data-testid="segment-inspector">
       <Identity
@@ -178,6 +185,20 @@ export function SegmentInspector() {
           first.bar.timeSignature ?? project.timeSignature ?? DEFAULT_TIME_SIGNATURE
         }
       />
+
+      <Section label="Kind">
+        <select
+          data-testid="segment-kind-select"
+          value={sharedKind ?? ''}
+          disabled={located.length === 0}
+          onChange={e => convertSegmentsKind(ids, e.target.value as SegmentKindTarget)}
+          className={FIELD_CLASS}
+        >
+          <option value="note">Note</option>
+          <option value="triad">Triad</option>
+          <option value="seventh">Seventh</option>
+        </select>
+      </Section>
 
       {/* Outside the chords-only branch below: a note is written in a key too, and
           retuning one moves it to the same degree of the new scale. */}

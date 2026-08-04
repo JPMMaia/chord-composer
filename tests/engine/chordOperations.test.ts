@@ -9,6 +9,8 @@ import {
   stepSegmentInScale,
   shiftSegmentOctave,
   cycleSegmentInversion,
+  convertSegmentKind,
+  currentKind,
 } from "@/engine/chordOperations";
 import { Bar, Scale, ChordSegment, Note, TimeSignature } from "@/types/music";
 import { generateId } from "@/utils/id";
@@ -906,6 +908,436 @@ describe("chordOperations", () => {
         },
       ]);
       expect(generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4).map((n) => n.pitch)).toEqual([60, 64, 67]);
+    });
+  });
+
+  describe("currentKind", () => {
+    it("returns 'note' for a note segment", () => {
+      const segment: ChordSegment = {
+        id: generateId(),
+        kind: "note",
+        pitch: 60,
+        duration: 1,
+      };
+      expect(currentKind(segment)).toBe("note");
+    });
+
+    it("returns 'triad' for a major chord", () => {
+      const segment: ChordSegment = {
+        id: generateId(),
+        kind: "chord",
+        root: "C",
+        quality: "major",
+        octave: 4,
+        duration: 1,
+      };
+      expect(currentKind(segment)).toBe("triad");
+    });
+
+    it("returns 'triad' for a minor chord", () => {
+      const segment: ChordSegment = {
+        id: generateId(),
+        kind: "chord",
+        root: "D",
+        quality: "minor",
+        octave: 4,
+        duration: 1,
+      };
+      expect(currentKind(segment)).toBe("triad");
+    });
+
+    it("returns 'seventh' for a dominant7 chord", () => {
+      const segment: ChordSegment = {
+        id: generateId(),
+        kind: "chord",
+        root: "G",
+        quality: "dominant7",
+        octave: 4,
+        duration: 1,
+      };
+      expect(currentKind(segment)).toBe("seventh");
+    });
+
+    it("returns 'seventh' for a min7 chord", () => {
+      const segment: ChordSegment = {
+        id: generateId(),
+        kind: "chord",
+        root: "D",
+        quality: "min7",
+        octave: 4,
+        duration: 1,
+      };
+      expect(currentKind(segment)).toBe("seventh");
+    });
+
+    it("returns 'seventh' for a maj7 chord", () => {
+      const segment: ChordSegment = {
+        id: generateId(),
+        kind: "chord",
+        root: "C",
+        quality: "maj7",
+        octave: 4,
+        duration: 1,
+      };
+      expect(currentKind(segment)).toBe("seventh");
+    });
+
+    it("returns 'triad' for a segment with no quality", () => {
+      const segment: ChordSegment = {
+        id: generateId(),
+        kind: "chord",
+        root: "C",
+        duration: 1,
+      };
+      expect(currentKind(segment)).toBe("triad");
+    });
+  });
+
+  describe("convertSegmentKind", () => {
+    const C_MAJOR: Scale = { root: "C", type: "major" };
+    const A_MINOR: Scale = { root: "A", type: "naturalMinor" };
+
+    /** A note segment at `pitch` with optional overrides. */
+    const note = (pitch: number, overrides: Partial<ChordSegment> = {}): ChordSegment => ({
+      id: generateId(),
+      kind: "note",
+      pitch,
+      duration: 2,
+      startBeat: 1,
+      scale: C_MAJOR,
+      ...overrides,
+    });
+
+    /** A triad segment as the palette produces one. */
+    const triad = (overrides: Partial<ChordSegment>): ChordSegment => ({
+      id: generateId(),
+      kind: "chord",
+      root: "C",
+      quality: "major",
+      octave: 4,
+      duration: 2,
+      startBeat: 1,
+      scale: C_MAJOR,
+      romanNumeral: "I",
+      chordSymbol: "C",
+      ...overrides,
+    });
+
+    /** A seventh segment. */
+    const seventh = (overrides: Partial<ChordSegment>): ChordSegment => ({
+      id: generateId(),
+      kind: "chord",
+      root: "C",
+      quality: "maj7",
+      octave: 4,
+      duration: 2,
+      startBeat: 1,
+      scale: C_MAJOR,
+      romanNumeral: "I",
+      chordSymbol: "Cmaj7",
+      ...overrides,
+    });
+
+    describe("note -> triad", () => {
+      it("converts C4 (degree I) to C major triad in C major", () => {
+        const result = convertSegmentKind(note(60), C_MAJOR, "triad");
+        expect(result.kind).toBe("chord");
+        expect(result.root).toBe("C");
+        expect(result.quality).toBe("major");
+      });
+
+      it("converts D4 (degree ii) to D minor triad in C major", () => {
+        const result = convertSegmentKind(note(62), C_MAJOR, "triad");
+        expect(result.kind).toBe("chord");
+        expect(result.root).toBe("D");
+        expect(result.quality).toBe("minor");
+      });
+
+      it("converts B4 (degree vii) to B diminished triad in C major", () => {
+        const result = convertSegmentKind(note(71), C_MAJOR, "triad");
+        expect(result.kind).toBe("chord");
+        expect(result.root).toBe("B");
+        expect(result.quality).toBe("diminished");
+      });
+
+      it("preserves duration from the note segment", () => {
+        const result = convertSegmentKind(note(60, { duration: 3 }), C_MAJOR, "triad");
+        expect(result.duration).toBe(3);
+      });
+
+      it("preserves startBeat from the note segment", () => {
+        const result = convertSegmentKind(note(60, { startBeat: 2.5 }), C_MAJOR, "triad");
+        expect(result.startBeat).toBe(2.5);
+      });
+
+      it("discards pitch from the note segment", () => {
+        const result = convertSegmentKind(note(60), C_MAJOR, "triad");
+        expect(result.pitch).toBeUndefined();
+      });
+
+      it("discards voicing from the note segment", () => {
+        const result = convertSegmentKind(
+          note(60, { voicing: { spacing: "open" } }),
+          C_MAJOR,
+          "triad"
+        );
+        expect(result.voicing).toBeUndefined();
+      });
+
+      it("sets kind to 'chord'", () => {
+        const result = convertSegmentKind(note(60), C_MAJOR, "triad");
+        expect(result.kind).toBe("chord");
+      });
+    });
+
+    describe("note -> seventh", () => {
+      it("converts C4 (degree I) to Cmaj7 in C major", () => {
+        const result = convertSegmentKind(note(60), C_MAJOR, "seventh");
+        expect(result.kind).toBe("chord");
+        expect(result.root).toBe("C");
+        expect(result.quality).toBe("maj7");
+      });
+
+      it("converts D4 (degree ii) to Dm7 in C major", () => {
+        const result = convertSegmentKind(note(62), C_MAJOR, "seventh");
+        expect(result.kind).toBe("chord");
+        expect(result.root).toBe("D");
+        expect(result.quality).toBe("min7");
+      });
+
+      it("converts G4 (degree V) to G7 in C major", () => {
+        const result = convertSegmentKind(note(67), C_MAJOR, "seventh");
+        expect(result.kind).toBe("chord");
+        expect(result.root).toBe("G");
+        expect(result.quality).toBe("dominant7");
+      });
+    });
+
+    describe("triad -> note", () => {
+      it("converts C major triad to C note at octave 4", () => {
+        const result = convertSegmentKind(triad({ root: "C", quality: "major", octave: 4 }), C_MAJOR, "note");
+        expect(result.kind).toBe("note");
+        expect(result.pitch).toBe(60);
+      });
+
+      it("converts Dm triad to D note at octave 4", () => {
+        const result = convertSegmentKind(
+          triad({ root: "D", quality: "minor", romanNumeral: "ii", chordSymbol: "Dm", octave: 4 }),
+          C_MAJOR,
+          "note"
+        );
+        expect(result.kind).toBe("note");
+        expect(result.pitch).toBe(62);
+      });
+
+      it("preserves duration and startBeat", () => {
+        const result = convertSegmentKind(
+          triad({ duration: 3, startBeat: 2 }),
+          C_MAJOR,
+          "note"
+        );
+        expect(result.duration).toBe(3);
+        expect(result.startBeat).toBe(2);
+      });
+
+      it("discards quality, octave, inversion, voicing", () => {
+        const result = convertSegmentKind(
+          triad({
+            quality: "minor",
+            octave: 5,
+            inversion: 1,
+            voicing: { spacing: "open" },
+          }),
+          C_MAJOR,
+          "note"
+        );
+        expect(result.quality).toBeUndefined();
+        expect(result.octave).toBeUndefined();
+        expect(result.inversion).toBeUndefined();
+        expect(result.voicing).toBeUndefined();
+      });
+
+      it("sets kind to 'note'", () => {
+        const result = convertSegmentKind(triad({}), C_MAJOR, "note");
+        expect(result.kind).toBe("note");
+      });
+    });
+
+    describe("seventh -> note", () => {
+      it("converts Cmaj7 to C note at octave 4", () => {
+        const result = convertSegmentKind(seventh({ octave: 4 }), C_MAJOR, "note");
+        expect(result.kind).toBe("note");
+        expect(result.pitch).toBe(60);
+      });
+
+      it("converts Dm7 to D note at octave 4", () => {
+        const seg: ChordSegment = {
+          id: generateId(),
+          kind: "chord",
+          root: "D",
+          quality: "min7",
+          octave: 4,
+          duration: 2,
+          scale: C_MAJOR,
+          romanNumeral: "ii",
+          chordSymbol: "Dm7",
+        };
+        const result = convertSegmentKind(seg, C_MAJOR, "note");
+        expect(result.kind).toBe("note");
+        expect(result.pitch).toBe(62);
+      });
+    });
+
+    describe("triad -> seventh", () => {
+      it("converts C major to Cmaj7 in C major", () => {
+        const result = convertSegmentKind(triad({ root: "C", quality: "major", romanNumeral: "I", chordSymbol: "C" }), C_MAJOR, "seventh");
+        expect(result.quality).toBe("maj7");
+        expect(result.chordSymbol).toBe("Cmaj7");
+      });
+
+      it("converts D minor to Dm7 in C major", () => {
+        const result = convertSegmentKind(
+          triad({ root: "D", quality: "minor", romanNumeral: "ii", chordSymbol: "Dm" }),
+          C_MAJOR,
+          "seventh"
+        );
+        expect(result.quality).toBe("min7");
+        expect(result.chordSymbol).toBe("Dm7");
+      });
+
+      it("converts G major to G7 in C major", () => {
+        const result = convertSegmentKind(
+          triad({ root: "G", quality: "major", romanNumeral: "V", chordSymbol: "G" }),
+          C_MAJOR,
+          "seventh"
+        );
+        expect(result.quality).toBe("dominant7");
+        expect(result.chordSymbol).toBe("G7");
+      });
+
+      it("preserves inversion clamped to new size", () => {
+        // Triad inversion 2 -> seventh: 2 is valid for a seventh (max 3)
+        const result = convertSegmentKind(
+          triad({ inversion: 2 }),
+          C_MAJOR,
+          "seventh"
+        );
+        expect(result.inversion).toBe(2);
+      });
+
+      it("preserves octave", () => {
+        const result = convertSegmentKind(triad({ octave: 5 }), C_MAJOR, "seventh");
+        expect(result.octave).toBe(5);
+      });
+
+      it("updates chordSymbol", () => {
+        const result = convertSegmentKind(
+          triad({ root: "C", quality: "major", romanNumeral: "I", chordSymbol: "C" }),
+          C_MAJOR,
+          "seventh"
+        );
+        expect(result.chordSymbol).toBe("Cmaj7");
+      });
+    });
+
+    describe("seventh -> triad", () => {
+      it("converts Cmaj7 to C major in C major", () => {
+        const result = convertSegmentKind(seventh({ root: "C", quality: "maj7", romanNumeral: "I", chordSymbol: "Cmaj7" }), C_MAJOR, "triad");
+        expect(result.quality).toBe("major");
+        expect(result.chordSymbol).toBe("C");
+      });
+
+      it("converts Dm7 to D minor in C major", () => {
+        const seg: ChordSegment = {
+          id: generateId(),
+          kind: "chord",
+          root: "D",
+          quality: "min7",
+          octave: 4,
+          duration: 2,
+          scale: C_MAJOR,
+          romanNumeral: "ii",
+          chordSymbol: "Dm7",
+        };
+        const result = convertSegmentKind(seg, C_MAJOR, "triad");
+        expect(result.quality).toBe("minor");
+        expect(result.chordSymbol).toBe("Dm");
+      });
+
+      it("converts G7 to G major in C major", () => {
+        const seg: ChordSegment = {
+          id: generateId(),
+          kind: "chord",
+          root: "G",
+          quality: "dominant7",
+          octave: 4,
+          duration: 2,
+          scale: C_MAJOR,
+          romanNumeral: "V",
+          chordSymbol: "G7",
+        };
+        const result = convertSegmentKind(seg, C_MAJOR, "triad");
+        expect(result.quality).toBe("major");
+        expect(result.chordSymbol).toBe("G");
+      });
+
+      it("preserves octave", () => {
+        const result = convertSegmentKind(seventh({ octave: 5 }), C_MAJOR, "triad");
+        expect(result.octave).toBe(5);
+      });
+
+      it("updates chordSymbol", () => {
+        const result = convertSegmentKind(seventh({ chordSymbol: "Cmaj7" }), C_MAJOR, "triad");
+        expect(result.chordSymbol).toBe("C");
+      });
+    });
+
+    describe("no-op when target matches", () => {
+      it("returns the same segment when triad -> triad", () => {
+        const segment = triad({});
+        expect(convertSegmentKind(segment, C_MAJOR, "triad")).toBe(segment);
+      });
+
+      it("returns the same segment when note -> note", () => {
+        const segment = note(60);
+        expect(convertSegmentKind(segment, C_MAJOR, "note")).toBe(segment);
+      });
+
+      it("returns the same segment when seventh -> seventh", () => {
+        const segment = seventh({});
+        expect(convertSegmentKind(segment, C_MAJOR, "seventh")).toBe(segment);
+      });
+    });
+
+    describe("natural minor scale", () => {
+      it("converts A4 (degree i) to Am triad", () => {
+        const result = convertSegmentKind(note(69, { scale: A_MINOR }), A_MINOR, "triad");
+        expect(result.root).toBe("A");
+        expect(result.quality).toBe("minor");
+      });
+
+      it("converts C4 (degree III) to C major triad", () => {
+        const result = convertSegmentKind(note(60, { scale: A_MINOR }), A_MINOR, "triad");
+        expect(result.root).toBe("C");
+        expect(result.quality).toBe("major");
+      });
+
+      it("converts C4 (degree III) to Cmaj7", () => {
+        const result = convertSegmentKind(note(60, { scale: A_MINOR }), A_MINOR, "seventh");
+        expect(result.root).toBe("C");
+        expect(result.quality).toBe("maj7");
+      });
+    });
+
+    describe("seventh -> triad inversion clamping", () => {
+      it("wraps inversion 3 to 0 when seventh (size 4) -> triad (size 3)", () => {
+        const result = convertSegmentKind(
+          seventh({ inversion: 3 }),
+          C_MAJOR,
+          "triad"
+        );
+        expect(result.inversion).toBe(0);
+      });
     });
   });
 });

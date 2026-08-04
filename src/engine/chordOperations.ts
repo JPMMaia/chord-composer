@@ -352,6 +352,163 @@ function isSeventhChord(segment: ChordSegment): boolean {
     : false;
 }
 
+/* ------------------------------------------------------------------------ */
+/* Segment kind conversion                                                  */
+/* ------------------------------------------------------------------------ */
+
+/** Target kind for conversion. */
+export type SegmentKindTarget = 'note' | 'triad' | 'seventh';
+
+/**
+ * Inspect a segment and return its effective kind: 'note', 'triad' or 'seventh'.
+ *
+ * A segment with `kind: 'note'` is a note. A chord segment is a triad when its
+ * quality has three intervals and a seventh when it has four. A chord with no
+ * quality is treated as a triad — the default chord size.
+ */
+export function currentKind(segment: ChordSegment): SegmentKindTarget {
+  if (segment.kind === 'note') return 'note';
+  if (!segment.quality) return 'triad';
+  const intervals = CHORD_INTERVALS[segment.quality as ChordQualityKey];
+  return intervals.length === 4 ? 'seventh' : 'triad';
+}
+
+/**
+ * Converts a segment to a different kind, keeping its musical degree and scale
+ * context.
+ *
+ * The conversion is reversible: converting a note to a triad and back recovers
+ * the same degree. Duration, startBeat, and scale survive every path.
+ */
+export function convertSegmentKind(
+  segment: ChordSegment,
+  scale: Scale,
+  target: SegmentKindTarget
+): ChordSegment {
+  const kind = currentKind(segment);
+  if (kind === target) return segment; // no-op
+
+  // Note → triad / seventh
+  if (kind === 'note') {
+    return noteToChord(segment, scale, target);
+  }
+
+  // Chord → note
+  if (target === 'note') {
+    return chordToNote(segment, scale);
+  }
+
+  // Triad ↔ seventh
+  return chordToChord(segment, scale, target);
+}
+
+/** Derive the diatonic chord at the note's scale degree. */
+function noteToChord(
+  segment: ChordSegment,
+  scale: Scale,
+  target: 'triad' | 'seventh'
+): ChordSegment {
+  if (segment.pitch === undefined) return segment;
+
+  const pitchClass = ((segment.pitch % 12) + 12) % 12;
+  const scalePitches = getScalePitches(scale.root, scale.type);
+  const degree = scalePitches.indexOf(pitchClass);
+
+  // Chromatic note: not in the scale, no diatonic chord to convert to.
+  if (degree === -1) return segment;
+
+  const noteCount = target === 'seventh' ? 4 : 3;
+  const chords = target === 'seventh' ? getDiatonicSevenths(scale) : getDiatonicChords(scale);
+  const chord = chords[degree];
+
+  if (!chord) return segment;
+
+  const octave = octaveForDegree(scale, NOTE_NAMES.indexOf(chord.root), segment.octave ?? 4);
+
+  return {
+    ...segment,
+    kind: 'chord',
+    pitch: undefined,
+    root: chord.root,
+    quality: chord.quality,
+    romanNumeral: chord.romanNumeral,
+    chordSymbol: formatChordSymbol(chord.root, chord.quality),
+    octave,
+    // Discard voicing: a fresh chord starts in close position.
+    voicing: undefined,
+    inversion: undefined,
+  };
+}
+
+/** Collapse a chord to its root as a single note. */
+function chordToNote(segment: ChordSegment, scale: Scale): ChordSegment {
+  const root = segment.root;
+  if (!root) return segment;
+
+  const rootSemitone = NOTE_NAMES.indexOf(root);
+  const octave = segment.octave ?? 4;
+  const pitch = (octave + 1) * 12 + rootSemitone;
+
+  return {
+    ...segment,
+    kind: 'note',
+    pitch,
+    quality: undefined,
+    octave: undefined,
+    chordSymbol: undefined,
+    inversion: undefined,
+    voicing: undefined,
+  };
+}
+
+/** Change a triad to a seventh or vice versa at the same degree. */
+function chordToChord(
+  segment: ChordSegment,
+  scale: Scale,
+  target: 'triad' | 'seventh'
+): ChordSegment {
+  const chords = target === 'seventh' ? getDiatonicSevenths(scale) : getDiatonicChords(scale);
+
+  // Find the segment's degree in the scale
+  const degree = degreeOfChord(segment, scale);
+
+  if (degree === -1) {
+    // No roman numeral and root not in scale: try matching root directly
+    const rootSemitone = segment.root ? NOTE_NAMES.indexOf(segment.root) : -1;
+    if (rootSemitone === -1) return segment;
+    const idx = chords.findIndex(c => NOTE_NAMES.indexOf(c.root) === rootSemitone);
+    if (idx === -1) return segment;
+    return buildNewChordSegment(segment, chords[idx], target);
+  }
+
+  const chord = chords[degree];
+  if (!chord) return segment;
+
+  return buildNewChordSegment(segment, chord, target);
+}
+
+/** Build the updated segment from a ChordInfo, clamping inversion to new size. */
+function buildNewChordSegment(
+  segment: ChordSegment,
+  chord: { root: NoteName; quality: ChordQuality; romanNumeral: string },
+  target: 'triad' | 'seventh'
+): ChordSegment {
+  const newSize = target === 'seventh' ? 4 : 3;
+  const inversion = segment.inversion
+    ? ((segment.inversion % newSize) + newSize) % newSize
+    : undefined;
+
+  return {
+    ...segment,
+    root: chord.root,
+    quality: chord.quality,
+    romanNumeral: chord.romanNumeral,
+    chordSymbol: formatChordSymbol(chord.root, chord.quality),
+    inversion,
+  };
+}
+
+
 /**
  * Which degree of `scale` a chord segment sits on, or -1.
  *

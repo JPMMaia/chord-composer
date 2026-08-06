@@ -146,16 +146,22 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
         onMoveStart?.(e);
       }}
       // Spans exactly its own beats, so a block covers the same span as the notes
-      // it generates in the piano roll below.
+      // it generates in the piano roll below. A block may be longer than the bar
+      // that holds it, in which case it simply reaches past the bar line — which is
+      // why it carries a z-index even when idle: the next bar is a later sibling,
+      // and would otherwise paint its lane straight over the overhanging tail.
       style={{
         left: `${startBeat * pixelsPerBeat}px`,
         width: `${segment.duration * pixelsPerBeat}px`,
+        // One declaration rather than three utility classes, so the three states
+        // cannot depend on the order Tailwind happens to emit them in.
+        zIndex: isDragging ? 20 : isSelected ? 10 : 1,
       }}
       className={`
         absolute top-0 bottom-0 flex flex-col items-center justify-center overflow-hidden
         rounded-md select-none border transition-colors
-        ${isDragging ? 'cursor-grabbing z-20 opacity-80' : 'cursor-grab'}
-        ${isSelected ? 'ring-2 ring-indigo-400 z-10' : ''}
+        ${isDragging ? 'cursor-grabbing opacity-80' : 'cursor-grab'}
+        ${isSelected ? 'ring-2 ring-indigo-400' : ''}
         ${isNote
           ? 'bg-teal-800 border-teal-600 text-teal-50'
           : 'bg-indigo-800 border-indigo-600 text-indigo-50'}

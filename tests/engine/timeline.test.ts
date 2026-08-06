@@ -9,7 +9,7 @@ import {
   removeSegmentById,
   resizeSegment,
   snapBeat,
-  clampToBar,
+  clampStartToBar,
   withStartBeats,
   placeSegmentInBar,
   refitBars,
@@ -236,27 +236,27 @@ describe("timeline", () => {
     });
   });
 
-  describe("clampToBar", () => {
-    it("pins a block's right edge to the bar line", () => {
-      // A 2-beat block dropped at 3.5 in 4/4 can only start at 2.
-      expect(clampToBar(3.5, 2, 4)).toBe(2);
+  describe("clampStartToBar", () => {
+    it("lets a block's tail cross the bar line", () => {
+      // A 2-beat block dropped at 3.5 in 4/4 stays at 3.5 and hangs into bar 2.
+      expect(clampStartToBar(3.5, 4)).toBe(3.5);
+      // Even a block longer than the bar itself keeps the beat it was dropped on.
+      expect(clampStartToBar(2, 4)).toBe(2);
     });
 
-    it("leaves a block that already fits alone", () => {
-      expect(clampToBar(1, 2, 4)).toBe(1);
-      expect(clampToBar(2, 2, 4)).toBe(2);
+    it("keeps the onset inside the bar", () => {
+      // The bar line itself is the next bar's beat 0, so a block cannot start there.
+      expect(clampStartToBar(4, 4)).toBe(4 - MIN_SEGMENT_BEATS);
+      expect(clampStartToBar(9, 4)).toBe(4 - MIN_SEGMENT_BEATS);
     });
 
     it("never goes below the start of the bar", () => {
-      expect(clampToBar(-1, 1, 4)).toBe(0);
-      // A block longer than the whole bar still has to start somewhere.
-      expect(clampToBar(2, 6, 4)).toBe(0);
+      expect(clampStartToBar(-1, 4)).toBe(0);
     });
 
-    it("leaves beat 0 as the only legal start in a bar shorter than the block", () => {
-      // 1/1 snap in 3/4: snapping lands on 4, the clamp is what keeps it legal.
-      expect(clampToBar(snapBeat(2.5, 4), 1, 3)).toBe(2);
-      expect(clampToBar(snapBeat(2.5, 4), 3, 3)).toBe(0);
+    it("pulls a snap that overshoots the bar back inside it", () => {
+      // 1/1 snap in 3/4: snapping lands on 4, past the bar's three beats.
+      expect(clampStartToBar(snapBeat(2.5, 4), 3)).toBe(3 - MIN_SEGMENT_BEATS);
     });
   });
 
@@ -291,62 +291,70 @@ describe("timeline", () => {
     const packed = () => [seg("c", 1, 0), seg("am", 1, 1), seg("f", 1, 2)];
 
     it("places a block into empty space without touching anything", () => {
-      const { kept, overflow } = placeSegmentInBar(
-        [seg("c", 1, 0)],
-        seg("g"),
-        3,
-        4
-      );
-      expect(layout(kept)).toEqual(["c@0+1", "g@3+1"]);
-      expect(overflow).toEqual([]);
+      expect(layout(placeSegmentInBar([seg("c", 1, 0)], seg("g"), 3))).toEqual([
+        "c@0+1",
+        "g@3+1",
+      ]);
     });
 
     it("pushes an overlapped neighbour, and its neighbours, to the right", () => {
-      const { kept, overflow } = placeSegmentInBar(packed(), seg("g"), 1, 4);
-      expect(layout(kept)).toEqual(["c@0+1", "g@1+1", "am@2+1", "f@3+1"]);
-      expect(overflow).toEqual([]);
+      expect(layout(placeSegmentInBar(packed(), seg("g"), 1))).toEqual([
+        "c@0+1",
+        "g@1+1",
+        "am@2+1",
+        "f@3+1",
+      ]);
     });
 
     it("leaves blocks that end before the drop untouched", () => {
-      const { kept } = placeSegmentInBar(packed(), seg("g"), 2, 4);
+      const kept = placeSegmentInBar(packed(), seg("g"), 2);
       expect(layout(kept).slice(0, 2)).toEqual(["c@0+1", "am@1+1"]);
     });
 
     it("pushes a block that starts before the drop but overlaps it", () => {
       // A 2-beat block at 0 is not "before" a drop at beat 1 — it sits under it.
-      const { kept } = placeSegmentInBar([seg("wide", 2, 0)], seg("g"), 1, 4);
+      const kept = placeSegmentInBar([seg("wide", 2, 0)], seg("g"), 1);
       expect(layout(kept)).toEqual(["g@1+1", "wide@2+2"]);
     });
 
     it("stops the cascade at a gap wide enough to absorb the shift", () => {
       // c@0, am@1, then a gap, then f@3. Dropping on am shifts am into the gap only.
       const segments = [seg("c", 1, 0), seg("am", 1, 1), seg("f", 1, 3)];
-      const { kept } = placeSegmentInBar(segments, seg("g"), 1, 4);
-      expect(layout(kept)).toEqual(["c@0+1", "g@1+1", "am@2+1", "f@3+1"]);
+      expect(layout(placeSegmentInBar(segments, seg("g"), 1))).toEqual([
+        "c@0+1",
+        "g@1+1",
+        "am@2+1",
+        "f@3+1",
+      ]);
     });
 
-    it("reports a block pushed past the bar line as overflow", () => {
+    it("ripples a block past the bar line rather than dropping it", () => {
+      // Positions past the bar's four beats are simply positions further along;
+      // `refitBars` is what re-homes `f` into the next bar.
       const segments = [seg("c", 1, 0), seg("am", 1, 1), seg("f", 1, 3)];
-      const { kept, overflow } = placeSegmentInBar(segments, seg("g", 2), 1, 4);
-      expect(layout(kept)).toEqual(["c@0+1", "g@1+2", "am@3+1"]);
-      expect(overflow.map((s) => s.id)).toEqual(["f"]);
+      expect(layout(placeSegmentInBar(segments, seg("g", 2), 1))).toEqual([
+        "c@0+1",
+        "g@1+2",
+        "am@3+1",
+        "f@4+1",
+      ]);
     });
 
     it("replaces a block already in the bar rather than duplicating it", () => {
       // Moving a block within its own bar goes through the same call.
-      const { kept } = placeSegmentInBar(packed(), seg("c", 1), 3, 4);
+      const kept = placeSegmentInBar(packed(), seg("c", 1), 3);
       expect(kept.filter((s) => s.id === "c")).toHaveLength(1);
       expect(layout(kept)).toEqual(["am@1+1", "f@2+1", "c@3+1"]);
     });
 
     it("returns blocks sorted by position", () => {
-      const { kept } = placeSegmentInBar([seg("late", 1, 3)], seg("early"), 0, 4);
+      const kept = placeSegmentInBar([seg("late", 1, 3)], seg("early"), 0);
       expect(kept.map((s) => s.id)).toEqual(["early", "late"]);
     });
 
     it("does not mutate the input list", () => {
       const segments = packed();
-      placeSegmentInBar(segments, seg("g"), 1, 4);
+      placeSegmentInBar(segments, seg("g"), 1);
       expect(layout(segments)).toEqual(["c@0+1", "am@1+1", "f@2+1"]);
     });
   });
@@ -409,6 +417,54 @@ describe("timeline", () => {
       expect(flattenSegments(result, TEST_TRACK_ID).map((s) => s.id)).toEqual(["huge"]);
     });
 
+    // A segment's *onset* belongs to one bar; how long it rings afterwards is its
+    // own business. These are the cases the old bar clamp made unreachable.
+    it("leaves a block hanging over the bar line where it was put", () => {
+      const bars = [makeBar(0, [seg("held", 3, 3)]), makeBar(1)];
+      const result = refitBars(bars, TS_4_4);
+      expect(layout(barChords(result[0], TEST_TRACK_ID))).toEqual(["held@3+3"]);
+      expect(barChords(result[1], TEST_TRACK_ID)).toEqual([]);
+    });
+
+    it("starts the next block after an overhang, in whichever bar that lands in", () => {
+      const bars = [makeBar(0, [seg("held", 3, 3)]), makeBar(1, [seg("next", 1, 0)])];
+      const result = refitBars(bars, TS_4_4);
+      expect(layout(barChords(result[0], TEST_TRACK_ID))).toEqual(["held@3+3"]);
+      // `held` rings until beat 2 of bar 2, so `next` moves to beat 2 rather than
+      // being left overlapping the downbeat.
+      expect(layout(barChords(result[1], TEST_TRACK_ID))).toEqual(["next@2+1"]);
+    });
+
+    it("re-homes a block whose onset was pushed over the bar line", () => {
+      // `a` grows to fill the bar, pushing `b`'s onset to beat 4 — which is bar 2's
+      // downbeat, not bar 1's last legal beat.
+      const bars = [makeBar(0, [seg("a", 4, 0), seg("b", 1, 2)]), makeBar(1)];
+      const result = refitBars(bars, TS_4_4);
+      expect(layout(barChords(result[0], TEST_TRACK_ID))).toEqual(["a@0+4"]);
+      expect(layout(barChords(result[1], TEST_TRACK_ID))).toEqual(["b@0+1"]);
+    });
+
+    it("keeps the beat a pushed block landed on rather than resetting it", () => {
+      const bars = [makeBar(0, [seg("a", 5, 0), seg("b", 1, 2)]), makeBar(1)];
+      const result = refitBars(bars, TS_4_4);
+      // `a` ends at beat 1 of bar 2, so `b` starts there — not at the downbeat.
+      expect(layout(barChords(result[1], TEST_TRACK_ID))).toEqual(["b@1+1"]);
+    });
+
+    it("grows the project to contain a block hanging off the end", () => {
+      const bars = [makeBar(0, [seg("long", 7, 2)])];
+      const result = refitBars(bars, TS_4_4);
+      // The block rings to beat 9, so the song must be at least three bars long.
+      expect(result).toHaveLength(3);
+      expect(layout(barChords(result[0], TEST_TRACK_ID))).toEqual(["long@2+7"]);
+    });
+
+    it("is idempotent over a block that crosses a bar line", () => {
+      const bars = [makeBar(0, [seg("held", 3, 3)]), makeBar(1, [seg("next", 1, 0)])];
+      const once = refitBars(bars, TS_4_4);
+      expect(refitBars(once, TS_4_4)).toEqual(once);
+    });
+
     it("never drops a segment", () => {
       const chords = Array.from({ length: 11 }, (_, i) => seg(`s${i}`, 1, 0));
       const result = refitBars([makeBar(0, chords)], TS_4_4);
@@ -450,13 +506,13 @@ describe("timeline", () => {
 
       it("leaves another instrument's blocks where they are", () => {
         const bars = [twoTrackBar()];
-        // `a` grows over `b`, so `b` is pushed past the bar line and spills.
+        // `a` grows over `b`, so `b` is pushed along — to beat 3, from where its
+        // two beats hang over the bar line into bar 2.
         bars[0].content[TEST_TRACK_ID].chords = [seg("a", 3, 0), seg("b", 2, 1)];
 
         const result = refitBars(bars, TS_4_4, [TEST_TRACK_ID, OTHER_TRACK_ID]);
 
-        expect(layout(barChords(result[0], TEST_TRACK_ID))).toEqual(["a@0+3"]);
-        expect(layout(barChords(result[1], TEST_TRACK_ID))).toEqual(["b@0+2"]);
+        expect(layout(barChords(result[0], TEST_TRACK_ID))).toEqual(["a@0+3", "b@3+2"]);
         // The other instrument is untouched by all of that.
         expect(layout(barChords(result[0], OTHER_TRACK_ID))).toEqual(["x@0+2", "y@2+2"]);
       });

@@ -314,6 +314,81 @@ describe('musicxmlExporter', () => {
     });
   });
 
+  // A segment on the timeline may run past its bar line. Notation cannot write a
+  // note through one, so it is cut at the line and tied to a continuation — which
+  // is what a reader plays as one held chord.
+  describe('notes held across a bar line', () => {
+    /** Bar `index`, holding one note of `duration` beats starting at `startBeat`. */
+    const barWithNote = (index: number, startBeat: number, duration: number): Bar => ({
+      id: generateId(),
+      barIndex: index,
+      content: soloContent([], [
+        { id: generateId(), pitch: 60, startBeat, duration, velocity: 100 },
+      ]),
+    });
+
+    /** A bar the held note rings into, carrying nothing of its own. */
+    const restBar = (index: number): Bar => ({
+      id: generateId(),
+      barIndex: index,
+      content: soloContent([], []),
+    });
+
+    /** Every `<measure>` element of the first part, in order. */
+    const measures = (xml: string): string[] => xml.split('<measure ').slice(1);
+
+    it('cuts the note at the bar line and ties it into the next measure', () => {
+      // Starts on beat 3 of a 4/4 bar and rings for three beats: one beat here,
+      // two in the measure after.
+      const project = createTestProject({
+        bars: [barWithNote(0, 3, 3), restBar(1)],
+      });
+      const [first, second] = measures(projectToMusicXML(project));
+
+      expect(first).toContain('<duration>4</duration>\n        <tie type="start"/>');
+      expect(first).toContain('<tied type="start"/>');
+      expect(second).toContain('<duration>8</duration>');
+      expect(second).toContain('<tie type="stop"/>');
+      expect(second).toContain('<tied type="stop"/>');
+    });
+
+    it('keeps every measure adding up to its own length', () => {
+      const project = createTestProject({
+        bars: [barWithNote(0, 3, 3), restBar(1)],
+      });
+      const total = (measure: string) =>
+        [...measure.matchAll(/<duration>(\d+)<\/duration>/g)]
+          .reduce((sum, m) => sum + Number(m[1]), 0);
+
+      // 4 beats × 4 divisions, in both — the first as 3 beats of rest plus the cut
+      // note, the second as the 2-beat tail plus 2 beats of rest.
+      for (const measure of measures(projectToMusicXML(project))) {
+        expect(total(measure)).toBe(16);
+      }
+    });
+
+    it('ties on through a measure the note spans entirely', () => {
+      // Eight beats from beat 2 of bar 1: two here, four filling bar 2, two in bar 3.
+      const project = createTestProject({
+        bars: [barWithNote(0, 2, 8), restBar(1), restBar(2)],
+      });
+      const [, second, third] = measures(projectToMusicXML(project));
+
+      // The middle measure is nothing but the held note: tied at both ends, no rest.
+      expect(second).toContain('<tie type="stop"/>\n        <tie type="start"/>');
+      expect(second).not.toContain('<rest');
+      expect(third).toContain('<tie type="stop"/>');
+      expect(third).not.toContain('<tie type="start"/>');
+    });
+
+    it('leaves a note that ends on the bar line untied', () => {
+      const project = createTestProject({
+        bars: [barWithNote(0, 2, 2), restBar(1)],
+      });
+      expect(projectToMusicXML(project)).not.toContain('<tie ');
+    });
+  });
+
   describe('broken chords', () => {
     /** A bar holding exactly these notes, for the one fixture instrument. */
     const barOfNotes = (notes: { pitch: number; startBeat: number; duration: number }[]): Bar => ({

@@ -110,12 +110,17 @@ export function snapBeat(beat: number, snapBeats: number): number {
 }
 
 /**
- * Keep a block wholly inside its bar. A block longer than the bar itself cannot be
- * made to fit, so it starts at 0 and simply overhangs — `refitBars` leaves it there
- * rather than looping looking for a bar it will never fit in.
+ * Keep a block's *start* inside its bar.
+ *
+ * Only the start: a block is free to run past the bar line and sound on into the
+ * following bars, which is how a chord held across a barline is written. What a
+ * block may not do is begin outside the bar that holds it — the bar a block lives
+ * in is the one its onset falls in, and that is what makes a position mean one
+ * thing. The last legal start is one grid step short of the bar line, so a block
+ * pushed hard right still has somewhere to be.
  */
-export function clampToBar(startBeat: number, duration: number, capacity: number): number {
-  return Math.max(0, Math.min(startBeat, capacity - duration));
+export function clampStartToBar(startBeat: number, capacity: number): number {
+  return Math.max(0, Math.min(startBeat, capacity - MIN_SEGMENT_BEATS));
 }
 
 /** A segment's position, treating an absent one as "wherever the packing left off". */
@@ -152,23 +157,22 @@ function byStart(segments: ChordSegment[]): ChordSegment[] {
  *
  * A block is only moved if it actually overlaps the placed one, or overlaps a block
  * that was itself pushed — so the cascade stops at the first gap wide enough to
- * absorb the shift, and empty space elsewhere in the bar survives untouched. A block
- * pushed past `capacity` comes back in `overflow` for the caller to hand to the next
- * bar; nothing is ever dropped.
+ * absorb the shift, and empty space elsewhere in the bar survives untouched. The
+ * ripple may push a block past the bar line; that is not this function's problem,
+ * because a position past `capacity` is just a position further along the timeline,
+ * and `refitBars` is what re-homes it into the bar it now starts in.
  *
  * Passing a segment already present moves it, rather than duplicating it.
  */
 export function placeSegmentInBar(
   segments: ChordSegment[],
   segment: ChordSegment,
-  startBeat: number,
-  capacity: number
-): { kept: ChordSegment[]; overflow: ChordSegment[] } {
+  startBeat: number
+): ChordSegment[] {
   const placed = { ...segment, startBeat };
   const others = byStart(withStartBeats(segments.filter(s => s.id !== placed.id)));
 
   const kept: ChordSegment[] = [placed];
-  const overflow: ChordSegment[] = [];
   let cursor = startBeat + placed.duration;
 
   for (const other of others) {
@@ -182,25 +186,23 @@ export function placeSegmentInBar(
 
     const shifted = Math.max(start, cursor);
     cursor = shifted + other.duration;
-
-    if (cursor > capacity) {
-      overflow.push(other);
-      continue;
-    }
     kept.push(shifted === start ? other : { ...other, startBeat: shifted });
   }
 
-  return { kept: byStart(kept), overflow };
+  return byStart(kept);
 }
 
 /**
- * Restore the bar invariant across the whole project: every segment positioned,
- * inside its bar, in order and non-overlapping.
+ * Restore the timeline invariant across the whole project: every segment
+ * positioned, in order, and non-overlapping, each one living in the bar its onset
+ * falls in.
  *
- * Anything that no longer fits — because a block grew, a bar narrowed, or a drop
- * rippled its neighbours — moves to the start of the following bar and keeps
- * cascading, appending bars as needed. Every mutation ends here, which is what keeps
- * one rule in one place.
+ * A block may run past its bar line — a chord held across the barline is ordinary
+ * music — so what gets re-homed here is only a block whose *start* has been pushed
+ * out of its bar, by a ripple, by a neighbour growing, or by a bar narrowing. It
+ * moves to the bar containing its new onset, keeping the beat it landed on rather
+ * than being reset to the downbeat, and bars are appended when it lands beyond the
+ * last one. Every mutation ends here, which is what keeps one rule in one place.
  */
 export function refitBars(bars: Bar[], projectTs: TimeSignature, trackIds?: string[]): Bar[] {
   if (bars.length === 0) return [];
@@ -244,51 +246,71 @@ export function refitBars(bars: Bar[], projectTs: TimeSignature, trackIds?: stri
 }
 
 /**
- * Refit one instrument's segments across the project: the bar invariant applied to
- * a single track's lists. Returns one list per bar, possibly longer than the input
- * when blocks spilled off the end.
+ * Refit one instrument's segments across the project. Returns one list per bar,
+ * possibly longer than the input when blocks ran off the end.
+ *
+ * The work is done in absolute beats rather than bar by bar, because that is the
+ * frame the rules are actually written in: blocks may not overlap, and each one
+ * lives in whichever bar its onset falls in. Bars are a *view* of that line, so
+ * this converts to it, pushes overlaps apart along it, and slices it back up —
+ * which is what lets a block sit across a barline instead of being clamped by it.
  */
 function refitTrackChords(
   chordsPerBar: ChordSegment[][],
   capacityAt: (index: number) => number
 ): ChordSegment[][] {
-  const result: ChordSegment[][] = [];
-  let carried: ChordSegment[] = [];
-
-  for (let i = 0; i < chordsPerBar.length || carried.length > 0; i++) {
-    const capacity = capacityAt(i);
-    // Carried blocks were pushed out of the previous bar, so they come first.
-    const incoming = [...carried, ...byStart(withStartBeats(chordsPerBar[i] ?? []))];
-
-    const chords: ChordSegment[] = [];
-    carried = [];
-    let cursor = 0;
-
-    for (const segment of incoming) {
-      if (carried.length > 0) {
-        // Once one block has spilled, everything after it must follow, or the order
-        // the user wrote would silently change.
-        carried.push(segment);
-        continue;
-      }
-
-      const startBeat = Math.max(startOf(segment, cursor), cursor);
-      // A block longer than the bar fits nowhere; parking it here and overhanging
-      // beats pushing it forever from bar to bar.
-      const overhangs = startBeat + segment.duration > capacity;
-      if (overhangs && cursor > 0) {
-        carried.push({ ...segment, startBeat: 0 });
-        continue;
-      }
-
-      chords.push(segment.startBeat === startBeat ? segment : { ...segment, startBeat });
-      cursor = overhangs ? capacity : startBeat + segment.duration;
-    }
-
-    // Spilled blocks restart at the top of the next bar.
-    carried = carried.map(s => ({ ...s, startBeat: undefined }));
-    result.push(chords);
+  /** A segment with its position measured from the start of the project. */
+  interface Placed {
+    segment: ChordSegment;
+    startBeat: number;
   }
+
+  const placed: Placed[] = [];
+  let barStart = 0;
+  for (let i = 0; i < chordsPerBar.length; i++) {
+    for (const segment of byStart(withStartBeats(chordsPerBar[i]))) {
+      placed.push({ segment, startBeat: barStart + startOf(segment, 0) });
+    }
+    barStart += capacityAt(i);
+  }
+
+  // A stable sort, so blocks that a bar's own list already ordered — and a spilled
+  // block against the next bar's downbeat — keep the order the user wrote them in.
+  placed.sort((a, b) => a.startBeat - b.startBeat);
+
+  // Push overlaps apart. Nothing is ever dropped or shortened; a block only ever
+  // moves later, to just after whatever now precedes it.
+  let cursor = 0;
+  let end = 0;
+  for (const entry of placed) {
+    entry.startBeat = Math.max(entry.startBeat, cursor);
+    cursor = entry.startBeat + entry.segment.duration;
+    end = Math.max(end, cursor);
+  }
+
+  // Slice the line back into bars, each block landing in the one holding its onset.
+  const result: ChordSegment[][] = [];
+  let index = 0;
+  let current: ChordSegment[] = [];
+  barStart = 0;
+
+  const closeBar = () => {
+    result.push(current);
+    current = [];
+    barStart += capacityAt(index);
+    index++;
+  };
+
+  for (const { segment, startBeat: absolute } of placed) {
+    while (absolute >= barStart + capacityAt(index)) closeBar();
+    const startBeat = absolute - barStart;
+    current.push(segment.startBeat === startBeat ? segment : { ...segment, startBeat });
+  }
+  closeBar();
+
+  // The project keeps every bar it had, and grows enough to contain the tail of a
+  // block hanging off the end — otherwise the last chord would outlast the song.
+  while (result.length < chordsPerBar.length || barStart < end) closeBar();
 
   return result;
 }

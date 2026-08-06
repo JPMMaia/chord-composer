@@ -14,9 +14,10 @@ import type { CopiedSegment } from './clipboardStore';
 import { generateId } from '@/utils/id';
 import {
   barChords,
-  clampToBar,
+  clampStartToBar,
   findSegment,
   getBarBeats,
+  getBarStartBeat,
   getTotalBeats,
   isValidTimeSignature,
   mapBarChords,
@@ -228,8 +229,9 @@ function trackIdOfSegment(bars: Bar[], segmentId: string): string | null {
 /**
  * Drop `segment` into a bar at `startBeat`, rippling whatever it lands on.
  *
- * Blocks the ripple pushes off the end are parked at the bar line rather than
- * discarded; the refit that follows is what carries them into the next bar.
+ * Only the onset is held inside the bar; the block's tail, and any neighbour the
+ * ripple pushes past the bar line, are left where the arithmetic put them for the
+ * refit that follows to re-home.
  */
 function placedIn(
   chords: ChordSegment[],
@@ -237,13 +239,7 @@ function placedIn(
   startBeat: number,
   capacity: number
 ) {
-  const { kept, overflow } = placeSegmentInBar(
-    chords,
-    segment,
-    clampToBar(startBeat, segment.duration, capacity),
-    capacity
-  );
-  return [...kept, ...overflow.map(s => ({ ...s, startBeat: capacity }))];
+  return placeSegmentInBar(chords, segment, clampStartToBar(startBeat, capacity));
 }
 
 /**
@@ -651,10 +647,13 @@ export const projectStore = create<ProjectState>((set, get) => ({
     if (!owner) return;
 
     const chords = withStartBeats(barChords(owner, trackId));
-    // A block grows into the space in front of it, not into the whole bar: it is
-    // pinned where it sits, so the bar line is what caps it.
+    // A block grows into the space in front of it, and may run straight through the
+    // bar line to do it — a chord held over the barline is ordinary music. What it
+    // cannot outlast is the song, so the end of the last bar is the cap.
     const start = chords.find(c => c.id === segmentId)!.startBeat!;
-    const maxBeats = getBarBeats(owner, project.timeSignature) - start;
+    const absoluteStart =
+      getBarStartBeat(project.bars, project.bars.indexOf(owner), project.timeSignature) + start;
+    const maxBeats = getTotalBeats(project.bars, project.timeSignature) - absoluteStart;
 
     const bars = mapBar(project.bars, owner.id, trackId, () =>
       resizeSegment(chords, segmentId, duration, maxBeats)

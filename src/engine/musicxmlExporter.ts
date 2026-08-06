@@ -4,6 +4,7 @@ import {
   barNotes,
   getBarTimeSignature,
   MIN_SEGMENT_BEATS,
+  timeSignatureBeats,
 } from '@/engine/timeline';
 
 /**
@@ -187,6 +188,9 @@ export function projectToMusicXML(project: Project): string {
     // A measure restates the metre only when it differs from the one before it.
     let previousTs: TimeSignature | null = null;
 
+    // Notes still sounding at the previous bar line, to be tied into this measure.
+    let carried: CarriedNote[] = [];
+
     measures.forEach((bar, index) => {
       lines.push(`    <measure number="${index + 1}">`);
 
@@ -241,10 +245,17 @@ export function projectToMusicXML(project: Project): string {
         }
       }
 
-      // Each part carries only its own instrument's notes.
-      lines.push(
-        ...renderMeasureNotes(barNotes(bar, tracks[t].id), barTs.beatsPerMeasure, useFlats)
+      // Each part carries only its own instrument's notes. A note may outlast its
+      // bar, so what is left sounding at the bar line is handed to the next measure
+      // to be written as a tied continuation.
+      const rendered = renderMeasureNotes(
+        barNotes(bar, tracks[t].id),
+        timeSignatureBeats(barTs),
+        useFlats,
+        carried
       );
+      carried = rendered.carried;
+      lines.push(...rendered.lines);
 
       lines.push('    </measure>');
     });
@@ -290,18 +301,60 @@ function renderHarmony(chord: ChordSegment): string[] {
 export const CHORD_ONSET_TOLERANCE = MIN_SEGMENT_BEATS;
 
 /**
+ * A note that was still sounding when the bar line arrived, waiting to be written
+ * into the next measure as the far half of a tie.
+ */
+interface CarriedNote {
+  pitch: number;
+  /** Beats still to be written, measured from the start of the next measure. */
+  beats: number;
+}
+
+/** What one measure produced: its markup, and whatever it left ringing. */
+interface RenderedMeasure {
+  lines: string[];
+  carried: CarriedNote[];
+}
+
+/**
  * Render the notes of one bar, filling gaps and the tail of the measure with
  * rests. Notes that start together — or near enough — are written as one chord.
+ *
+ * A note may be longer than the measure has room for, because a segment on the
+ * timeline is free to run past its bar line. Notation has no way to write a note
+ * through a bar line, so such a note is cut at the line and tied to a continuation
+ * in the next measure — which is what a musician reads as one held chord. `carried`
+ * is that continuation arriving from the previous measure.
  */
-function renderMeasureNotes(notes: Note[], beatsPerMeasure: number, useFlats: boolean): string[] {
+function renderMeasureNotes(
+  notes: Note[],
+  measureBeats: number,
+  useFlats: boolean,
+  carried: CarriedNote[] = []
+): RenderedMeasure {
   const lines: string[] = [];
+  const carriedOut: CarriedNote[] = [];
 
-  if (notes.length === 0) {
-    return renderMeasureRest(beatsPerMeasure);
+  if (notes.length === 0 && carried.length === 0) {
+    return { lines: renderMeasureRest(measureBeats), carried: carriedOut };
   }
 
   const sorted = [...notes].sort((a, b) => a.startBeat - b.startBeat || a.pitch - b.pitch);
   let cursor = 0;
+
+  // The tie arriving from the previous bar sounds from the downbeat, so it is
+  // written first and the measure's own notes queue up behind it.
+  if (carried.length > 0) {
+    const beats = Math.min(measureBeats, ...carried.map(c => c.beats));
+    carried.forEach((note, index) => {
+      const overruns = note.beats > beats;
+      lines.push(
+        ...renderNote(note.pitch, beats, index > 0, useFlats, { tieStop: true, tieStart: overruns })
+      );
+      if (overruns) carriedOut.push({ pitch: note.pitch, beats: note.beats - beats });
+    });
+    cursor = beats;
+  }
 
   for (let i = 0; i < sorted.length; ) {
     const startBeat = sorted[i].startBeat;
@@ -324,23 +377,41 @@ function renderMeasureNotes(notes: Note[], beatsPerMeasure: number, useFlats: bo
     // still line up; longer members are truncated rather than overlapping.
     // Measured from the group's own onset, so a strum's staggered releases do
     // not read as one voice being shorter than the rest.
-    const beats = Math.min(...chordNotes.map(n => n.startBeat + n.duration - startBeat));
+    const sounded = Math.min(...chordNotes.map(n => n.startBeat + n.duration - startBeat));
+    // …and by no more than the measure has left, whatever the chord's own length.
+    const beats = Math.min(sounded, measureBeats - startBeat);
+    if (beats <= 0) break;
+
+    const overruns = sounded > beats;
     chordNotes.forEach((note, index) => {
-      lines.push(...renderNote(note, beats, index > 0, useFlats));
+      lines.push(...renderNote(note.pitch, beats, index > 0, useFlats, { tieStart: overruns }));
+      if (overruns) carriedOut.push({ pitch: note.pitch, beats: sounded - beats });
     });
     cursor = startBeat + beats;
   }
 
-  if (cursor < beatsPerMeasure) {
-    lines.push(...renderRest(beatsPerMeasure - cursor));
+  if (cursor < measureBeats) {
+    lines.push(...renderRest(measureBeats - cursor));
   }
 
-  return lines;
+  return { lines, carried: carriedOut };
+}
+
+/** Which ends of a tie a note carries, if any. */
+interface Ties {
+  tieStart?: boolean;
+  tieStop?: boolean;
 }
 
 /** Render a single `<note>` element. */
-function renderNote(note: Note, beats: number, isChordMember: boolean, useFlats: boolean): string[] {
-  const { step, alter, octave } = midiToPitch(note.pitch, useFlats);
+function renderNote(
+  pitch: number,
+  beats: number,
+  isChordMember: boolean,
+  useFlats: boolean,
+  ties: Ties = {}
+): string[] {
+  const { step, alter, octave } = midiToPitch(pitch, useFlats);
   const lines: string[] = [];
 
   lines.push('      <note>');
@@ -355,10 +426,20 @@ function renderNote(note: Note, beats: number, isChordMember: boolean, useFlats:
   lines.push(`          <octave>${octave}</octave>`);
   lines.push('        </pitch>');
   lines.push(`        <duration>${toDivisions(beats)}</duration>`);
+  // `<tie>` is the sounding instruction and `<tied>` below is the slur a reader
+  // sees; MusicXML wants both, and the stop end always precedes the start.
+  if (ties.tieStop) lines.push('        <tie type="stop"/>');
+  if (ties.tieStart) lines.push('        <tie type="start"/>');
   lines.push('        <voice>1</voice>');
   lines.push(`        <type>${getNoteType(beats)}</type>`);
   if (alter !== 0) {
     lines.push(`        <accidental>${alter > 0 ? 'sharp' : 'flat'}</accidental>`);
+  }
+  if (ties.tieStop || ties.tieStart) {
+    lines.push('        <notations>');
+    if (ties.tieStop) lines.push('          <tied type="stop"/>');
+    if (ties.tieStart) lines.push('          <tied type="start"/>');
+    lines.push('        </notations>');
   }
   lines.push('      </note>');
   return lines;

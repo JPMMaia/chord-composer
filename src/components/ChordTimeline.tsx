@@ -10,6 +10,7 @@ import {
   getBarPulse,
   getBarStartBeat,
   getTotalBeats,
+  MIN_SEGMENT_BEATS,
   snapBeat,
   SNAP_OPTIONS,
 } from '@/engine/timeline';
@@ -85,12 +86,6 @@ interface SegmentPlacement {
   startBeat: number;
 }
 
-/** Where a block sat when a drag began, plus what the clamp needs to know about it. */
-interface DragOrigin extends SegmentPlacement {
-  /** In beats — what decides how far right the block may travel inside its bar. */
-  duration: number;
-}
-
 /**
  * A drag in flight. The whole selection travels, so this tracks the block actually
  * grabbed and carries every selected block's origin to offset against it.
@@ -101,7 +96,7 @@ interface DragState {
   /** Beats between the grabbed block's left edge and the point it was grabbed by. */
   grabOffset: number;
   /** Where each dragged block sat when the gesture began. */
-  origins: Map<string, DragOrigin>;
+  origins: Map<string, SegmentPlacement>;
   /** Where each dragged block would land if the pointer were released now. */
   preview: Map<string, SegmentPlacement>;
   /** False until the pointer actually travels, so a press is not mistaken for a drag. */
@@ -134,8 +129,10 @@ const LANE_ATTRIBUTE = 'data-timeline-lane';
  * The chord area: every bar of the project laid out on one scrollable horizontal
  * timeline, with bar lines, beat gridlines and per-bar meters.
  *
- * Segments are positioned by accumulating durations within their bar; the store's
- * reflow guarantees they always fit, so nothing here has to handle overflow.
+ * A segment is drawn in the bar its onset falls in, at the beat it carries. Its
+ * length is its own business: a block longer than the space left in its bar reaches
+ * across the bar line into the next one, which is why blocks are lifted above the
+ * lanes and the bar lines above the blocks.
  */
 export const ChordTimeline: React.FC = () => {
   const project = projectStore(s => s.project);
@@ -226,16 +223,23 @@ export const ChordTimeline: React.FC = () => {
         currentBars.length - 1 - Math.max(...origins.map(o => o.barIndex))
       );
 
+      // Only the onset is held inside the bar. A block's tail is free to cross the
+      // bar line, so its duration has no say in how far right it may be dragged.
       let low = -Infinity;
       let high = Infinity;
       for (const origin of origins) {
         const target = currentBars[origin.barIndex + barDelta];
         const capacity = getBarBeats(target, currentProject.timeSignature);
         low = Math.max(low, -origin.startBeat);
-        high = Math.min(high, capacity - origin.duration - origin.startBeat);
+        high = Math.min(high, capacity - MIN_SEGMENT_BEATS - origin.startBeat);
       }
-      // A block that already overruns its bar would invert the window; the start of
-      // the bar wins, and the refit sorts out the overflow as it always has.
+      // Both bounds are pulled back onto the snap grid, inwards. The last legal
+      // onset is a quarter beat short of the bar line, which is not a beat the grid
+      // offers at coarser snaps; without this a selection dragged hard right would
+      // stop three quarters of a beat off the lattice it was dragged along.
+      low = Math.ceil(low / snapBeats) * snapBeats;
+      high = Math.floor(high / snapBeats) * snapBeats;
+
       const beatDelta = clamp(startBeat - grabbed.startBeat, low, Math.max(low, high));
 
       const preview = new Map<string, SegmentPlacement>();
@@ -489,13 +493,13 @@ export const ChordTimeline: React.FC = () => {
   };
 
   /** Where a block sits, by id, across the whole project — the drag's starting point. */
-  const placementOf = (segmentId: string): DragOrigin | null => {
+  const placementOf = (segmentId: string): SegmentPlacement | null => {
     const barIndex = bars.findIndex(bar =>
       barChords(bar, selectedTrackId).some(c => c.id === segmentId)
     );
     if (barIndex < 0) return null;
     const segment = barChords(bars[barIndex], selectedTrackId).find(c => c.id === segmentId)!;
-    return { barIndex, startBeat: segment.startBeat ?? 0, duration: segment.duration };
+    return { barIndex, startBeat: segment.startBeat ?? 0 };
   };
 
   /**
@@ -547,7 +551,7 @@ export const ChordTimeline: React.FC = () => {
     }
     selectBar(bar.id);
 
-    const origins = new Map<string, DragOrigin>();
+    const origins = new Map<string, SegmentPlacement>();
     for (const id of dragged) {
       const placement = placementOf(id);
       if (placement) origins.set(id, placement);
@@ -837,16 +841,17 @@ export const ChordTimeline: React.FC = () => {
                   it would push the lane — and every beat line, block and drop
                   position in it — two pixels right of the beat the piano roll
                   draws below. Last in the bar so it paints over the lane's own
-                  background, which would otherwise hide it. */}
+                  background, which would otherwise hide it, and lifted above the
+                  blocks so a chord held across it still shows where the bar ends. */}
               <div
                 data-testid="bar-line"
-                style={{ left: 0, width: `${BAR_LINE_WIDTH}px` }}
+                style={{ left: 0, width: `${BAR_LINE_WIDTH}px`, zIndex: 30 }}
                 className="absolute top-0 bottom-0 bg-gray-400 pointer-events-none"
               />
               {barIndex === bars.length - 1 && (
                 <div
                   data-testid="bar-line"
-                  style={{ right: 0, width: `${BAR_LINE_WIDTH}px` }}
+                  style={{ right: 0, width: `${BAR_LINE_WIDTH}px`, zIndex: 30 }}
                   className="absolute top-0 bottom-0 bg-gray-400 pointer-events-none"
                 />
               )}

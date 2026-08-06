@@ -153,8 +153,10 @@ export function generateNotesFromSegments(
   for (const segment of withStartBeats(chords)) {
     const currentBeat = segment.startBeat!;
 
-    // Refitting owns moving a segment past the bar line into the next bar; drawing
-    // it here as well would sound it twice.
+    // A note may run past the bar line — the bar it belongs to is the one its onset
+    // falls in, and its duration is simply written out from there. What cannot
+    // happen is an onset outside the bar: refitting owns re-homing those, and
+    // drawing one here as well would sound it twice.
     if (currentBeat >= barBeats) continue;
 
     // A single note carries its own pitch and needs no harmonic interpretation.

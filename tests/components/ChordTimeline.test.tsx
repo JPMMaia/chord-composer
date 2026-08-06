@@ -325,10 +325,12 @@ describe('ChordTimeline', () => {
       expect(layout(0).map(s => s.split('@')[1])).toEqual(['0', '1']);
     });
 
-    it('clamps a drop that would cross the bar line', () => {
+    it('holds a drop past the bar line to the last onset the bar has', () => {
+      // The block may hang over the bar line, but it has to begin inside the bar
+      // that caught the drop.
       render(<ChordTimeline />);
       dropAt(bars()[0].id, cMajorChords()[0], 9);
-      expect(segments()[0].startBeat).toBe(3);
+      expect(segments()[0].startBeat).toBe(3.75);
     });
   });
 

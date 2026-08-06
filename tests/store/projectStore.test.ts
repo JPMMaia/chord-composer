@@ -399,11 +399,19 @@ describe('projectStore', () => {
       expect(barChords(projectStore.getState().project!.bars[0], trackId())[0].startBeat).toBe(1.5);
     });
 
-    it('clamps a drop that would cross the bar line', () => {
+    it('lets a dropped block hang over the bar line', () => {
       projectStore
         .getState()
         .insertSegment(firstBarId(), 3.5, chordSegment({ id: 'wide', duration: 2 }), trackId());
-      expect(layout(projectStore.getState().project!.bars[0])).toEqual(['wide@2']);
+      expect(layout(projectStore.getState().project!.bars[0])).toEqual(['wide@3.5']);
+    });
+
+    it('holds a dropped block’s onset inside the bar it was dropped on', () => {
+      projectStore
+        .getState()
+        .insertSegment(firstBarId(), 9, chordSegment({ id: 'late' }), trackId());
+      // Four beats in 4/4, so the last beat a block can begin on is 3.75.
+      expect(layout(projectStore.getState().project!.bars[0])).toEqual(['late@3.75']);
     });
 
     it('pushes the block it lands on to the right', () => {
@@ -526,10 +534,12 @@ describe('projectStore', () => {
       expect(barNotes(bars()[1], trackId()).every(n => n.startBeat === 2)).toBe(true);
     });
 
-    it('clamps a move that would cross the bar line', () => {
+    it('lets a moved block hang over the bar line', () => {
       projectStore.getState().resizeSegmentDuration('a', 2);
       projectStore.getState().moveSegment('a', bars()[0].id, 3.5);
-      expect(barChords(barOf('a')!, trackId()).find(c => c.id === 'a')!.startBeat).toBe(2);
+      expect(barChords(barOf('a')!, trackId()).find(c => c.id === 'a')!.startBeat).toBe(3.5);
+      // It still belongs to the bar its onset falls in, not the one it reaches into.
+      expect(barOf('a')!.id).toBe(bars()[0].id);
     });
 
     it('pushes a block it is dropped on top of', () => {
@@ -598,12 +608,13 @@ describe('projectStore', () => {
       expect(layout(bars()[1])).toEqual(['a@0', 'b@1']);
     });
 
-    it('clamps each block inside its own destination bar', () => {
+    it('holds each block’s onset inside its own destination bar', () => {
       projectStore.getState().resizeSegmentDuration('a', 2);
       projectStore.getState().moveSegments([
         { segmentId: 'a', targetBarId: bars()[1].id, startBeat: 3.5 },
       ]);
-      expect(layout(bars()[1])).toEqual(['a@2']);
+      // The onset stands; only its tail crosses into the bar beyond.
+      expect(layout(bars()[1])).toEqual(['a@3.5']);
     });
 
     it('regenerates notes once, for every bar the batch touched', () => {
@@ -719,14 +730,26 @@ describe('projectStore', () => {
       expect(barChords(projectStore.getState().project!.bars[0], trackId())[0].duration).toBe(1.25);
     });
 
-    it('clamps to the containing bar capacity', () => {
+    it('clamps to the end of the song', () => {
       appendSegment(chordSegment({ id: 'a' }));
       projectStore.getState().resizeSegmentDuration('a', 99);
       expect(barChords(projectStore.getState().project!.bars[0], trackId())[0].duration).toBe(4);
     });
 
-    it('caps growth at the bar line, not at the bar length', () => {
-      // A block starting on beat 3 of a 4/4 bar has one beat of room, not four.
+    it('grows straight through the bar line', () => {
+      // A block on beat 3 of bar 1 has one beat of bar left but three of song, and
+      // a chord held over the barline is ordinary music.
+      projectStore.getState().addBar();
+      const barId = projectStore.getState().project!.bars[0].id;
+      projectStore.getState().insertSegment(barId, 3, chordSegment({ id: 'a' }), trackId());
+      projectStore.getState().resizeSegmentDuration('a', 4);
+      const bar = projectStore.getState().project!.bars[0];
+      expect(barChords(bar, trackId())[0].duration).toBe(4);
+      // It stays in the bar it starts in, and its notes are written from there.
+      expect(barNotes(bar, trackId()).every(n => n.startBeat === 3 && n.duration === 4)).toBe(true);
+    });
+
+    it('caps growth at the end of the last bar', () => {
       const barId = projectStore.getState().project!.bars[0].id;
       projectStore.getState().insertSegment(barId, 3, chordSegment({ id: 'a' }), trackId());
       projectStore.getState().resizeSegmentDuration('a', 99);

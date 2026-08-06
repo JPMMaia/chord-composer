@@ -58,7 +58,7 @@ export const HorizontalScrollbar: React.FC<HorizontalScrollbarProps> = ({ conten
       ref={elementRef}
       data-testid="shared-scrollbar"
       onScroll={e => setScrollX(e.currentTarget.scrollLeft)}
-      className="shrink-0 overflow-x-auto overflow-y-hidden bg-gray-800 border-t border-gray-700"
+      className="shrink-0 h-3 overflow-x-auto overflow-y-hidden bg-gray-800 border-t border-gray-700"
     >
       <div style={{ width: `${contentWidth}px` }} className="h-px" />
     </div>

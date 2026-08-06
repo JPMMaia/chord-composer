@@ -1,4 +1,12 @@
-import type { Bar, ChordSegment, Note, NoteName, Scale, TimeSignature } from '@/types/music';
+import type {
+  Bar,
+  ChordQuality,
+  ChordSegment,
+  Note,
+  NoteName,
+  Scale,
+  TimeSignature,
+} from '@/types/music';
 import { generateId } from '@/utils/id';
 import {
   CHORD_INTERVALS,
@@ -390,14 +398,14 @@ export function convertSegmentKind(
   const kind = currentKind(segment);
   if (kind === target) return segment; // no-op
 
+  // Chord → note
+  if (target === 'note') {
+    return chordToNote(segment);
+  }
+
   // Note → triad / seventh
   if (kind === 'note') {
     return noteToChord(segment, scale, target);
-  }
-
-  // Chord → note
-  if (target === 'note') {
-    return chordToNote(segment, scale);
   }
 
   // Triad ↔ seventh
@@ -419,7 +427,6 @@ function noteToChord(
   // Chromatic note: not in the scale, no diatonic chord to convert to.
   if (degree === -1) return segment;
 
-  const noteCount = target === 'seventh' ? 4 : 3;
   const chords = target === 'seventh' ? getDiatonicSevenths(scale) : getDiatonicChords(scale);
   const chord = chords[degree];
 
@@ -443,7 +450,7 @@ function noteToChord(
 }
 
 /** Collapse a chord to its root as a single note. */
-function chordToNote(segment: ChordSegment, scale: Scale): ChordSegment {
+function chordToNote(segment: ChordSegment): ChordSegment {
   const root = segment.root;
   if (!root) return segment;
 

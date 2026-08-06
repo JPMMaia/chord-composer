@@ -2,9 +2,8 @@ import { useEffect } from 'react';
 import { clipboardStore } from '@/store/clipboardStore';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
-import { flattenSegments, getBarBeats, getTotalBeats } from '@/engine/timeline';
+import { getBarBeats, getTotalBeats } from '@/engine/timeline';
 import { PIXELS_PER_BEAT } from '@/utils/constants';
-import type { ChordSegment } from '@/types/music';
 
 /** True for elements that should keep their own key handling. */
 function isTextEntry(target: EventTarget | null): boolean {
@@ -90,7 +89,7 @@ export function useSegmentCopyPaste(): void {
       }
 
       if (key === 'v') {
-        const { segments, sourceBarIndex, sourceTrackId } = clipboardStore.getState();
+        const { segments, sourceTrackId } = clipboardStore.getState();
         if (segments.length === 0) return;
 
         const project = projectStore.getState().project;

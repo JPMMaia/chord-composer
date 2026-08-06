@@ -353,7 +353,7 @@ export const ChordTimeline: React.FC = () => {
   useEffect(() => {
     const ruler = rulerRef.current;
     const scrollEl = scrollRef.current;
-    if (!ruler || !scrollEl) return;
+    if (!ruler || !scrollEl || !project) return;
 
     const updateMouseBeat = (clientX: number) => {
       const rect = ruler.getBoundingClientRect();

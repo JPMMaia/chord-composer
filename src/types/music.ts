@@ -234,6 +234,8 @@ export interface Project {
   loopEnd?: number;
   /** When true, playback wraps to `loopStart` at `loopEnd` instead of stopping. */
   loopEnabled?: boolean;
+  /** When true, a click track accompanies playback. */
+  metronomeEnabled?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }

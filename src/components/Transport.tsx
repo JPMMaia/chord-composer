@@ -15,6 +15,7 @@ interface TransportProps {
   loopRangeLabel: string | null;
   /** True while the instrument's samples are still downloading. */
   isLoading?: boolean;
+  isMetronomeOn: boolean;
   onPlay: () => void;
   onPause: () => void;
   onStop: () => void;
@@ -36,6 +37,7 @@ export const Transport: React.FC<TransportProps> = ({
   loopEnabled,
   loopRangeLabel,
   isLoading = false,
+  isMetronomeOn,
   onPlay,
   onPause,
   onStop,
@@ -134,8 +136,13 @@ export const Transport: React.FC<TransportProps> = ({
       {/* Metronome toggle */}
       <button
         onClick={onMetronomeToggle}
-        className="px-3 py-1.5 text-sm bg-gray-600 text-gray-200 rounded hover:bg-gray-500 transition-colors"
+        className={`px-3 py-1.5 text-sm rounded transition-colors ${
+          isMetronomeOn
+            ? 'bg-cyan-600 text-white'
+            : 'bg-gray-600 text-gray-200 hover:bg-gray-500'
+        }`}
         aria-label="Metronome"
+        aria-pressed={isMetronomeOn}
       >
         🎵 Metro
       </button>

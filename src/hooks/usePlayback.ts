@@ -11,6 +11,14 @@ import {
   toClockTime,
 } from '@/engine/scheduler';
 import { syncVst3Clock } from '@/engine/vst3Instrument';
+import {
+  buildClickQueue,
+  resetClickQueue,
+  processClickQueue,
+  notifyLoopWrap,
+  resetMetronome,
+  setAudioContextFactory,
+} from '@/engine/metronomeClick';
 
 /**
  * Where the play range begins, in song time.
@@ -32,7 +40,7 @@ function rangeStart(config: PlaybackConfig): number {
  * pool's `Instrument`s; this hook is the part that has to care about React
  * lifecycles and the browser's autoplay rules.
  */
-export function usePlayback(config: PlaybackConfig) {
+export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -62,8 +70,31 @@ export function usePlayback(config: PlaybackConfig) {
   const configRef = useRef(config);
   configRef.current = config;
 
+  /**
+   * Read through a ref for the same reason as the config: `tick` is memoised for
+   * the life of the run, so a value captured in its closure would stay at whatever
+   * it was on the first render and toggling the metronome would never be heard.
+   */
+  const metronomeEnabledRef = useRef(metronomeEnabled);
+  metronomeEnabledRef.current = metronomeEnabled;
+
   /** Memoised `calculateNoteTiming` for this run. Null while stopped. */
   const timingsRef = useRef<((bars: Bar[]) => NoteTiming[]) | null>(null);
+  /** Whether the click queue has been built for the current playback run. */
+  const clickQueueBuiltRef = useRef(false);
+
+  /**
+   * Build the click queue from the current config and re-sync the queue index.
+   *
+   * Cheap enough to run from a scheduling pass, which is what lets the metronome
+   * be switched on mid-playback rather than only before Play.
+   */
+  const buildClicks = useCallback(() => {
+    const cfg = configRef.current;
+    buildClickQueue(cfg.bars, cfg.timeSignature, cfg.bpm);
+    resetClickQueue();
+    clickQueueBuiltRef.current = true;
+  }, []);
 
   const clearTimer = useCallback(() => {
     if (timerRef.current !== null) {
@@ -87,8 +118,22 @@ export function usePlayback(config: PlaybackConfig) {
     const timings = timingsRef.current?.(cfg.bars) ?? [];
     const elapsed = pool.now() - songStartClockRef.current;
     const loopDuration = getLoopDuration(cfg);
+
     const loopFrom = rangeStart(cfg);
-  
+
+    // --- Metronome clicks ---
+    // Built here rather than only at Play so switching the metronome on during a
+    // run is heard from the next window. The loop window goes with it so the
+    // click after the seam is scheduled before the seam arrives.
+    if (metronomeEnabledRef.current) {
+      if (!clickQueueBuiltRef.current) buildClicks();
+      processClickQueue(
+        elapsed,
+        LOOKAHEAD_SECONDS,
+        cfg.loopEnabled ? { from: loopFrom, duration: loopDuration } : null
+      );
+    }
+
     const horizon = elapsed + LOOKAHEAD_SECONDS;
     /** Song time at which playback ends or wraps. */
     const endSong = loopFrom + loopDuration;
@@ -125,6 +170,11 @@ export function usePlayback(config: PlaybackConfig) {
       if (cfg.loopEnabled) {
         songStartClockRef.current += loopDuration;
         scheduledUpToRef.current = loopFrom;
+        // Re-label the clicks already scheduled past the seam into the new frame.
+        // Inferring the wrap from song time moving backward would not do: it fails
+        // when the range starts at the top of the song and the wrap lands on the
+        // same reading it started on.
+        notifyLoopWrap(loopDuration);
         setCurrentTime(loopFrom);
         return;
       }
@@ -140,7 +190,7 @@ export function usePlayback(config: PlaybackConfig) {
     }
 
     setCurrentTime(Math.max(0, Math.min(elapsed, endSong)));
-  }, [clearTimer]);
+  }, [clearTimer, buildClicks]);
 
   const play = useCallback(async () => {
     if (startingRef.current) return;
@@ -156,6 +206,14 @@ export function usePlayback(config: PlaybackConfig) {
             .webkitAudioContext)();
       }
       const ctx = ctxRef.current;
+
+      // The clicks share playback's context rather than opening one of their own:
+      // a second context would be created outside the click handler (from the
+      // scheduling loop), start suspended under the autoplay policy, and run on a
+      // clock the note arithmetic knows nothing about. A browser also only allows
+      // a handful of contexts per page, and the metronome discards its reference
+      // on every Stop.
+      setAudioContextFactory(() => ctx);
 
       if (!poolRef.current) {
         poolRef.current = new InstrumentPool(ctx);
@@ -197,6 +255,12 @@ export function usePlayback(config: PlaybackConfig) {
         configRef.current.timeSignature
       );
 
+      // Pre-build the metronome click queue for this playback run.
+      clickQueueBuiltRef.current = false;
+      if (metronomeEnabledRef.current) {
+        buildClicks();
+      }
+
       // A range confines playback whether or not repeat is on, so a Play from a
       // stopped transport starts at the range rather than at the top of the song.
       const resumeFrom = Math.max(resumeFromRef.current, rangeStart(configRef.current));
@@ -216,11 +280,13 @@ export function usePlayback(config: PlaybackConfig) {
     } finally {
       startingRef.current = false;
     }
-  }, [clearTimer, tick]);
+  }, [clearTimer, tick, buildClicks]);
 
   const pause = useCallback(() => {
     clearTimer();
     poolRef.current?.stopAll();
+    resetMetronome();
+    clickQueueBuiltRef.current = false;
 
     const pool = poolRef.current;
     resumeFromRef.current = pool
@@ -234,6 +300,8 @@ export function usePlayback(config: PlaybackConfig) {
   const stop = useCallback(() => {
     clearTimer();
     poolRef.current?.stopAll();
+    resetMetronome();
+    clickQueueBuiltRef.current = false;
 
     resumeFromRef.current = 0;
     scheduledUpToRef.current = 0;

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useCallback } from 'react';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { Transport } from '@/components/Transport';
@@ -56,12 +56,12 @@ function App() {
   const selectBar = selectionStore(s => s.selectBar);
 
   const toggleLoopEnabled = projectStore(s => s.toggleLoopEnabled);
+  const toggleMetronome = projectStore(s => s.toggleMetronome);
+  const metronomeEnabled = projectStore(s => s.project?.metronomeEnabled ?? false);
 
   // One offset for the chord timeline, the piano roll and the scrollbar under them.
   const scrollX = editorStore(s => s.scrollX);
   const setScrollX = editorStore(s => s.setScrollX);
-
-  const [, setMetronomeOn] = useState(false);
 
   // Initialize project on mount
   useEffect(() => {
@@ -130,7 +130,7 @@ function App() {
   // Playback state lives in the hook, which is the only thing that knows when sound
   // actually starts — a local copy would claim "playing" during the sample load.
   const { play, pause, stop, isPlaying, isPaused, isLoading, currentTime } =
-    usePlayback(playbackConfig!);
+    usePlayback(playbackConfig!, metronomeEnabled);
 
   const playheadBeat = songTimeToBeat(currentTime, project?.bpm ?? 120);
 
@@ -144,8 +144,8 @@ function App() {
   }, [setBpm]);
 
   const handleMetronomeToggle = useCallback(() => {
-    setMetronomeOn(prev => !prev);
-  }, []);
+    toggleMetronome();
+  }, [toggleMetronome]);
 
   // ↑/↓ step the selected block through its bar's scale, +/- move it an octave,
   // and `i` cycles a chord's inversion.
@@ -181,6 +181,7 @@ function App() {
         loopEnabled={project.loopEnabled ?? false}
         loopRangeLabel={loopRangeLabel}
         isLoading={isLoading}
+        isMetronomeOn={metronomeEnabled}
         onPlay={handlePlay}
         onPause={pause}
         onStop={stop}

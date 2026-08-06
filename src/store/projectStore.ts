@@ -136,6 +136,7 @@ interface ProjectState {
     targetStartBeat?: number
   ) => string[] | null;
   toggleLoopEnabled: () => void;
+  toggleMetronome: () => void;
   resetProject: () => void;
 }
 
@@ -430,6 +431,14 @@ export const projectStore = create<ProjectState>((set, get) => ({
     if (!project) return;
     set({
       project: { ...project, loopEnabled: !project.loopEnabled, updatedAt: new Date() },
+    });
+  },
+
+  toggleMetronome: () => {
+    const project = get().project;
+    if (!project) return;
+    set({
+      project: { ...project, metronomeEnabled: !project.metronomeEnabled, updatedAt: new Date() },
     });
   },
 

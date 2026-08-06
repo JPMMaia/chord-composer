@@ -9,6 +9,8 @@ describe('Transport', () => {
   const mockOnBpmChange = vi.fn();
   const mockOnMetronomeToggle = vi.fn();
   const mockOnLoopToggle = vi.fn();
+  const mockOnRecordToggle = vi.fn();
+  const mockOnQuantizeToggle = vi.fn();
 
   const defaultProps = {
     isPlaying: false,
@@ -19,6 +21,10 @@ describe('Transport', () => {
     keyMode: 'major' as const,
     loopEnabled: false,
     loopRangeLabel: null,
+    isRecordArmed: false,
+    recordQuantize: true,
+    onRecordToggle: mockOnRecordToggle,
+    onQuantizeToggle: mockOnQuantizeToggle,
     onPlay: mockOnPlay,
     onPause: mockOnPause,
     onStop: mockOnStop,
@@ -131,5 +137,47 @@ describe('Transport', () => {
     const bpmInput = screen.getByLabelText('BPM');
     fireEvent.change(bpmInput, { target: { value: '140' } });
     expect(mockOnBpmChange).toHaveBeenCalledWith(140);
+  });
+
+  describe('recording', () => {
+    const record = () => screen.getByRole('button', { name: /^record$/i });
+    const quantize = () => screen.getByRole('button', { name: /quantize/i });
+
+    it('reports whether recording is armed', () => {
+      const { unmount } = render(<Transport {...defaultProps} />);
+      expect(record()).toHaveAttribute('aria-pressed', 'false');
+      unmount();
+
+      render(<Transport {...defaultProps} isRecordArmed />);
+      expect(record()).toHaveAttribute('aria-pressed', 'true');
+      expect(record()).toHaveClass('bg-red-600');
+    });
+
+    it('pulses only once armed recording is actually running', () => {
+      const { unmount } = render(<Transport {...defaultProps} isRecordArmed />);
+      expect(record().className).not.toContain('animate-pulse');
+      unmount();
+
+      render(<Transport {...defaultProps} isRecordArmed isPlaying />);
+      expect(record().className).toContain('animate-pulse');
+    });
+
+    it('toggles the arm on click', () => {
+      render(<Transport {...defaultProps} />);
+      fireEvent.click(record());
+      expect(mockOnRecordToggle).toHaveBeenCalled();
+    });
+
+    it('reports and toggles quantize', () => {
+      render(<Transport {...defaultProps} />);
+      expect(quantize()).toHaveAttribute('aria-pressed', 'true');
+      fireEvent.click(quantize());
+      expect(mockOnQuantizeToggle).toHaveBeenCalled();
+    });
+
+    it('shows quantize as off when it is', () => {
+      render(<Transport {...defaultProps} recordQuantize={false} />);
+      expect(quantize()).toHaveAttribute('aria-pressed', 'false');
+    });
   });
 });

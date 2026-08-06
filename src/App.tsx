@@ -13,6 +13,7 @@ import { usePlayback } from '@/hooks/usePlayback';
 import { useSegmentShortcuts } from '@/hooks/useSegmentShortcuts';
 import { useSegmentCopyPaste } from '@/hooks/useSegmentCopyPaste';
 import { usePlaybackShortcuts } from '@/hooks/usePlaybackShortcuts';
+import { useRecordShortcuts } from '@/hooks/useRecordShortcuts';
 import { useFollowPlayhead } from '@/hooks/useFollowPlayhead';
 import { editorStore } from '@/store/editorStore';
 import { songTimeToBeat } from '@/engine/scheduler';
@@ -62,6 +63,11 @@ function App() {
   // One offset for the chord timeline, the piano roll and the scrollbar under them.
   const scrollX = editorStore(s => s.scrollX);
   const setScrollX = editorStore(s => s.setScrollX);
+
+  const recordArmed = editorStore(s => s.recordArmed);
+  const setRecordArmed = editorStore(s => s.setRecordArmed);
+  const recordQuantize = editorStore(s => s.recordQuantize);
+  const setRecordQuantize = editorStore(s => s.setRecordQuantize);
 
   // Initialize project on mount
   useEffect(() => {
@@ -129,7 +135,7 @@ function App() {
 
   // Playback state lives in the hook, which is the only thing that knows when sound
   // actually starts — a local copy would claim "playing" during the sample load.
-  const { play, pause, stop, isPlaying, isPaused, isLoading, currentTime } =
+  const { play, pause, stop, isPlaying, isPaused, isLoading, currentTime, getSongTime, getPool } =
     usePlayback(playbackConfig!, metronomeEnabled);
 
   const playheadBeat = songTimeToBeat(currentTime, project?.bpm ?? 120);
@@ -147,6 +153,14 @@ function App() {
     toggleMetronome();
   }, [toggleMetronome]);
 
+  const handleRecordToggle = useCallback(() => {
+    setRecordArmed(!recordArmed);
+  }, [recordArmed, setRecordArmed]);
+
+  const handleQuantizeToggle = useCallback(() => {
+    setRecordQuantize(!recordQuantize);
+  }, [recordQuantize, setRecordQuantize]);
+
   // ↑/↓ step the selected block through its bar's scale, +/- move it an octave,
   // and `i` cycles a chord's inversion.
   useSegmentShortcuts();
@@ -156,6 +170,9 @@ function App() {
 
   // Spacebar toggles play/stop.
   usePlaybackShortcuts({ isPlaying, isLoading, onPlay: handlePlay, onStop: stop });
+
+  // 1–7 play the palette's degrees, and record them while armed. `r` arms.
+  useRecordShortcuts({ isPlaying, getSongTime, getPool });
 
   // Page the view along during playback so the playhead never runs off screen.
   useFollowPlayhead(playheadBeat, isPlaying);
@@ -182,12 +199,16 @@ function App() {
         loopRangeLabel={loopRangeLabel}
         isLoading={isLoading}
         isMetronomeOn={metronomeEnabled}
+        isRecordArmed={recordArmed}
+        recordQuantize={recordQuantize}
         onPlay={handlePlay}
         onPause={pause}
         onStop={stop}
         onBpmChange={handleBpmChange}
         onMetronomeToggle={handleMetronomeToggle}
         onLoopToggle={toggleLoopEnabled}
+        onRecordToggle={handleRecordToggle}
+        onQuantizeToggle={handleQuantizeToggle}
       />
 
       {/* Main Content */}

@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { DEFAULT_SNAP_BEATS, SNAP_OPTIONS } from '@/engine/timeline';
+import type { PaletteMode } from '@/engine/palette';
 import type { Scale } from '@/types/music';
+import { MAX_SEGMENT_OCTAVE, MIN_SEGMENT_OCTAVE } from '@/utils/constants';
 
 interface EditorState {
   /** Grid resolution every timeline edit lands on, in beats. */
@@ -16,6 +18,29 @@ interface EditorState {
    */
   paletteScale: Scale;
   setPaletteScale: (scale: Scale) => void;
+
+  /**
+   * Which family of blocks the palette offers, and the register it builds them in.
+   *
+   * Here rather than inside `ScalePalette` because they are no longer only the
+   * strip's business: the number keys play the palette, and they need to know
+   * whether `2` means `Dm`, `Dm7` or `D4`.
+   */
+  paletteMode: PaletteMode;
+  setPaletteMode: (mode: PaletteMode) => void;
+  paletteOctave: number;
+  setPaletteOctave: (octave: number) => void;
+
+  /**
+   * Whether the number keys write to the timeline. Recording only actually happens
+   * while armed *and* playing; armed on its own is a readiness, which is what makes
+   * arming before pressing Play the natural order.
+   */
+  recordArmed: boolean;
+  setRecordArmed: (armed: boolean) => void;
+  /** Whether a recorded take snaps to `snapBeats`, or keeps the timing it was played with. */
+  recordQuantize: boolean;
+  setRecordQuantize: (on: boolean) => void;
 
   /** Horizontal scroll offset shared by the chord timeline and the piano roll, in pixels. */
   scrollX: number;
@@ -54,6 +79,35 @@ export const editorStore = create<EditorState>((set, get) => ({
 
   setPaletteScale: (scale: Scale) => {
     set({ paletteScale: { root: scale.root, type: scale.type } });
+  },
+
+  paletteMode: 'chords',
+
+  setPaletteMode: (mode: PaletteMode) => {
+    set({ paletteMode: mode });
+  },
+
+  paletteOctave: 4,
+
+  setPaletteOctave: (octave: number) => {
+    // Clamped rather than trusted: the record shortcuts can be pointed at this from
+    // outside the strip's <select>, and a block has to land in a playable register.
+    if (!Number.isFinite(octave)) return;
+    set({
+      paletteOctave: Math.min(MAX_SEGMENT_OCTAVE, Math.max(MIN_SEGMENT_OCTAVE, Math.round(octave))),
+    });
+  },
+
+  recordArmed: false,
+
+  setRecordArmed: (armed: boolean) => {
+    set({ recordArmed: armed });
+  },
+
+  recordQuantize: true,
+
+  setRecordQuantize: (on: boolean) => {
+    set({ recordQuantize: on });
   },
 
   scrollX: 0,

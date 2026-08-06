@@ -65,6 +65,12 @@ export class SoundfontInstrument implements Instrument {
     });
   }
 
+  /** Held until released, exactly as the piano's is. */
+  sustain(note: { midiNote: number; velocity: number }): () => void {
+    if (this.disposed || !this.player) return () => {};
+    return this.player.start({ note: note.midiNote, velocity: note.velocity });
+  }
+
   stopAll(): void {
     this.player?.stop();
   }

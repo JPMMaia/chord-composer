@@ -75,6 +75,15 @@ export class SmplrPianoInstrument implements Instrument {
   }
 
   /**
+   * smplr's `start` already returns the stopper for the voices it began, so holding
+   * a note is just declining to call it yet.
+   */
+  sustain(note: { midiNote: number; velocity: number }): () => void {
+    if (this.disposed || !this.piano) return () => {};
+    return this.piano.start({ note: note.midiNote, velocity: note.velocity });
+  }
+
+  /**
    * Cuts pending notes as well as sounding ones — smplr's `stop()` with no target
    * clears its own scheduler, which is what makes Stop take effect immediately
    * rather than after everything already queued has played.

@@ -470,6 +470,92 @@ describe('projectStore', () => {
     });
   });
 
+  describe('recordSegment', () => {
+    const state = () => projectStore.getState();
+
+    beforeEach(() => {
+      state().createProject();
+      // Four bars, so an absolute beat can name something other than bar 1.
+      for (let i = 0; i < 3; i++) state().addBar();
+    });
+
+    /** `id@start+duration` for one bar, since a take's length is the point here. */
+    const spans = (barIndex: number): string[] =>
+      barChords(state().project!.bars[barIndex], trackId()).map(
+        c => `${c.id}@${c.startBeat}+${c.duration}`
+      );
+
+    it('writes at an absolute beat, resolving the bar itself', () => {
+      state().recordSegment(trackId(), 9, chordSegment({ id: 'a' }));
+      expect(spans(2)).toEqual(['a@1+1']);
+    });
+
+    it('overwrites what it lands on instead of rippling it', () => {
+      state().insertSegment(state().project!.bars[0].id, 0, chordSegment({ id: 'old' }), trackId());
+      state().insertSegment(state().project!.bars[0].id, 2, chordSegment({ id: 'keep' }), trackId());
+
+      state().recordSegment(trackId(), 0, chordSegment({ id: 'take' }));
+
+      // `old` is gone and `keep` has not budged — the whole point of a punch-in.
+      expect(spans(0)).toEqual(['take@0+1', 'keep@2+1']);
+    });
+
+    it('trims a block it only partly covers', () => {
+      state()
+        .insertSegment(state().project!.bars[0].id, 0, chordSegment({ id: 'long', duration: 4 }), trackId());
+
+      state().recordSegment(trackId(), 2, chordSegment({ id: 'take', duration: 2 }));
+
+      expect(spans(0)).toEqual(['long@0+2', 'take@2+2']);
+    });
+
+    it('extends the open take rather than duplicating it', () => {
+      const take = chordSegment({ id: 'take', duration: 0.25 });
+      state().recordSegment(trackId(), 1, take);
+      state().recordSegment(trackId(), 1, { ...take, duration: 2 });
+
+      expect(spans(0)).toEqual(['take@1+2']);
+    });
+
+    it('lets a take run across the bar line as one segment', () => {
+      state().recordSegment(trackId(), 3, chordSegment({ id: 'held', duration: 3 }));
+      expect(spans(0)).toEqual(['held@3+3']);
+      expect(spans(1)).toEqual([]);
+    });
+
+    it('clears what a growing take reaches over', () => {
+      state().insertSegment(state().project!.bars[1].id, 0, chordSegment({ id: 'next' }), trackId());
+      const take = chordSegment({ id: 'take', duration: 0.25 });
+      state().recordSegment(trackId(), 3, take);
+      state().recordSegment(trackId(), 3, { ...take, duration: 3 });
+
+      expect(spans(0)).toEqual(['take@3+3']);
+      expect(spans(1)).toEqual([]);
+    });
+
+    it('leaves another instrument alone', () => {
+      state().addTrack('Strings');
+      const other = state().project!.tracks[1].id;
+      state().insertSegment(state().project!.bars[0].id, 0, chordSegment({ id: 'theirs' }), other);
+
+      state().recordSegment(trackId(), 0, chordSegment({ id: 'take' }));
+
+      expect(barChords(state().project!.bars[0], other).map(c => c.id)).toEqual(['theirs']);
+    });
+
+    it('ignores an unknown instrument', () => {
+      state().recordSegment('nope', 0, chordSegment({ id: 'a' }));
+      expect(barChords(state().project!.bars[0], trackId())).toEqual([]);
+    });
+
+    it('ignores a beat past the end of the song', () => {
+      const before = state().project!.bars.length;
+      state().recordSegment(trackId(), 999, chordSegment({ id: 'a' }));
+      expect(state().project!.bars.length).toBe(before);
+      expect(state().project!.bars.every(b => barChords(b, trackId()).length === 0)).toBe(true);
+    });
+  });
+
   describe('removeSegment', () => {
     beforeEach(() => {
       projectStore.getState().createProject();

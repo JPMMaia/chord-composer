@@ -16,12 +16,18 @@ interface TransportProps {
   /** True while the instrument's samples are still downloading. */
   isLoading?: boolean;
   isMetronomeOn: boolean;
+  /** Whether the number keys write to the timeline once playback is running. */
+  isRecordArmed: boolean;
+  /** Whether a recorded take snaps to the timeline's grid. */
+  recordQuantize: boolean;
   onPlay: () => void;
   onPause: () => void;
   onStop: () => void;
   onBpmChange: (bpm: number) => void;
   onMetronomeToggle: () => void;
   onLoopToggle: () => void;
+  onRecordToggle: () => void;
+  onQuantizeToggle: () => void;
 }
 
 /**
@@ -38,12 +44,16 @@ export const Transport: React.FC<TransportProps> = ({
   loopRangeLabel,
   isLoading = false,
   isMetronomeOn,
+  isRecordArmed,
+  recordQuantize,
   onPlay,
   onPause,
   onStop,
   onBpmChange,
   onMetronomeToggle,
   onLoopToggle,
+  onRecordToggle,
+  onQuantizeToggle,
 }) => {
   const [bpmInput, setBpmInput] = useState<string>(String(bpm));
 
@@ -103,6 +113,21 @@ export const Transport: React.FC<TransportProps> = ({
         >
           ⏹ Stop
         </button>
+        {/* Arms the number keys; it takes Play as well before anything is written,
+            so the button pulses only once recording is actually happening. */}
+        <button
+          onClick={onRecordToggle}
+          aria-label="Record"
+          aria-pressed={isRecordArmed}
+          title="Arm recording (R) — hold 1–7 while playing to lay down chords"
+          className={`px-3 py-1.5 text-sm rounded transition-colors ${
+            isRecordArmed
+              ? `bg-red-600 text-white${isPlaying ? ' animate-pulse' : ''}`
+              : 'bg-gray-600 text-gray-200 hover:bg-gray-500'
+          }`}
+        >
+          ⏺ Record
+        </button>
       </div>
 
       {/* BPM control */}
@@ -145,6 +170,23 @@ export const Transport: React.FC<TransportProps> = ({
         aria-pressed={isMetronomeOn}
       >
         🎵 Metro
+      </button>
+
+      {/* Whether a recorded take is pulled onto the timeline's snap grid or keeps
+          the timing it was played with. Beside the metronome, which is the other
+          control that only matters while something is being played in. */}
+      <button
+        onClick={onQuantizeToggle}
+        aria-label="Quantize recording"
+        aria-pressed={recordQuantize}
+        title="Snap recorded blocks to the timeline's Snap grid"
+        className={`px-3 py-1.5 text-sm rounded transition-colors ${
+          recordQuantize
+            ? 'bg-cyan-600 text-white'
+            : 'bg-gray-600 text-gray-200 hover:bg-gray-500'
+        }`}
+      >
+        ⊞ Quantize
       </button>
 
       {/* Repeat toggle. Always shown: gating it on a range being set would hide the

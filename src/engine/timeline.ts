@@ -193,6 +193,81 @@ export function placeSegmentInBar(
 }
 
 /**
+ * Clear one instrument's segments out of an absolute beat range, so something else
+ * can be written over it.
+ *
+ * A block wholly inside the range is dropped; one that straddles an edge is trimmed
+ * back to the part lying outside, and dropped in turn if that leaves it shorter than
+ * `MIN_SEGMENT_BEATS`. A block spanning the range end to end keeps only its head —
+ * punching into the middle of a long chord shortens it rather than leaving an orphan
+ * behind the take.
+ *
+ * Nothing is ever *moved*, which is what makes this a punch-in rather than the ripple
+ * `placeSegmentInBar` performs: re-recording four bars into a finished song must not
+ * shove the rest of it along. The range is half-open, so a block that merely touches
+ * an edge survives untouched.
+ *
+ * @param exceptId - A segment to leave alone: the take being recorded, which is
+ *   already on the timeline and must not clear itself away as it grows.
+ */
+export function clearRange(
+  bars: Bar[],
+  projectTs: TimeSignature,
+  trackId: string,
+  fromBeat: number,
+  toBeat: number,
+  exceptId?: string
+): Bar[] {
+  if (!(toBeat > fromBeat)) return bars;
+
+  let barStart = 0;
+  let anyChanged = false;
+
+  const result = bars.map(bar => {
+    const offset = barStart;
+    barStart += getBarBeats(bar, projectTs);
+
+    const chords = barChords(bar, trackId);
+    if (chords.length === 0) return bar;
+
+    let changed = false;
+    const kept: ChordSegment[] = [];
+    for (const segment of withStartBeats(chords)) {
+      const start = offset + segment.startBeat!;
+      const end = start + segment.duration;
+
+      // Outside the punch entirely, or explicitly spared.
+      if (end <= fromBeat || start >= toBeat || segment.id === exceptId) {
+        kept.push(segment);
+        continue;
+      }
+
+      // Head before the punch wins over any tail after it: one segment cannot be
+      // split into two without inventing an id, and the head is what was played.
+      const trimmed =
+        start < fromBeat
+          ? { start, duration: fromBeat - start }
+          : { start: toBeat, duration: end - toBeat };
+
+      changed = true;
+      if (trimmed.duration < MIN_SEGMENT_BEATS) continue;
+
+      kept.push({
+        ...segment,
+        startBeat: trimmed.start - offset,
+        duration: snapToGrid(trimmed.duration),
+      });
+    }
+
+    if (!changed) return bar;
+    anyChanged = true;
+    return withBarContent(bar, trackId, { ...barContent(bar, trackId), chords: kept });
+  });
+
+  return anyChanged ? result : bars;
+}
+
+/**
  * Restore the timeline invariant across the whole project: every segment
  * positioned, in order, and non-overlapping, each one living in the bar its onset
  * falls in.

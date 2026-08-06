@@ -15,7 +15,9 @@ import { generateId } from '@/utils/id';
 import {
   barChords,
   clampStartToBar,
+  clearRange,
   findSegment,
+  getBarIndexAtBeat,
   getBarBeats,
   getBarStartBeat,
   getTotalBeats,
@@ -79,6 +81,7 @@ interface ProjectState {
     segment: ChordSegment,
     trackId: string
   ) => void;
+  recordSegment: (trackId: string, startBeat: number, segment: ChordSegment) => void;
   removeSegment: (segmentId: string) => void;
   moveSegment: (segmentId: string, targetBarId: string, startBeat: number) => void;
   moveSegments: (moves: SegmentMove[]) => void;
@@ -542,6 +545,54 @@ export const projectStore = create<ProjectState>((set, get) => ({
     const capacity = getBarBeats(target, project.timeSignature);
     const bars = mapBar(project.bars, barId, trackId, chords =>
       placedIn(chords, segment, startBeat, capacity)
+    );
+    set({ project: applyBars(project, bars) });
+  },
+
+  /**
+   * Punch a segment onto the timeline at an *absolute* beat — what live recording
+   * commits, on key-down and again on key-up.
+   *
+   * Absolute rather than bar-relative because the caller is a playhead reading, which
+   * knows nothing of bars; the bar is resolved here. What it lands on is *cleared*
+   * rather than rippled, unlike `insertSegment`: re-recording over a passage must not
+   * shove the rest of the song along. Re-calling it with the same segment id and a
+   * longer duration is how a held key grows its block — `placeSegmentInBar` moves a
+   * segment it already holds rather than duplicating it.
+   */
+  recordSegment: (trackId: string, startBeat: number, segment: ChordSegment) => {
+    const project = get().project;
+    if (!project) return;
+    if (!project.tracks.some(t => t.id === trackId)) return;
+    // Recording is bounded by the song: bars are added deliberately, not by holding
+    // a key down past the last one.
+    if (startBeat < 0 || startBeat >= getTotalBeats(project.bars, project.timeSignature)) return;
+
+    const barIndex = getBarIndexAtBeat(project.bars, project.timeSignature, startBeat);
+    const target = project.bars[barIndex];
+    const offset = getBarStartBeat(project.bars, barIndex, project.timeSignature);
+
+    const cleared = clearRange(
+      project.bars,
+      project.timeSignature,
+      trackId,
+      startBeat,
+      startBeat + segment.duration,
+      segment.id
+    );
+    // Lift any earlier copy of the take out first, so a shrinking one leaves no
+    // stale remains behind for the ripple in `placedIn` to find.
+    const lifted = cleared.map(bar =>
+      trackId in bar.content
+        ? mapBarChords(bar, trackId, chords =>
+            removeSegmentById(withStartBeats(chords), segment.id)
+          )
+        : bar
+    );
+
+    const capacity = getBarBeats(target, project.timeSignature);
+    const bars = mapBar(lifted, target.id, trackId, chords =>
+      placedIn(chords, segment, startBeat - offset, capacity)
     );
     set({ project: applyBars(project, bars) });
   },

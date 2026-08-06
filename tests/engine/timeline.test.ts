@@ -13,6 +13,7 @@ import {
   withStartBeats,
   placeSegmentInBar,
   refitBars,
+  clearRange,
   SNAP_OPTIONS,
   DEFAULT_SNAP_BEATS,
   MIN_SEGMENT_BEATS,
@@ -539,6 +540,80 @@ describe("timeline", () => {
         // The other instrument gains no content in the bar it did not overflow into.
         expect(barChords(result[1], OTHER_TRACK_ID)).toEqual([]);
       });
+    });
+  });
+
+  describe("clearRange", () => {
+    /** Two instruments in one bar, so the punch can be shown to spare the other. */
+    const twoTracks = (chords: ChordSegment[], others: ChordSegment[]): Bar => ({
+      id: "bar-0",
+      barIndex: 0,
+      content: {
+        [TEST_TRACK_ID]: { chords, notes: [] },
+        [OTHER_TRACK_ID]: { chords: others, notes: [] },
+      },
+    });
+
+    it("drops a block wholly inside the range", () => {
+      const bars = [makeBar(0, [seg("a", 1, 0), seg("b", 1, 1), seg("c", 1, 3)])];
+      const result = clearRange(bars, TS_4_4, TEST_TRACK_ID, 1, 2);
+      expect(layout(barChords(result[0], TEST_TRACK_ID))).toEqual(["a@0+1", "c@3+1"]);
+    });
+
+    it("trims a block whose tail runs into the range", () => {
+      const bars = [makeBar(0, [seg("a", 3, 0)])];
+      const result = clearRange(bars, TS_4_4, TEST_TRACK_ID, 2, 4);
+      expect(layout(barChords(result[0], TEST_TRACK_ID))).toEqual(["a@0+2"]);
+    });
+
+    it("trims a block whose head lies inside the range", () => {
+      const bars = [makeBar(0, [seg("a", 3, 1)])];
+      const result = clearRange(bars, TS_4_4, TEST_TRACK_ID, 0, 2);
+      expect(layout(barChords(result[0], TEST_TRACK_ID))).toEqual(["a@2+2"]);
+    });
+
+    it("keeps only the head of a block spanning the whole range", () => {
+      const bars = [makeBar(0, [seg("a", 4, 0)])];
+      const result = clearRange(bars, TS_4_4, TEST_TRACK_ID, 1, 2);
+      expect(layout(barChords(result[0], TEST_TRACK_ID))).toEqual(["a@0+1"]);
+    });
+
+    it("drops a block trimmed below the minimum length", () => {
+      const bars = [makeBar(0, [seg("a", 1, 0)])];
+      // Only 0.125 beats would survive, which is shorter than MIN_SEGMENT_BEATS.
+      const result = clearRange(bars, TS_4_4, TEST_TRACK_ID, 0.125, 3);
+      expect(barChords(result[0], TEST_TRACK_ID)).toEqual([]);
+    });
+
+    it("leaves a block touching the range only at its edge alone", () => {
+      const bars = [makeBar(0, [seg("a", 1, 0), seg("b", 1, 2)])];
+      const result = clearRange(bars, TS_4_4, TEST_TRACK_ID, 1, 2);
+      expect(layout(barChords(result[0], TEST_TRACK_ID))).toEqual(["a@0+1", "b@2+1"]);
+    });
+
+    it("works in absolute beats across a bar line", () => {
+      const bars = [makeBar(0, [seg("a", 1, 3)]), makeBar(1, [seg("b", 1, 0)])];
+      const result = clearRange(bars, TS_4_4, TEST_TRACK_ID, 3, 5);
+      expect(barChords(result[0], TEST_TRACK_ID)).toEqual([]);
+      expect(barChords(result[1], TEST_TRACK_ID)).toEqual([]);
+    });
+
+    it("spares the other instrument's blocks", () => {
+      const bars = [twoTracks([seg("a", 1, 0)], [seg("x", 1, 0)])];
+      const result = clearRange(bars, TS_4_4, TEST_TRACK_ID, 0, 1);
+      expect(barChords(result[0], TEST_TRACK_ID)).toEqual([]);
+      expect(barChords(result[0], OTHER_TRACK_ID).map((s) => s.id)).toEqual(["x"]);
+    });
+
+    it("spares the segment being recorded, given its id", () => {
+      const bars = [makeBar(0, [seg("take", 1, 0), seg("b", 1, 1)])];
+      const result = clearRange(bars, TS_4_4, TEST_TRACK_ID, 0, 2, "take");
+      expect(layout(barChords(result[0], TEST_TRACK_ID))).toEqual(["take@0+1"]);
+    });
+
+    it("is a no-op for an empty range", () => {
+      const bars = [makeBar(0, [seg("a", 1, 0)])];
+      expect(clearRange(bars, TS_4_4, TEST_TRACK_ID, 1, 1)).toBe(bars);
     });
   });
 

@@ -233,6 +233,45 @@ describe('usePlayback', () => {
     expect(result.current.currentTime).toBeGreaterThan(1.5);
   });
 
+  describe('getSongTime', () => {
+    it('reads the clock between ticks, not the last published position', async () => {
+      const { result } = renderHook(() => usePlayback(config));
+      await startPlayback(result);
+      await advance(1);
+
+      // Move the audio clock without letting a scheduling pass run: this is exactly
+      // what a keypress lands in the middle of.
+      clock += 0.037;
+
+      expect(result.current.getSongTime()).toBeCloseTo(1.037, 5);
+      expect(result.current.currentTime).toBeCloseTo(1, 5);
+    });
+
+    it('reports the frozen position while stopped', async () => {
+      const { result } = renderHook(() => usePlayback(config));
+      expect(result.current.getSongTime()).toBe(0);
+
+      await startPlayback(result);
+      await advance(1.5);
+      act(() => result.current.pause());
+      clock += 5;
+
+      expect(result.current.getSongTime()).toBeCloseTo(1.5, 5);
+    });
+
+    it('follows the loop back to the range start on a wrap', async () => {
+      const looped: PlaybackConfig = { ...config, loopStart: 0, loopEnd: 4, loopEnabled: true };
+      const { result } = renderHook(() => usePlayback(looped));
+      await startPlayback(result);
+      await advance(4.5);
+
+      // Past the seam the reading is back near the top of the range, not at 4.5 —
+      // the wrap shifts the reference rather than resetting it.
+      expect(result.current.getSongTime()).toBeLessThan(1);
+      expect(result.current.isPlaying).toBe(true);
+    });
+  });
+
   it('stops at the end of the project when not looping', async () => {
     const { result } = renderHook(() => usePlayback(config));
     await startPlayback(result);

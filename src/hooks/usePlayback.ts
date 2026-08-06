@@ -78,6 +78,15 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
   const metronomeEnabledRef = useRef(metronomeEnabled);
   metronomeEnabledRef.current = metronomeEnabled;
 
+  /**
+   * Mirrors of the two pieces of state `getSongTime` needs. It is called from event
+   * handlers rather than from a render, so it cannot close over either value.
+   */
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
+  const currentTimeRef = useRef(currentTime);
+  currentTimeRef.current = currentTime;
+
   /** Memoised `calculateNoteTiming` for this run. Null while stopped. */
   const timingsRef = useRef<((bars: Bar[]) => NoteTiming[]) | null>(null);
   /** Whether the click queue has been built for the current playback run. */
@@ -310,6 +319,29 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
     setCurrentTime(0);
   }, [clearTimer]);
 
+  /**
+   * The live song position in seconds, read straight off the audio clock.
+   *
+   * `currentTime` is only refreshed once per 50 ms scheduling pass — a tenth of a
+   * beat at 120 BPM, which is plainly audible in a recorded take. This is the same
+   * arithmetic `tick` performs, evaluated at the moment it is asked, and it stays
+   * correct across a loop wrap because the wrap shifts the reference forward rather
+   * than resetting it. While stopped there is no clock to read, so the last
+   * published position stands.
+   */
+  const getSongTime = useCallback(() => {
+    const pool = poolRef.current;
+    if (!pool || !isPlayingRef.current) return currentTimeRef.current;
+    return Math.max(0, pool.now() - songStartClockRef.current);
+  }, []);
+
+  /**
+   * The live instrument pool. Returned as a getter beside the render-time snapshot
+   * below, because an event handler firing between renders needs the pool as it is
+   * now — not as it was when the component last drew.
+   */
+  const getPool = useCallback(() => poolRef.current, []);
+
   // Tear down on unmount only. The pool and context are deliberately kept across
   // config changes so a BPM edit does not re-download the samples.
   useEffect(() => {
@@ -330,6 +362,8 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
     play,
     pause,
     stop,
+    getSongTime,
+    getPool,
     pool: poolRef.current,
   };
 }

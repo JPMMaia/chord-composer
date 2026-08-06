@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { editorStore } from '@/store/editorStore';
 import { DEFAULT_SNAP_BEATS, SNAP_OPTIONS } from '@/engine/timeline';
+import { MAX_SEGMENT_OCTAVE, MIN_SEGMENT_OCTAVE } from '@/utils/constants';
 
 describe('editorStore', () => {
   beforeEach(() => {
@@ -9,6 +10,10 @@ describe('editorStore', () => {
       scrollX: 0,
       maxScrollX: 0,
       viewportWidth: 0,
+      paletteMode: 'chords',
+      paletteOctave: 4,
+      recordArmed: false,
+      recordQuantize: true,
     });
   });
 
@@ -28,6 +33,46 @@ describe('editorStore', () => {
     editorStore.getState().setSnapBeats(0);
     editorStore.getState().setSnapBeats(1.7);
     expect(editorStore.getState().snapBeats).toBe(DEFAULT_SNAP_BEATS);
+  });
+
+  describe('palette settings', () => {
+    it('starts on chords at octave 4', () => {
+      expect(editorStore.getState().paletteMode).toBe('chords');
+      expect(editorStore.getState().paletteOctave).toBe(4);
+    });
+
+    it('switches mode and octave', () => {
+      editorStore.getState().setPaletteMode('sevenths');
+      editorStore.getState().setPaletteOctave(6);
+      expect(editorStore.getState().paletteMode).toBe('sevenths');
+      expect(editorStore.getState().paletteOctave).toBe(6);
+    });
+
+    it('clamps the octave to the registers a segment may live in', () => {
+      editorStore.getState().setPaletteOctave(99);
+      expect(editorStore.getState().paletteOctave).toBe(MAX_SEGMENT_OCTAVE);
+      editorStore.getState().setPaletteOctave(-1);
+      expect(editorStore.getState().paletteOctave).toBe(MIN_SEGMENT_OCTAVE);
+    });
+  });
+
+  describe('recording', () => {
+    it('starts disarmed, with quantize on', () => {
+      expect(editorStore.getState().recordArmed).toBe(false);
+      expect(editorStore.getState().recordQuantize).toBe(true);
+    });
+
+    it('arms and disarms', () => {
+      editorStore.getState().setRecordArmed(true);
+      expect(editorStore.getState().recordArmed).toBe(true);
+      editorStore.getState().setRecordArmed(false);
+      expect(editorStore.getState().recordArmed).toBe(false);
+    });
+
+    it('turns quantize off', () => {
+      editorStore.getState().setRecordQuantize(false);
+      expect(editorStore.getState().recordQuantize).toBe(false);
+    });
   });
 
   describe('shared horizontal scroll', () => {

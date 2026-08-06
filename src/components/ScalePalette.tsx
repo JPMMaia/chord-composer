@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 import { getPaletteItems, type PaletteItem, type PaletteMode } from '@/engine/palette';
 import { getScaleName } from '@/engine/scales';
 import { ScaleSelect } from '@/components/ScaleSelect';
@@ -19,7 +19,6 @@ const OCTAVES = Array.from(
   { length: MAX_SEGMENT_OCTAVE - MIN_SEGMENT_OCTAVE + 1 },
   (_, i) => MIN_SEGMENT_OCTAVE + i
 );
-const DEFAULT_PALETTE_OCTAVE = 4;
 
 /**
  * Horizontal strip of draggable blocks for the current scale.
@@ -30,14 +29,17 @@ const DEFAULT_PALETTE_OCTAVE = 4;
  * The key is the strip's own, not the selected bar's: choosing what to compose
  * with is a different act from changing what an existing block is, so moving this
  * dropdown re-stocks the palette and touches nothing already on the timeline.
+ *
+ * Mode and octave live in `editorStore` rather than here, because the strip is no
+ * longer their only reader: the number keys play this same palette.
  */
 export const ScalePalette: React.FC = () => {
   const scale = editorStore(s => s.paletteScale);
   const setPaletteScale = editorStore(s => s.setPaletteScale);
-  const [mode, setMode] = useState<PaletteMode>('chords');
-  // Held here, like `mode`: the chosen octave reaches the timeline inside the
-  // dragged item, so nothing outside this strip needs to read it.
-  const [octave, setOctave] = useState<number>(DEFAULT_PALETTE_OCTAVE);
+  const mode = editorStore(s => s.paletteMode);
+  const setMode = editorStore(s => s.setPaletteMode);
+  const octave = editorStore(s => s.paletteOctave);
+  const setOctave = editorStore(s => s.setPaletteOctave);
 
   const items = useMemo(() => getPaletteItems(scale, mode, octave), [scale, mode, octave]);
 

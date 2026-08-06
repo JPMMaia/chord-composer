@@ -43,10 +43,12 @@ function makeDataTransfer() {
 }
 
 describe('ScalePalette', () => {
-  // The palette's key is store state now, not a prop, and the store outlives a
-  // single test — so each case starts from the same key.
+  // The palette's key, mode and octave are all store state now, not props, and the
+  // store outlives a single test — so each case starts from the same settings.
   beforeEach(() => {
     editorStore.getState().setPaletteScale(C_MAJOR);
+    editorStore.getState().setPaletteMode('chords');
+    editorStore.getState().setPaletteOctave(4);
   });
 
   it('defaults to chords mode and renders each degree as "Label (Numeral)"', () => {

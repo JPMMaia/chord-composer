@@ -47,6 +47,17 @@ export interface Instrument {
    */
   schedule(note: ScheduledNote): void;
 
+  /**
+   * Start a note now and hold it until the returned function is called.
+   *
+   * The one departure from this interface's time-based rule, and a deliberate one:
+   * a key being held down has no duration yet, so live playing cannot be expressed
+   * as a `ScheduledNote`. Optional, because not every backend can retract a note it
+   * has already handed on — a caller with no `sustain` falls back to a short
+   * `schedule`, which is a worse preview but never a stuck one.
+   */
+  sustain?(note: { midiNote: number; velocity: number }): () => void;
+
   /** Cut everything sounding or pending, immediately. */
   stopAll(): void;
 

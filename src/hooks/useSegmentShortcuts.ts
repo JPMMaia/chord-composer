@@ -22,6 +22,7 @@ function isTextEntry(target: EventTarget | null): boolean {
  * | `↑` `↓` | next / previous note of the bar's scale | next / previous scale degree |
  * | `+` `-` | pitch ± an octave | register ± 1 |
  * | `i` | — | cycle inversion, wrapping to root position |
+ * | `Del` `⌫` | delete every selected block | |
  * | `Ctrl/Cmd+A` | select every block in the project | |
  * | `Esc` | clear the selection | |
  *
@@ -31,8 +32,8 @@ function isTextEntry(target: EventTarget | null): boolean {
  * Bound to the window rather than to the block's own `onKeyDown`, because the
  * shortcut follows *selection*, not DOM focus: a block stays selected after a
  * drag, or after a click lands elsewhere in the lane, where focus does not follow.
- * The block keeps its own handler for `←`/`→`/`Delete`, which need the bar and
- * start-beat context only it has.
+ * The block keeps its own handler for `←`/`→`, which need the bar and start-beat
+ * context only it has.
  */
 export function useSegmentShortcuts(): void {
   const selectedSegmentIds = selectionStore(s => s.selectedSegmentIds);
@@ -41,6 +42,7 @@ export function useSegmentShortcuts(): void {
   const stepSegmentsPitch = projectStore(s => s.stepSegmentsPitch);
   const shiftSegmentsOctave = projectStore(s => s.shiftSegmentsOctave);
   const cycleSegmentsInversion = projectStore(s => s.cycleSegmentsInversion);
+  const removeSegments = projectStore(s => s.removeSegments);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -93,6 +95,13 @@ export function useSegmentShortcuts(): void {
         case 'I':
           cycleSegmentsInversion(selectedSegmentIds);
           break;
+        // The whole selection goes at once, and the selection goes with it — the
+        // ids it held name blocks that no longer exist.
+        case 'Delete':
+        case 'Backspace':
+          removeSegments(selectedSegmentIds);
+          clearSegmentSelection();
+          break;
         default:
           return;
       }
@@ -109,5 +118,6 @@ export function useSegmentShortcuts(): void {
     stepSegmentsPitch,
     shiftSegmentsOctave,
     cycleSegmentsInversion,
+    removeSegments,
   ]);
 }

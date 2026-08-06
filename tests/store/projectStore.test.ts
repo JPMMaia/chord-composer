@@ -591,6 +591,58 @@ describe('projectStore', () => {
     });
   });
 
+  describe('removeSegments', () => {
+    beforeEach(() => {
+      projectStore.getState().createProject();
+      projectStore.getState().addBar();
+    });
+
+    it('removes every named segment in one write', () => {
+      for (let i = 0; i < 4; i++) appendSegment(chordSegment({ id: `s${i}` }));
+      const before = projectStore.getState().project;
+
+      projectStore.getState().removeSegments(['s0', 's2']);
+
+      expect(layout(projectStore.getState().project!.bars[0])).toEqual(['s1@1', 's3@3']);
+      // One store write, so one undo step however many blocks went.
+      expect(projectStore.getState().project).not.toBe(before);
+    });
+
+    it('removes segments spanning several bars', () => {
+      projectStore.getState().addBar();
+      appendSegment(chordSegment({ id: 'a' }));
+      const second = projectStore.getState().project!.bars[1].id;
+      projectStore.getState().insertSegment(second, 0, chordSegment({ id: 'b' }), trackId());
+
+      projectStore.getState().removeSegments(['a', 'b']);
+
+      const bars = projectStore.getState().project!.bars;
+      expect(barChords(bars[0], trackId())).toEqual([]);
+      expect(barChords(bars[1], trackId())).toEqual([]);
+    });
+
+    it('leaves known segments alone when an unknown id rides along', () => {
+      appendSegment(chordSegment({ id: 'a' }));
+      appendSegment(chordSegment({ id: 'b' }));
+      projectStore.getState().removeSegments(['nope', 'a']);
+      expect(barChords(projectStore.getState().project!.bars[0], trackId()).map(c => c.id)).toEqual(['b']);
+    });
+
+    it('leaves the project untouched when nothing matches', () => {
+      appendSegment(chordSegment({ id: 'a' }));
+      const before = projectStore.getState().project;
+      projectStore.getState().removeSegments(['nope']);
+      expect(projectStore.getState().project).toBe(before);
+    });
+
+    it('leaves the project untouched when the list is empty', () => {
+      appendSegment(chordSegment({ id: 'a' }));
+      const before = projectStore.getState().project;
+      projectStore.getState().removeSegments([]);
+      expect(projectStore.getState().project).toBe(before);
+    });
+  });
+
   describe('moveSegment', () => {
     const bars = () => projectStore.getState().project!.bars;
 

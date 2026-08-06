@@ -83,6 +83,7 @@ interface ProjectState {
   ) => void;
   recordSegment: (trackId: string, startBeat: number, segment: ChordSegment) => void;
   removeSegment: (segmentId: string) => void;
+  removeSegments: (segmentIds: string[]) => void;
   moveSegment: (segmentId: string, targetBarId: string, startBeat: number) => void;
   moveSegments: (moves: SegmentMove[]) => void;
   resizeSegmentDuration: (segmentId: string, duration: number) => void;
@@ -598,21 +599,47 @@ export const projectStore = create<ProjectState>((set, get) => ({
   },
 
   removeSegment: (segmentId: string) => {
+    get().removeSegments([segmentId]);
+  },
+
+  /**
+   * Delete every named block at once — what Delete does to a multi-selection.
+   *
+   * The space each occupied stays empty: a deleted block leaves a rest behind
+   * rather than pulling its neighbours back. The whole batch is one store write,
+   * so however many blocks are selected it is one visual step and one history
+   * entry. Bars this instrument has nothing in are skipped rather than gaining an
+   * empty key, which would leave `content` growing an entry per bar per edit.
+   */
+  removeSegments: (segmentIds: string[]) => {
     const project = get().project;
     if (!project) return;
-    const trackId = trackIdOfSegment(project.bars, segmentId);
-    if (!trackId) return;
 
-    // The space it occupied stays empty — a deleted block leaves a rest behind.
-    // Bars where this instrument has nothing are skipped rather than gaining an
-    // empty key, which would leave `content` growing a entry per bar per edit.
-    const bars = project.bars.map(bar =>
-      trackId in bar.content
-        ? mapBarChords(bar, trackId, chords =>
-            removeSegmentById(withStartBeats(chords), segmentId)
-          )
-        : bar
-    );
+    // Grouped by instrument, because a segment id only means something inside the
+    // track that holds it — and a selection may in principle span several.
+    const byTrack = new Map<string, string[]>();
+    for (const segmentId of segmentIds) {
+      const trackId = trackIdOfSegment(project.bars, segmentId);
+      if (!trackId) continue;
+      const ids = byTrack.get(trackId);
+      if (ids) ids.push(segmentId);
+      else byTrack.set(trackId, [segmentId]);
+    }
+    if (byTrack.size === 0) return;
+
+    let bars = project.bars;
+    for (const [trackId, ids] of byTrack) {
+      bars = bars.map(bar =>
+        trackId in bar.content
+          ? mapBarChords(bar, trackId, chords =>
+              ids.reduce(
+                (remaining, id) => removeSegmentById(remaining, id),
+                withStartBeats(chords)
+              )
+            )
+          : bar
+      );
+    }
     set({ project: applyBars(project, bars) });
   },
 

@@ -195,6 +195,38 @@ describe('useSegmentShortcuts', () => {
       expect(segmentOf(second.id).inversion).toBe(1);
     });
 
+    it('deletes every selected block on Delete', () => {
+      const [first, second] = chordInEachBar();
+      renderHook(() => useSegmentShortcuts());
+
+      fireEvent.keyDown(window, { key: 'Delete' });
+
+      expect(segmentOf(first.id)).toBeUndefined();
+      expect(segmentOf(second.id)).toBeUndefined();
+    });
+
+    it('deletes the whole selection on Backspace too, in one store write', () => {
+      chordInEachBar();
+      renderHook(() => useSegmentShortcuts());
+      const before = state().project;
+
+      fireEvent.keyDown(window, { key: 'Backspace' });
+
+      const after = state().project;
+      expect(after).not.toBe(before);
+      expect(barChords(after!.bars[0], trackId())).toEqual([]);
+      expect(barChords(after!.bars[1], trackId())).toEqual([]);
+    });
+
+    it('drops the selection along with the blocks it named', () => {
+      chordInEachBar();
+      renderHook(() => useSegmentShortcuts());
+
+      fireEvent.keyDown(window, { key: 'Delete' });
+
+      expect(selectionStore.getState().selectedSegmentIds).toEqual([]);
+    });
+
     it('applies the whole selection in a single store write', () => {
       chordInEachBar();
       renderHook(() => useSegmentShortcuts());

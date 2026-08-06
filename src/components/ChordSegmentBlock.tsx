@@ -115,11 +115,8 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
         e.preventDefault();
         onMoveRight?.();
         break;
-      case 'Delete':
-      case 'Backspace':
-        e.preventDefault();
-        onRemove(segment.id);
-        break;
+      // Delete is deliberately absent: it follows the selection, not focus, and is
+      // handled once for the whole selection in `useSegmentShortcuts`.
     }
   };
 

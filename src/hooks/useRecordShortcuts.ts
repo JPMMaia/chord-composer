@@ -55,6 +55,9 @@ interface UseRecordShortcutsProps {
   /** Live song position in seconds, straight off the audio clock. */
   getSongTime: () => number;
   getPool: () => InstrumentPool | null;
+  /** Call withRecording to gate the key-down recording call so only key-up
+      creates a history entry. */
+  recordGated: (trackId: string, startBeat: number, segment: ChordSegment) => void;
 }
 
 /**
@@ -79,6 +82,7 @@ export function useRecordShortcuts({
   isPlaying,
   getSongTime,
   getPool,
+  recordGated,
 }: UseRecordShortcutsProps): void {
   const recordSegment = projectStore(s => s.recordSegment);
 
@@ -169,7 +173,9 @@ export function useRecordShortcuts({
       let pressBeat: number | null = null;
       if (recordArmed && isPlayingRef.current) {
         pressBeat = beatNow();
-        recordSegment(trackId, pressBeat, segment);
+        // Gate the key-down call so it does NOT create a history entry;
+        // the key-up call below does, making the whole take one undo step.
+        recordGated(trackId, pressBeat, segment);
       }
 
       held.set(keyId, { segment, pressBeat, trackId, release });

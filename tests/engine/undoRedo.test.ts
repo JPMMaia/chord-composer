@@ -127,4 +127,52 @@ describe('undoRedo', () => {
       expect(undoRedo.current()).toEqual(initialState);
     });
   });
+
+  describe('null initial state', () => {
+    it('handles null as the initial state', () => {
+      const ur = createUndoRedoMiddleware(null, 50);
+      expect(ur.current()).toBeNull();
+      expect(ur.canUndo()).toBe(false);
+      expect(ur.canRedo()).toBe(false);
+    });
+
+    it('pushes first real state when seeded from null', () => {
+      const ur = createUndoRedoMiddleware<{ value: number } | null>(null, 50);
+      expect(ur.current()).toBeNull();
+      ur.pushState({ value: 1 });
+      expect(ur.current()).toEqual({ value: 1 });
+      // undo is now available because the null initial state is one step back
+      expect(ur.canUndo()).toBe(true);
+    });
+
+    it('can undo from a null-seeded history', () => {
+      const ur = createUndoRedoMiddleware<{ value: number } | null>(null, 50);
+      ur.pushState({ value: 1 });
+      ur.pushState({ value: 2 });
+      expect(ur.current()).toEqual({ value: 2 });
+      expect(ur.undo()).toEqual({ value: 1 });
+      expect(ur.undo()).toBeNull();
+    });
+
+    it('silences pushState during recording', () => {
+      const ur = createUndoRedoMiddleware({ value: 0 }, 50);
+      ur.setRecording(true);
+      ur.pushState({ value: 1 });
+      ur.pushState({ value: 2 });
+      ur.setRecording(false);
+      // Recording should have silenced pushes
+      expect(ur.current()).toEqual({ value: 0 });
+      expect(ur.canUndo()).toBe(false);
+    });
+
+    it('resumes pushState after recording ends', () => {
+      const ur = createUndoRedoMiddleware({ value: 0 }, 50);
+      ur.setRecording(true);
+      ur.pushState({ value: 1 }); // silenced
+      ur.setRecording(false);
+      ur.pushState({ value: 2 }); // active
+      expect(ur.current()).toEqual({ value: 2 });
+      expect(ur.canUndo()).toBe(true);
+    });
+  });
 });

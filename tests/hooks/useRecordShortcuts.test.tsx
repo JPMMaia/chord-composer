@@ -60,6 +60,13 @@ function mount(isPlaying = true) {
         isPlaying: playing,
         getSongTime: () => songTime,
         getPool: () => pool,
+        recordGated: (tId: string, pressBeat: number, seg: import('@/types/music').ChordSegment) => {
+          // Gated commit: writes the segment but silences the undo middleware.
+          // In the real App this is withRecording(() => recordSegment(...)).
+          projectStore.getState().withRecording(() =>
+            projectStore.getState().recordSegment(tId, pressBeat, seg)
+          );
+        },
       }),
     { initialProps: { playing: isPlaying } }
   );

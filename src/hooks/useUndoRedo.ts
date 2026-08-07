@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useRef } from 'react';
+import { useEffect, useCallback, useRef, useSyncExternalStore } from 'react';
 import { createUndoRedoMiddleware } from '@/engine/undoRedo';
 
 interface UseUndoRedoOptions<T> {
@@ -31,7 +31,7 @@ export function useUndoRedo<T extends object>({
   shouldRecord = () => true,
 }: UseUndoRedoOptions<T>) {
   const middlewareRef = useRef(
-    createUndoRedoMiddleware(initialState, maxHistory)
+    createUndoRedoMiddleware(initialState, maxHistory, shouldRecord)
   );
 
   const current = middlewareRef.current.current();
@@ -70,23 +70,30 @@ export function useUndoRedo<T extends object>({
     middlewareRef.current.clearHistory();
   }, []);
 
-  const canUndo = middlewareRef.current.canUndo();
-  const canRedo = middlewareRef.current.canRedo();
+  // Sync canUndo/canRedo with React via useSyncExternalStore.
+  // Uses the middleware's cached getSnapshot() to return the SAME reference
+  // when canUndo/canRedo haven't changed — preventing infinite render loops.
+  const urSnapshot = useSyncExternalStore(
+    (cb) => middlewareRef.current.subscribe(cb),
+    () => middlewareRef.current.getSnapshot()
+  );
 
   // Bind keyboard shortcuts (Ctrl+Z / Ctrl+Shift+Z / Cmd+Z / Cmd+Shift+Z)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Shift+Z reports e.key as 'Z', so compare case-insensitively.
+      const key = e.key.toLowerCase();
       const isUndo =
-        (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z';
+        (e.ctrlKey || e.metaKey) && !e.shiftKey && key === 'z';
       const isRedo =
-        (e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'z';
+        (e.ctrlKey || e.metaKey) && e.shiftKey && key === 'z';
       const isRedoAlt =
-        (e.ctrlKey || e.metaKey) && e.key === 'y';
+        (e.ctrlKey || e.metaKey) && key === 'y';
 
-      if (isUndo && canUndo) {
+      if (isUndo && urSnapshot.canUndo) {
         e.preventDefault();
         undo();
-      } else if ((isRedo || isRedoAlt) && canRedo) {
+      } else if ((isRedo || isRedoAlt) && urSnapshot.canRedo) {
         e.preventDefault();
         redo();
       }
@@ -94,7 +101,7 @@ export function useUndoRedo<T extends object>({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [canUndo, canRedo, undo, redo]);
+  }, [urSnapshot.canUndo, urSnapshot.canRedo, undo, redo]);
 
   return {
     /** The current state from the undo/redo history. */
@@ -108,8 +115,8 @@ export function useUndoRedo<T extends object>({
     /** Clear history. */
     clearHistory,
     /** Whether undo is available. */
-    canUndo,
+    canUndo: urSnapshot.canUndo,
     /** Whether redo is available. */
-    canRedo,
+    canRedo: urSnapshot.canRedo,
   };
 }

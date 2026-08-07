@@ -28,6 +28,14 @@ interface TransportProps {
   onLoopToggle: () => void;
   onRecordToggle: () => void;
   onQuantizeToggle: () => void;
+  /** Undo handler — called when the undo button is clicked. */
+  onUndo: () => void;
+  /** Redo handler — called when the redo button is clicked. */
+  onRedo: () => void;
+  /** Whether the undo button should be enabled. */
+  canUndo: boolean;
+  /** Whether the redo button should be enabled. */
+  canRedo: boolean;
 }
 
 /**
@@ -54,6 +62,10 @@ export const Transport: React.FC<TransportProps> = ({
   onLoopToggle,
   onRecordToggle,
   onQuantizeToggle,
+  onUndo,
+  onRedo,
+  canUndo,
+  canRedo,
 }) => {
   const [bpmInput, setBpmInput] = useState<string>(String(bpm));
 
@@ -208,6 +220,34 @@ export const Transport: React.FC<TransportProps> = ({
       <div className="text-xs text-gray-400" data-testid="loop-range-readout">
         Range {loopRangeLabel ?? '—'}
       </div>
+
+      {/* Undo / Redo buttons — right end of transport bar */}
+      <button
+        onClick={onUndo}
+        disabled={!canUndo}
+        aria-label="Undo"
+        title="Undo (Ctrl+Z)"
+        className={`px-2 py-1.5 text-sm rounded transition-colors ${
+          canUndo
+            ? 'bg-gray-600 text-gray-200 hover:bg-gray-500'
+            : 'opacity-40 cursor-not-allowed'
+        }`}
+      >
+        ↩
+      </button>
+      <button
+        onClick={onRedo}
+        disabled={!canRedo}
+        aria-label="Redo"
+        title="Redo (Ctrl+Y)"
+        className={`px-2 py-1.5 text-sm rounded transition-colors ${
+          canRedo
+            ? 'bg-gray-600 text-gray-200 hover:bg-gray-500'
+            : 'opacity-40 cursor-not-allowed'
+        }`}
+      >
+        ↪
+      </button>
     </div>
   );
 };

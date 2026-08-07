@@ -121,6 +121,51 @@ describe('useSegmentShortcuts', () => {
     expect(segmentOf(segment.id).inversion).toBeUndefined();
   });
 
+  // ------------------------------------------------------------------
+  // Phase 3, test 3.4 — Ctrl+Z is NOT intercepted by segment shortcuts
+  // ------------------------------------------------------------------
+  it('does not intercept Ctrl+Z (leaves it for undo/redo)', () => {
+    const segment = placeChord();
+    selectionStore.getState().selectSegment(segment.id);
+    renderHook(() => useSegmentShortcuts());
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+
+    // Ctrl+Z should be silently ignored by this hook — no shortcut fires.
+    expect(segmentOf(segment.id).root).toBe('C');
+    expect(segmentOf(segment.id).inversion).toBeUndefined();
+  });
+
+  it('does not intercept Ctrl+Shift+Z (leaves it for redo)', () => {
+    const segment = placeChord();
+    selectionStore.getState().selectSegment(segment.id);
+    renderHook(() => useSegmentShortcuts());
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true, shiftKey: true });
+
+    expect(segmentOf(segment.id).root).toBe('C');
+  });
+
+  it('does not intercept Ctrl+Y (leaves it for redo)', () => {
+    const segment = placeChord();
+    selectionStore.getState().selectSegment(segment.id);
+    renderHook(() => useSegmentShortcuts());
+
+    fireEvent.keyDown(window, { key: 'y', ctrlKey: true });
+
+    expect(segmentOf(segment.id).root).toBe('C');
+  });
+
+  it('does not intercept Cmd+Z on Mac (leaves it for undo/redo)', () => {
+    const segment = placeChord();
+    selectionStore.getState().selectSegment(segment.id);
+    renderHook(() => useSegmentShortcuts());
+
+    fireEvent.keyDown(window, { key: 'z', metaKey: true });
+
+    expect(segmentOf(segment.id).root).toBe('C');
+  });
+
   it('does nothing with no segment selected', () => {
     const segment = placeChord();
     renderHook(() => useSegmentShortcuts());

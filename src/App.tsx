@@ -1,6 +1,12 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useRef, useSyncExternalStore } from 'react';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
+import { createUndoRedoMiddleware } from '@/engine/undoRedo';
+import {
+  UndoRedoContext,
+  type UndoRedoContextValue,
+} from '@/context/undoRedoContext';
+import { setRecordingGate } from '@/store/projectStore';
 import { Transport } from '@/components/Transport';
 import { FileMenu } from '@/components/FileMenu';
 import { InstrumentsPanel } from '@/components/InstrumentsPanel';
@@ -24,7 +30,7 @@ import {
   MIN_SEGMENT_BEATS,
 } from '@/engine/timeline';
 import { projectScale } from '@/engine/scales';
-import type { Bar, TimeSignature } from '@/types/music';
+import type { Bar, ChordSegment, Project, TimeSignature } from '@/types/music';
 import { PIANO_KEYS_WIDTH, PIXELS_PER_BEAT } from '@/utils/constants';
 
 /**
@@ -171,16 +177,113 @@ function App() {
   // Spacebar toggles play/stop.
   usePlaybackShortcuts({ isPlaying, isLoading, onPlay: handlePlay, onStop: stop });
 
+  // Gated recording: the key-down call is wrapped so it skips history;
+  // the key-up call (in useRecordShortcuts) uses the plain recordSegment,
+  // which is captured by the subscribe → one history entry per take.
+  const recordGated = useCallback(
+    (trackId: string, startBeat: number, segment: ChordSegment) => {
+      projectStore.getState().withRecording(() =>
+        projectStore.getState().recordSegment(trackId, startBeat, segment)
+      );
+    },
+    []
+  );
+
   // 1–7 play the palette's degrees, and record them while armed. `r` arms.
-  useRecordShortcuts({ isPlaying, getSongTime, getPool });
+  useRecordShortcuts({ isPlaying, getSongTime, getPool, recordGated });
 
   // Page the view along during playback so the playhead never runs off screen.
   useFollowPlayhead(playheadBeat, isPlaying);
 
+  // ---------------------------------------------------------------------------
+  // Undo / Redo — middleware instance survives across renders.
+  // ---------------------------------------------------------------------------
+  const urRef = useRef(
+    createUndoRedoMiddleware<Project | null>(null, 50)
+  );
+
+  // Bridge the middleware's recording gate into the store, so the recording
+  // shortcuts can silence pushState for the key-down call.
+  useEffect(() => {
+    setRecordingGate(urRef.current.setRecording);
+    // Only runs once on mount; urRef.current is stable.
+  }, []);
+
+  // Subscribe to project mutations: every set({ project }) pushes a snapshot.
+  const pushSnapshot = useCallback(
+    (state: { project: Project | null }) => urRef.current.pushState(state.project),
+    []
+  );
+
+  useEffect(() => {
+    if (!project) return;
+    const unsubscribe = projectStore.subscribe(pushSnapshot);
+    return unsubscribe;
+  }, [project, pushSnapshot]);
+
+  // Sync canUndo / canRedo with React via useSyncExternalStore.
+  // The middleware caches the snapshot object so the SAME reference is
+  // returned when canUndo/canRedo haven't changed — preventing infinite
+  // React render loops (new object each render = React thinks state changed).
+  const urSnapshot = useSyncExternalStore(
+    (cb) => urRef.current.subscribe(cb),
+    () => urRef.current.getSnapshot()
+  );
+
+  const undoRedoValue: UndoRedoContextValue = {
+    // undo/redo must set the project store so React re-renders with the
+    // undone/redone state.  Just moving the middleware pointer would leave
+    // the store (and therefore React) showing the pre-undo project.
+    undo: useCallback(() => {
+      try {
+        urRef.current.undo();
+        projectStore.setState({ project: urRef.current.current() });
+      } catch { /* at beginning */ }
+    }, []),
+    redo: useCallback(() => {
+      try {
+        urRef.current.redo();
+        projectStore.setState({ project: urRef.current.current() });
+      } catch { /* at end */ }
+    }, []),
+    canUndo: urSnapshot.canUndo,
+    canRedo: urSnapshot.canRedo,
+  };
+
+  // ── Keyboard shortcuts: Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y (⌘ variants) ──
+  // Using refs to avoid stale closures — the listener always reads the
+  // latest values without needing to re-bind on every render.
+  // Capture phase + keyup ensures we grab Ctrl+Shift+Z before the browser
+  // intercepts it (browser default: "reopen closed tab").
+  const urLatest = useRef(undoRedoValue);
+  urLatest.current = undoRedoValue;
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const { current } = urLatest;
+      // Shift+Z reports e.key as 'Z', so compare case-insensitively.
+      const key = e.key.toLowerCase();
+      const isUndo = (e.ctrlKey || e.metaKey) && !e.shiftKey && key === 'z';
+      const isRedo = (e.ctrlKey || e.metaKey) && e.shiftKey && key === 'z';
+      const isRedoAlt = (e.ctrlKey || e.metaKey) && key === 'y';
+      if (isUndo && current.canUndo) {
+        e.preventDefault();
+        e.stopPropagation();
+        current.undo();
+      } else if ((isRedo || isRedoAlt) && current.canRedo) {
+        e.preventDefault();
+        e.stopPropagation();
+        current.redo();
+      }
+    };
+    window.addEventListener('keydown', handler, true);
+    return () => window.removeEventListener('keydown', handler, true);
+  }, []);
 
   if (!project) return null;
 
   return (
+    <UndoRedoContext.Provider value={undoRedoValue}>
     <div className="flex flex-col h-screen bg-gray-900 text-gray-100">
       {/* File Menu */}
       <div className="px-4 py-2 bg-gray-800 border-b border-gray-700">
@@ -209,6 +312,10 @@ function App() {
         onLoopToggle={toggleLoopEnabled}
         onRecordToggle={handleRecordToggle}
         onQuantizeToggle={handleQuantizeToggle}
+        onUndo={undoRedoValue.undo}
+        onRedo={undoRedoValue.redo}
+        canUndo={undoRedoValue.canUndo}
+        canRedo={undoRedoValue.canRedo}
       />
 
       {/* Main Content */}
@@ -294,6 +401,7 @@ function App() {
         </div>
       </div>
     </div>
+    </UndoRedoContext.Provider>
   );
 }
 

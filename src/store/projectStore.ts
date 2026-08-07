@@ -57,6 +57,14 @@ import {
 } from '@/utils/constants';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
 
+/** Gate set by App.tsx to silence middleware pushState during recording takes. */
+let recordingGate: ((active: boolean) => void) | undefined;
+
+/** Call from App.tsx to bridge the middleware's setRecording into the store. */
+export function setRecordingGate(fn: (active: boolean) => void) {
+  recordingGate = fn;
+}
+
 /** One block's destination in a batch move. */
 export interface SegmentMove {
   segmentId: string;
@@ -81,7 +89,12 @@ interface ProjectState {
     segment: ChordSegment,
     trackId: string
   ) => void;
-  recordSegment: (trackId: string, startBeat: number, segment: ChordSegment) => void;
+  recordSegment: (
+    trackId: string,
+    startBeat: number,
+    segment: ChordSegment,
+    onCommit?: (project: Project) => void
+  ) => void;
   removeSegment: (segmentId: string) => void;
   removeSegments: (segmentIds: string[]) => void;
   moveSegment: (segmentId: string, targetBarId: string, startBeat: number) => void;
@@ -143,6 +156,8 @@ interface ProjectState {
   toggleLoopEnabled: () => void;
   toggleMetronome: () => void;
   resetProject: () => void;
+  /** Execute `fn` while recording mode is active — pushState is silenced. */
+  withRecording: (fn: () => void) => void;
 }
 
 /** Octave the generated chord roots sit in — the middle-C octave. */
@@ -561,7 +576,7 @@ export const projectStore = create<ProjectState>((set, get) => ({
    * longer duration is how a held key grows its block — `placeSegmentInBar` moves a
    * segment it already holds rather than duplicating it.
    */
-  recordSegment: (trackId: string, startBeat: number, segment: ChordSegment) => {
+  recordSegment: (trackId, startBeat, segment, onCommit) => {
     const project = get().project;
     if (!project) return;
     if (!project.tracks.some(t => t.id === trackId)) return;
@@ -595,7 +610,9 @@ export const projectStore = create<ProjectState>((set, get) => ({
     const bars = mapBar(lifted, target.id, trackId, chords =>
       placedIn(chords, segment, startBeat - offset, capacity)
     );
-    set({ project: applyBars(project, bars) });
+    const next = applyBars(project, bars);
+    set({ project: next });
+    onCommit?.(next);
   },
 
   removeSegment: (segmentId: string) => {
@@ -1067,6 +1084,22 @@ export const projectStore = create<ProjectState>((set, get) => ({
       localStorage.removeItem('chord-composer-autosave');
     } catch {
       // Ignore localStorage errors
+    }
+  },
+
+  // Recording gate: execute `fn` while recording mode is active — pushState
+  // in the middleware is silenced so only the key-up recordSegment commits
+  // a single history entry for the whole take.
+  withRecording: (fn: () => void) => {
+    if (recordingGate) {
+      recordingGate(true);
+      try {
+        fn();
+      } finally {
+        recordingGate(false);
+      }
+    } else {
+      fn();
     }
   },
 }));

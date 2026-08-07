@@ -180,4 +180,83 @@ describe('Transport', () => {
       expect(quantize()).toHaveAttribute('aria-pressed', 'false');
     });
   });
+
+  describe('undo / redo buttons', () => {
+    const mockUndo = vi.fn();
+    const mockRedo = vi.fn();
+
+    const renderWithUndoRedo = (overrides?: Partial<typeof defaultProps> & {
+      onUndo?: () => void;
+      onRedo?: () => void;
+      canUndo?: boolean;
+      canRedo?: boolean;
+    }) =>
+      render(
+        <Transport
+          {...defaultProps}
+          {...overrides}
+          onUndo={overrides?.onUndo ?? mockUndo}
+          onRedo={overrides?.onRedo ?? mockRedo}
+          canUndo={overrides?.canUndo ?? false}
+          canRedo={overrides?.canRedo ?? false}
+        />
+      );
+
+    it('renders undo button', () => {
+      renderWithUndoRedo();
+      expect(screen.getByLabelText('Undo')).toBeInTheDocument();
+    });
+
+    it('renders redo button', () => {
+      renderWithUndoRedo();
+      expect(screen.getByLabelText('Redo')).toBeInTheDocument();
+    });
+
+    it('calls undo when undo button is clicked', () => {
+      renderWithUndoRedo({ canUndo: true });
+      fireEvent.click(screen.getByLabelText('Undo'));
+      expect(mockUndo).toHaveBeenCalled();
+    });
+
+    it('calls redo when redo button is clicked', () => {
+      renderWithUndoRedo({ canRedo: true });
+      fireEvent.click(screen.getByLabelText('Redo'));
+      expect(mockRedo).toHaveBeenCalled();
+    });
+
+    it('dims the undo button when canUndo is false', () => {
+      renderWithUndoRedo({ canUndo: false });
+      const undoBtn = screen.getByLabelText('Undo');
+      expect(undoBtn).toHaveClass('opacity-40', 'cursor-not-allowed');
+    });
+
+    it('dims the redo button when canRedo is false', () => {
+      renderWithUndoRedo({ canRedo: false });
+      const redoBtn = screen.getByLabelText('Redo');
+      expect(redoBtn).toHaveClass('opacity-40', 'cursor-not-allowed');
+    });
+
+    it('shows tooltip with keyboard shortcut for undo', () => {
+      renderWithUndoRedo();
+      expect(screen.getByLabelText('Undo')).toHaveAttribute('title', 'Undo (Ctrl+Z)');
+    });
+
+    it('shows tooltip with keyboard shortcut for redo', () => {
+      renderWithUndoRedo();
+      expect(screen.getByLabelText('Redo')).toHaveAttribute('title', 'Redo (Ctrl+Y)');
+    });
+
+    it('places undo/redo buttons after the loop range readout', () => {
+      renderWithUndoRedo();
+      const loopReadout = screen.getByTestId('loop-range-readout');
+      const undoBtn = screen.getByLabelText('Undo');
+      const redoBtn = screen.getByLabelText('Redo');
+      const children = Array.from(loopReadout.parentElement!.children);
+      const loopIdx = children.indexOf(loopReadout);
+      const undoIdx = children.indexOf(undoBtn);
+      const redoIdx = children.indexOf(redoBtn);
+      expect(undoIdx).toBeGreaterThan(loopIdx);
+      expect(redoIdx).toBeGreaterThan(loopIdx);
+    });
+  });
 });

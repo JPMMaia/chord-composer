@@ -117,6 +117,7 @@ describe('ChordTimeline', () => {
     selectionStore.getState().clearSelection();
     editorStore.setState({
       snapBeats: DEFAULT_SNAP_BEATS,
+      pixelsPerBeat: PIXELS_PER_BEAT,
       scrollX: 0,
       maxScrollX: 0,
       viewportWidth: 0,
@@ -210,6 +211,7 @@ describe('ChordTimeline', () => {
         '1/4',
         '1/8',
         '1/16',
+        '1/32',
       ]);
     });
 
@@ -246,6 +248,49 @@ describe('ChordTimeline', () => {
       // 4/4 is simple: an eighth between each of the four quarter-note beats. These
       // are the metre's, not the snap grid's, so they are drawn regardless of snap.
       expect(within(el).getAllByTestId('subdivision-line')).toHaveLength(4);
+    });
+
+    it('draws a line on every thirty-second at the finest grid', () => {
+      editorStore.getState().setSnapBeats(0.125);
+      render(<ChordTimeline />);
+      const el = screen.getByTestId(`timeline-bar-${bars()[0].id}`);
+      // Thirty-two thirty-seconds in a 4/4 bar, less the four that are already
+      // beat lines.
+      expect(within(el).getAllByTestId('subdivision-line')).toHaveLength(28);
+    });
+
+    it('snaps a drop to the nearest thirty-second at 1/32', () => {
+      editorStore.getState().setSnapBeats(0.125);
+      render(<ChordTimeline />);
+      dropAt(bars()[0].id, cMajorChords()[0], 1.4);
+      expect(segments()[0].startBeat).toBe(1.375);
+    });
+  });
+
+  describe('zoom', () => {
+    it('offers the zoom levels as percentages of the default scale', () => {
+      render(<ChordTimeline />);
+      const select = screen.getByLabelText('Zoom') as HTMLSelectElement;
+      expect([...select.options].map(o => o.text)).toEqual(['50%', '100%', '200%', '400%']);
+    });
+
+    it('records the chosen level so every pane shares it', () => {
+      render(<ChordTimeline />);
+      fireEvent.change(screen.getByLabelText('Zoom'), { target: { value: '160' } });
+      expect(editorStore.getState().pixelsPerBeat).toBe(160);
+    });
+
+    it('widens the bars it draws when zoomed in', () => {
+      const widthOf = () =>
+        screen.getByTestId(`timeline-bar-${bars()[0].id}`).style.width;
+
+      const { unmount } = render(<ChordTimeline />);
+      expect(widthOf()).toBe(`${4 * PIXELS_PER_BEAT}px`);
+      unmount();
+
+      editorStore.getState().setPixelsPerBeat(160);
+      render(<ChordTimeline />);
+      expect(widthOf()).toBe(`${4 * 160}px`);
     });
   });
 
@@ -330,7 +375,7 @@ describe('ChordTimeline', () => {
       // that caught the drop.
       render(<ChordTimeline />);
       dropAt(bars()[0].id, cMajorChords()[0], 9);
-      expect(segments()[0].startBeat).toBe(3.75);
+      expect(segments()[0].startBeat).toBe(3.875);
     });
   });
 

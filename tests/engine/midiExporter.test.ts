@@ -279,6 +279,31 @@ describe('midiExporter', () => {
     });
   });
 
+  describe('thirty-second notes', () => {
+    it('round-trips a bar of thirty-seconds through export and import', () => {
+      // 96 PPQ leaves 12 ticks in a thirty-second, so the grid's shortest block
+      // survives the trip without being rounded onto a coarser one.
+      const notes = Array.from({ length: 8 }, (_, i) => ({
+        id: generateId(),
+        pitch: 60 + i,
+        startBeat: i * 0.125,
+        duration: 0.125,
+        velocity: 100,
+      }));
+      const project = createTestProject({
+        bars: [{ id: generateId(), barIndex: 0, content: soloContent([], notes) }],
+      });
+
+      const restored = midiToProject(projectToMidi(project));
+      const restoredNotes = restored.bars
+        .flatMap(bar => Object.values(bar.content).flatMap(c => c.notes))
+        .sort((a, b) => a.startBeat - b.startBeat);
+
+      expect(restoredNotes.map(n => n.startBeat)).toEqual(notes.map(n => n.startBeat));
+      expect(restoredNotes.map(n => n.duration)).toEqual(notes.map(n => n.duration));
+    });
+  });
+
   describe('per-bar time signatures', () => {
     /** A bar carrying one note on its downbeat, so its start tick is observable. */
     const barWith = (barIndex: number, ts: { beatsPerMeasure: number; beatUnit: number } | undefined, pitch: number): Bar => ({

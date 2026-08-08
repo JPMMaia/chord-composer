@@ -1,12 +1,13 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { editorStore } from '@/store/editorStore';
+import { editorStore, ZOOM_LEVELS } from '@/store/editorStore';
 import { DEFAULT_SNAP_BEATS, SNAP_OPTIONS } from '@/engine/timeline';
-import { MAX_SEGMENT_OCTAVE, MIN_SEGMENT_OCTAVE } from '@/utils/constants';
+import { MAX_SEGMENT_OCTAVE, MIN_SEGMENT_OCTAVE, PIXELS_PER_BEAT } from '@/utils/constants';
 
 describe('editorStore', () => {
   beforeEach(() => {
     editorStore.setState({
       snapBeats: DEFAULT_SNAP_BEATS,
+      pixelsPerBeat: PIXELS_PER_BEAT,
       scrollX: 0,
       maxScrollX: 0,
       viewportWidth: 0,
@@ -33,6 +34,53 @@ describe('editorStore', () => {
     editorStore.getState().setSnapBeats(0);
     editorStore.getState().setSnapBeats(1.7);
     expect(editorStore.getState().snapBeats).toBe(DEFAULT_SNAP_BEATS);
+  });
+
+  describe('zoom', () => {
+    it('starts at the default scale', () => {
+      expect(editorStore.getState().pixelsPerBeat).toBe(PIXELS_PER_BEAT);
+    });
+
+    it('accepts every offered zoom level', () => {
+      for (const level of ZOOM_LEVELS) {
+        editorStore.getState().setPixelsPerBeat(level);
+        expect(editorStore.getState().pixelsPerBeat).toBe(level);
+      }
+    });
+
+    it('ignores a level that is not on the menu', () => {
+      editorStore.getState().setPixelsPerBeat(0);
+      editorStore.getState().setPixelsPerBeat(97);
+      expect(editorStore.getState().pixelsPerBeat).toBe(PIXELS_PER_BEAT);
+    });
+
+    it('steps through the levels and stops at each end', () => {
+      editorStore.getState().setPixelsPerBeat(ZOOM_LEVELS[0]);
+      editorStore.getState().zoomOut();
+      expect(editorStore.getState().pixelsPerBeat).toBe(ZOOM_LEVELS[0]);
+
+      editorStore.getState().zoomIn();
+      expect(editorStore.getState().pixelsPerBeat).toBe(ZOOM_LEVELS[1]);
+
+      editorStore.getState().setPixelsPerBeat(ZOOM_LEVELS[ZOOM_LEVELS.length - 1]);
+      editorStore.getState().zoomIn();
+      expect(editorStore.getState().pixelsPerBeat).toBe(ZOOM_LEVELS[ZOOM_LEVELS.length - 1]);
+    });
+
+    it('keeps the beat under the middle of the viewport in the middle', () => {
+      // Viewport 400 wide showing 200..600px at 80px/beat, so its centre is beat 5.
+      editorStore.setState({ scrollX: 200, maxScrollX: 100_000, viewportWidth: 400 });
+      editorStore.getState().setPixelsPerBeat(160);
+
+      // At 160px/beat that beat sits at 800px, so the centre holds at 800 - 200.
+      expect(editorStore.getState().scrollX).toBe(600);
+    });
+
+    it('never scrolls to a negative offset when zooming out', () => {
+      editorStore.setState({ scrollX: 0, maxScrollX: 100_000, viewportWidth: 400 });
+      editorStore.getState().setPixelsPerBeat(40);
+      expect(editorStore.getState().scrollX).toBe(0);
+    });
   });
 
   describe('palette settings', () => {

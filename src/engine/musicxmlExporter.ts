@@ -3,15 +3,16 @@ import {
   barChords,
   barNotes,
   getBarTimeSignature,
-  MIN_SEGMENT_BEATS,
   timeSignatureBeats,
 } from '@/engine/timeline';
 
 /**
- * MusicXML divisions per quarter note. Four divisions resolve down to a
- * sixteenth note, which matches the smallest grid the editor exposes.
+ * MusicXML divisions per quarter note. Eight divisions resolve down to a
+ * thirty-second note, which matches the smallest grid the editor exposes
+ * (`MIN_SEGMENT_BEATS`). Fewer would make `toDivisions` round the shortest blocks
+ * up, and measures would stop summing to their own length.
  */
-const DIVISIONS = 4;
+const DIVISIONS = 8;
 
 // ---------------------------------------------------------------------------
 // Pitch spelling
@@ -293,12 +294,19 @@ function renderHarmony(chord: ChordSegment): string[] {
  * How close two onsets must be to be written as one chord, in beats.
  *
  * Notation has no way to say "strummed": the voices of a rolled chord arrive a
- * few milliseconds apart, but the thing on the page is still a chord. The line
- * falls at the shortest block a user can draw — anything closer together than a
- * note could be written is a gesture within one chord, and anything at least
- * that far apart is rhythm, which is exactly what should notate separately.
+ * few milliseconds apart, but the thing on the page is still a chord.
+ *
+ * This is measured from the *first* onset of a group, so it has to clear the widest
+ * spread a whole chord can carry, not the gap between adjacent voices: four voices at
+ * the inspector's widest strum put the last one 0.1875 beats late. That floors this
+ * value above a thirty-second, so it can no longer track `MIN_SEGMENT_BEATS` the way
+ * it did when the grid stopped at a sixteenth — hence the literal.
+ *
+ * Being wider than the shortest note, it cannot be the only test for a chord, or a
+ * run of thirty-seconds would collapse into one. The overlap check at the call site
+ * is what carries that distinction; this only bounds how far a strum may reach.
  */
-export const CHORD_ONSET_TOLERANCE = MIN_SEGMENT_BEATS;
+export const CHORD_ONSET_TOLERANCE = 0.25;
 
 /**
  * A note that was still sounding when the bar line arrived, waiting to be written
@@ -367,8 +375,20 @@ function renderMeasureNotes(
     // Collect every note starting on this beat — they form one chord. Written
     // as a tolerance rather than an equality so a strummed chord notates as the
     // chord it is, instead of as a stack of hair-thin notes after a rest.
+    //
+    // Nearness alone is not enough to say "chord", because the tolerance has to be
+    // wider than a whole strum is, which is wider than a thirty-second: a run of
+    // thirty-seconds would be swallowed into chords by proximity. What separates the
+    // two is that a strum's voices *sound together* — they overlap — whereas
+    // successive notes of a rhythm only meet end to end. So a note joins the group
+    // only if it begins before the group's first voice has finished.
+    const firstEnd = startBeat + sorted[i].duration;
     const chordNotes: Note[] = [];
-    while (i < sorted.length && sorted[i].startBeat - startBeat < CHORD_ONSET_TOLERANCE) {
+    while (
+      i < sorted.length &&
+      sorted[i].startBeat - startBeat < CHORD_ONSET_TOLERANCE &&
+      (chordNotes.length === 0 || sorted[i].startBeat < firstEnd)
+    ) {
       chordNotes.push(sorted[i]);
       i++;
     }

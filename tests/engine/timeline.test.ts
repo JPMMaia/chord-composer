@@ -181,14 +181,20 @@ describe("timeline", () => {
   });
 
   describe("SNAP_OPTIONS", () => {
-    it("offers whole down to sixteenth notes, in beats", () => {
+    it("offers whole down to thirty-second notes, in beats", () => {
       expect(SNAP_OPTIONS.map((o) => [o.label, o.beats])).toEqual([
         ["1/1", 4],
         ["1/2", 2],
         ["1/4", 1],
         ["1/8", 0.5],
         ["1/16", 0.25],
+        ["1/32", 0.125],
       ]);
+    });
+
+    it("bottoms out at the shortest block that can be drawn", () => {
+      const finest = SNAP_OPTIONS[SNAP_OPTIONS.length - 1].beats;
+      expect(finest).toBe(MIN_SEGMENT_BEATS);
     });
 
     it("defaults to one beat, and the default is one of the options", () => {
@@ -580,8 +586,8 @@ describe("timeline", () => {
 
     it("drops a block trimmed below the minimum length", () => {
       const bars = [makeBar(0, [seg("a", 1, 0)])];
-      // Only 0.125 beats would survive, which is shorter than MIN_SEGMENT_BEATS.
-      const result = clearRange(bars, TS_4_4, TEST_TRACK_ID, 0.125, 3);
+      // Only 0.0625 beats would survive, which is shorter than MIN_SEGMENT_BEATS.
+      const result = clearRange(bars, TS_4_4, TEST_TRACK_ID, 0.0625, 3);
       expect(barChords(result[0], TEST_TRACK_ID)).toEqual([]);
     });
 
@@ -631,27 +637,46 @@ describe("timeline", () => {
 
   describe("resizeSegment", () => {
     it("sets a new duration", () => {
-      const result = resizeSegment([seg("a")], "a", 2);
+      const result = resizeSegment([seg("a")], "a", 2, 0.25);
       expect(result[0].duration).toBe(2);
     });
 
     it("snaps to the grid step", () => {
-      const result = resizeSegment([seg("a")], "a", 1.3);
+      const result = resizeSegment([seg("a")], "a", 1.3, 0.25);
       expect(result[0].duration).toBe(1.25);
     });
 
+    it("snaps to the resolution it is given, not to the floor", () => {
+      // The point of passing the grid in: at a coarse snap a resize must land on
+      // that grid, not on the finest lattice the editor can represent.
+      expect(resizeSegment([seg("a")], "a", 1.3, 1)[0].duration).toBe(1);
+      expect(resizeSegment([seg("a")], "a", 1.3, 0.125)[0].duration).toBe(1.25);
+      expect(resizeSegment([seg("a")], "a", 1.4, 0.125)[0].duration).toBe(1.375);
+    });
+
+    it("reaches a thirty-second on the finest grid", () => {
+      const result = resizeSegment([seg("a")], "a", 0.125, 0.125);
+      expect(result[0].duration).toBe(0.125);
+    });
+
     it("clamps to at least one grid step", () => {
-      const result = resizeSegment([seg("a")], "a", 0);
+      const result = resizeSegment([seg("a")], "a", 0, 0.25);
+      expect(result[0].duration).toBe(MIN_SEGMENT_BEATS);
+    });
+
+    it("clamps up rather than collapsing when the drag is under half a step", () => {
+      // Snapping rounds to nearest, so a coarse grid sends a short drag to zero.
+      const result = resizeSegment([seg("a")], "a", 0.1, 4);
       expect(result[0].duration).toBe(MIN_SEGMENT_BEATS);
     });
 
     it("clamps to the max beats when given one", () => {
-      const result = resizeSegment([seg("a")], "a", 99, 4);
+      const result = resizeSegment([seg("a")], "a", 99, 0.25, 4);
       expect(result[0].duration).toBe(4);
     });
 
     it("leaves other segments untouched", () => {
-      const result = resizeSegment([seg("a"), seg("b")], "a", 2);
+      const result = resizeSegment([seg("a"), seg("b")], "a", 2, 0.25);
       expect(result[1].duration).toBe(1);
     });
   });

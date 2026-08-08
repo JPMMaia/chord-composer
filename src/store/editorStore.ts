@@ -2,12 +2,33 @@ import { create } from 'zustand';
 import { DEFAULT_SNAP_BEATS, SNAP_OPTIONS } from '@/engine/timeline';
 import type { PaletteMode } from '@/engine/palette';
 import type { Scale } from '@/types/music';
-import { MAX_SEGMENT_OCTAVE, MIN_SEGMENT_OCTAVE } from '@/utils/constants';
+import { MAX_SEGMENT_OCTAVE, MIN_SEGMENT_OCTAVE, PIXELS_PER_BEAT } from '@/utils/constants';
+
+/**
+ * Zoom stops, in pixels per beat, coarsest first.
+ *
+ * Powers of two around the default so that halving and doubling always land on a
+ * stop, and so a bar's width stays a round number of pixels at every level. The top
+ * stop puts a thirty-second at 40px, which is comfortably grabbable.
+ */
+export const ZOOM_LEVELS = [40, PIXELS_PER_BEAT, 160, 320];
 
 interface EditorState {
   /** Grid resolution every timeline edit lands on, in beats. */
   snapBeats: number;
   setSnapBeats: (beats: number) => void;
+
+  /**
+   * Horizontal scale of the beat axis, in pixels per beat.
+   *
+   * The finest grid the editor offers is a thirty-second, which at the default scale
+   * is ten pixels — narrower than a block's own resize grip. Zoom is what makes that
+   * resolution actually editable rather than merely representable.
+   */
+  pixelsPerBeat: number;
+  setPixelsPerBeat: (pixelsPerBeat: number) => void;
+  zoomIn: () => void;
+  zoomOut: () => void;
 
   /**
    * The key being composed in: what the palette offers, what a dropped block is
@@ -73,6 +94,36 @@ export const editorStore = create<EditorState>((set, get) => ({
     // rather than silently editing at some arbitrary resolution.
     if (!SNAP_OPTIONS.some(option => option.beats === beats)) return;
     set({ snapBeats: beats });
+  },
+
+  pixelsPerBeat: PIXELS_PER_BEAT,
+
+  setPixelsPerBeat: (pixelsPerBeat: number) => {
+    // Off-menu levels are refused for the same reason off-menu snap values are: the
+    // toolbar would be reporting a scale the view is not actually drawn at.
+    if (!ZOOM_LEVELS.includes(pixelsPerBeat)) return;
+
+    const { pixelsPerBeat: previous, scrollX, viewportWidth } = get();
+    if (pixelsPerBeat === previous) return;
+
+    // Zoom about the middle of the viewport rather than its left edge, so the music
+    // under the centre of the view stays put instead of sliding away. `maxScrollX`
+    // still reflects the old scale here — `setScrollExtent` re-measures once the
+    // wider content lands — so the offset is stored raw and clamped on the next set.
+    const centre = scrollX + viewportWidth / 2;
+    const nextScrollX = Math.max(0, (centre * pixelsPerBeat) / previous - viewportWidth / 2);
+
+    set({ pixelsPerBeat, scrollX: nextScrollX });
+  },
+
+  zoomIn: () => {
+    const index = ZOOM_LEVELS.indexOf(get().pixelsPerBeat);
+    get().setPixelsPerBeat(ZOOM_LEVELS[Math.min(ZOOM_LEVELS.length - 1, index + 1)]);
+  },
+
+  zoomOut: () => {
+    const index = ZOOM_LEVELS.indexOf(get().pixelsPerBeat);
+    get().setPixelsPerBeat(ZOOM_LEVELS[Math.max(0, index - 1)]);
   },
 
   paletteScale: { root: 'C', type: 'major' },

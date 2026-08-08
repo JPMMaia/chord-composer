@@ -270,8 +270,8 @@ describe('musicxmlExporter', () => {
       });
       const xml = projectToMusicXML(project);
 
-      // 3 beats × 4 divisions per beat.
-      expect(xml).toContain('<rest measure="yes"/>\n        <duration>12</duration>');
+      // 3 beats × 8 divisions per beat.
+      expect(xml).toContain('<rest measure="yes"/>\n        <duration>24</duration>');
     });
   });
 
@@ -291,8 +291,8 @@ describe('musicxmlExporter', () => {
       const xml = projectToMusicXML(project);
 
       // Two beats of rest, the note, then a beat of rest to close the measure.
+      expect(xml).toContain('<rest/>\n        <duration>16</duration>');
       expect(xml).toContain('<rest/>\n        <duration>8</duration>');
-      expect(xml).toContain('<rest/>\n        <duration>4</duration>');
     });
 
     it('writes a rest for a hole between two notes', () => {
@@ -310,7 +310,7 @@ describe('musicxmlExporter', () => {
       });
 
       // The two beats between them are silence, not a held chord.
-      expect(projectToMusicXML(project)).toContain('<rest/>\n        <duration>8</duration>');
+      expect(projectToMusicXML(project)).toContain('<rest/>\n        <duration>16</duration>');
     });
   });
 
@@ -345,9 +345,9 @@ describe('musicxmlExporter', () => {
       });
       const [first, second] = measures(projectToMusicXML(project));
 
-      expect(first).toContain('<duration>4</duration>\n        <tie type="start"/>');
+      expect(first).toContain('<duration>8</duration>\n        <tie type="start"/>');
       expect(first).toContain('<tied type="start"/>');
-      expect(second).toContain('<duration>8</duration>');
+      expect(second).toContain('<duration>16</duration>');
       expect(second).toContain('<tie type="stop"/>');
       expect(second).toContain('<tied type="stop"/>');
     });
@@ -360,10 +360,10 @@ describe('musicxmlExporter', () => {
         [...measure.matchAll(/<duration>(\d+)<\/duration>/g)]
           .reduce((sum, m) => sum + Number(m[1]), 0);
 
-      // 4 beats × 4 divisions, in both — the first as 3 beats of rest plus the cut
+      // 4 beats × 8 divisions, in both — the first as 3 beats of rest plus the cut
       // note, the second as the 2-beat tail plus 2 beats of rest.
       for (const measure of measures(projectToMusicXML(project))) {
-        expect(total(measure)).toBe(16);
+        expect(total(measure)).toBe(32);
       }
     });
 
@@ -417,7 +417,7 @@ describe('musicxmlExporter', () => {
 
       // Two of the three are chord members, and the group spans the whole bar.
       expect(xml.match(/<chord\/>/g)).toHaveLength(2);
-      expect(xml).toContain('<duration>16</duration>');
+      expect(xml).toContain('<duration>32</duration>');
       expect(xml).not.toContain('<rest/>');
     });
 
@@ -436,7 +436,7 @@ describe('musicxmlExporter', () => {
       );
 
       expect(xml).not.toContain('<chord/>');
-      expect(xml.match(/<duration>4<\/duration>/g)).toHaveLength(4);
+      expect(xml.match(/<duration>8<\/duration>/g)).toHaveLength(4);
     });
 
     // The tolerance has to be narrow enough that genuinely fast writing still
@@ -474,6 +474,51 @@ describe('musicxmlExporter', () => {
       );
 
       expect(xml).not.toContain('<chord/>');
+    });
+  });
+
+  describe('thirty-second notes', () => {
+    const barOfNotes = (notes: { pitch: number; startBeat: number; duration: number }[]): Bar => ({
+      id: generateId(),
+      barIndex: 0,
+      content: soloContent(
+        [],
+        notes.map(n => ({ id: generateId(), velocity: 100, ...n }))
+      ),
+    });
+
+    it('writes a thirty-second as one division without rounding it up', () => {
+      const xml = projectToMusicXML(
+        createTestProject({
+          bars: [
+            barOfNotes([
+              { pitch: 60, startBeat: 0, duration: 0.125 },
+              { pitch: 62, startBeat: 0.125, duration: 0.125 },
+            ]),
+          ],
+        })
+      );
+
+      expect(xml).toContain('<divisions>8</divisions>');
+      expect(xml.match(/<duration>1<\/duration>/g)).toHaveLength(2);
+      expect(xml).toContain('<type>32nd</type>');
+    });
+
+    it('keeps a bar of thirty-seconds adding up to its own length', () => {
+      const notes = Array.from({ length: 32 }, (_, i) => ({
+        pitch: 60,
+        startBeat: i * 0.125,
+        duration: 0.125,
+      }));
+      const xml = projectToMusicXML(createTestProject({ bars: [barOfNotes(notes)] }));
+
+      const total = [...xml.matchAll(/<duration>(\d+)<\/duration>/g)].reduce(
+        (sum, m) => sum + Number(m[1]),
+        0
+      );
+      // 4 beats × 8 divisions, with no rests needed to pad the measure out.
+      expect(total).toBe(32);
+      expect(xml).not.toContain('<rest/>');
     });
   });
 });

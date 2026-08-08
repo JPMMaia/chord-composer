@@ -3,6 +3,8 @@ import { renderHook, fireEvent } from '@testing-library/react';
 import { useSegmentShortcuts } from '@/hooks/useSegmentShortcuts';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
+import { editorStore, ZOOM_LEVELS } from '@/store/editorStore';
+import { PIXELS_PER_BEAT } from '@/utils/constants';
 import type { ChordSegment } from '@/types/music';
 import { barChords } from '@/engine/timeline';
 
@@ -82,6 +84,28 @@ describe('useSegmentShortcuts', () => {
 
     fireEvent.keyDown(window, { key: '_' });
     expect(segmentOf(segment.id).octave).toBe(4);
+  });
+
+  it('zooms the beat axis on Alt + and Alt -, from an empty selection', () => {
+    // Alt rather than Ctrl: the browser claims Ctrl +/- for page zoom.
+    editorStore.setState({ pixelsPerBeat: PIXELS_PER_BEAT });
+    renderHook(() => useSegmentShortcuts());
+
+    fireEvent.keyDown(window, { key: '=', altKey: true });
+    expect(editorStore.getState().pixelsPerBeat).toBe(ZOOM_LEVELS[2]);
+
+    fireEvent.keyDown(window, { key: '-', altKey: true });
+    expect(editorStore.getState().pixelsPerBeat).toBe(PIXELS_PER_BEAT);
+  });
+
+  it('leaves Ctrl + and Ctrl - to the browser', () => {
+    editorStore.setState({ pixelsPerBeat: PIXELS_PER_BEAT });
+    renderHook(() => useSegmentShortcuts());
+
+    fireEvent.keyDown(window, { key: '=', ctrlKey: true });
+    fireEvent.keyDown(window, { key: '-', metaKey: true });
+
+    expect(editorStore.getState().pixelsPerBeat).toBe(PIXELS_PER_BEAT);
   });
 
   it('cycles the inversion on i, in either case', () => {

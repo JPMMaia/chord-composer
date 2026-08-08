@@ -31,7 +31,7 @@ import {
 } from '@/engine/timeline';
 import { projectScale } from '@/engine/scales';
 import type { Bar, ChordSegment, Project, TimeSignature } from '@/types/music';
-import { PIANO_KEYS_WIDTH, PIXELS_PER_BEAT } from '@/utils/constants';
+import { PIANO_KEYS_WIDTH } from '@/utils/constants';
 
 /**
  * The bars a play range covers, as "2–4" or just "2" for a range inside one bar.
@@ -69,6 +69,7 @@ function App() {
   // One offset for the chord timeline, the piano roll and the scrollbar under them.
   const scrollX = editorStore(s => s.scrollX);
   const setScrollX = editorStore(s => s.setScrollX);
+  const pixelsPerBeat = editorStore(s => s.pixelsPerBeat);
 
   const recordArmed = editorStore(s => s.recordArmed);
   const setRecordArmed = editorStore(s => s.setRecordArmed);
@@ -338,9 +339,9 @@ function App() {
                 tracks={project.tracks}
                 selectedTrackId={selectedTrackId}
                 playheadBeat={playheadBeat}
-                pixelsPerBeat={PIXELS_PER_BEAT}
+                pixelsPerBeat={pixelsPerBeat}
                 pixelsPerOctave={120}
-                gridSize={0.25}
+                gridSize={MIN_SEGMENT_BEATS}
                 timeSignature={project.timeSignature}
                 scrollLeft={scrollX}
                 onScrollLeftChange={setScrollX}
@@ -353,7 +354,7 @@ function App() {
           <HorizontalScrollbar
             contentWidth={
               PIANO_KEYS_WIDTH +
-              getTotalBeats(project.bars, project.timeSignature) * PIXELS_PER_BEAT
+              getTotalBeats(project.bars, project.timeSignature) * pixelsPerBeat
             }
           />
         </div>

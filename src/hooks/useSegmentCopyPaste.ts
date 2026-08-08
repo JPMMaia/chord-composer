@@ -3,7 +3,7 @@ import { clipboardStore } from '@/store/clipboardStore';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { getBarBeats, getTotalBeats } from '@/engine/timeline';
-import { PIXELS_PER_BEAT } from '@/utils/constants';
+import { editorStore } from '@/store/editorStore';
 
 /** True for elements that should keep their own key handling. */
 function isTextEntry(target: EventTarget | null): boolean {
@@ -114,7 +114,8 @@ export function useSegmentCopyPaste(): void {
         const mouseX = lastMouseX.current;
         if (mouseX < rect.left || mouseX > rect.right) return;
 
-        const mouseBeat = (mouseX - rect.left) / PIXELS_PER_BEAT;
+        const mouseBeat =
+          (mouseX - rect.left) / editorStore.getState().pixelsPerBeat;
         const totalBeats = getTotalBeats(project.bars, project.timeSignature);
         const clampedBeat = Math.max(0, Math.min(mouseBeat, totalBeats));
 

@@ -105,10 +105,11 @@ describe("chordOperations", () => {
     });
 
     it("throws when the chords would be finer than a segment can be", () => {
-      // The limit is the grid, not the beat count: sixteen sixteenths fit a 4/4 bar.
+      // The limit is the grid, not the beat count: thirty-two thirty-seconds fit
+      // a 4/4 bar.
       const bar = makeBar(0, 4);
-      expect(splitBarIntoChords(bar, C_MAJOR, 16)).toHaveLength(16);
-      expect(() => splitBarIntoChords(bar, C_MAJOR, 17)).toThrow();
+      expect(splitBarIntoChords(bar, C_MAJOR, 32)).toHaveLength(32);
+      expect(() => splitBarIntoChords(bar, C_MAJOR, 33)).toThrow();
     });
 
     it("splits a 6/8 bar into six eighths", () => {

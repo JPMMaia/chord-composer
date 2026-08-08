@@ -36,10 +36,13 @@ export const DEFAULT_TIME_SIGNATURE: TimeSignature = {
 export const PIANO_KEYS_WIDTH = 80;
 
 /**
- * Horizontal zoom of the beat axis, in pixels per beat.
+ * Default horizontal zoom of the beat axis, in pixels per beat.
  *
- * Shared by the chord timeline and the piano roll: they scroll from a single
- * offset, so a difference here would show up directly as misalignment.
+ * The live value is `editorStore.pixelsPerBeat`, which starts here and moves with the
+ * zoom control; this is only the stop the editor opens at. Read it from the store
+ * rather than importing this directly, or a view will be drawn at a scale the others
+ * have zoomed away from — the timeline and the piano roll scroll from a single
+ * offset, so any difference shows up immediately as misalignment.
  */
 export const PIXELS_PER_BEAT = 80;
 

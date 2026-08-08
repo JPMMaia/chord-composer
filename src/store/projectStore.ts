@@ -99,7 +99,8 @@ interface ProjectState {
   removeSegments: (segmentIds: string[]) => void;
   moveSegment: (segmentId: string, targetBarId: string, startBeat: number) => void;
   moveSegments: (moves: SegmentMove[]) => void;
-  resizeSegmentDuration: (segmentId: string, duration: number) => void;
+  /** `snapBeats` is the editor's current grid; the caller owns it, the store does not. */
+  resizeSegmentDuration: (segmentId: string, duration: number, snapBeats: number) => void;
   // Instruments. Tracks live here rather than in a store of their own so they
   // ride along with undo, autosave and project load like everything else.
   /** Returns the new instrument's id, so the caller can select it. */
@@ -731,7 +732,7 @@ export const projectStore = create<ProjectState>((set, get) => ({
     set({ project: applyBars(project, bars) });
   },
 
-  resizeSegmentDuration: (segmentId: string, duration: number) => {
+  resizeSegmentDuration: (segmentId: string, duration: number, snapBeats: number) => {
     const project = get().project;
     if (!project) return;
     const trackId = trackIdOfSegment(project.bars, segmentId);
@@ -751,7 +752,7 @@ export const projectStore = create<ProjectState>((set, get) => ({
     const maxBeats = getTotalBeats(project.bars, project.timeSignature) - absoluteStart;
 
     const bars = mapBar(project.bars, owner.id, trackId, () =>
-      resizeSegment(chords, segmentId, duration, maxBeats)
+      resizeSegment(chords, segmentId, duration, snapBeats, maxBeats)
     );
     set({ project: applyBars(project, bars) });
   },

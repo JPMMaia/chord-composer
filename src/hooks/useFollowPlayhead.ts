@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { editorStore } from '@/store/editorStore';
-import { PIANO_KEYS_WIDTH, PIXELS_PER_BEAT } from '@/utils/constants';
+import { PIANO_KEYS_WIDTH } from '@/utils/constants';
 
 /**
  * Where the playhead is placed after a page turn, as a fraction of the viewport.
@@ -24,13 +24,13 @@ export function useFollowPlayhead(playheadBeat: number, isPlaying: boolean): voi
   useEffect(() => {
     if (!isPlaying) return;
 
-    const { scrollX, viewportWidth, setScrollX } = editorStore.getState();
+    const { scrollX, viewportWidth, pixelsPerBeat, setScrollX } = editorStore.getState();
     // The panes' visible beat axis is the viewport minus the key column, which
     // does not scroll.
     const visibleWidth = viewportWidth - PIANO_KEYS_WIDTH;
     if (visibleWidth <= 0) return;
 
-    const playheadX = playheadBeat * PIXELS_PER_BEAT;
+    const playheadX = playheadBeat * pixelsPerBeat;
     if (playheadX >= scrollX && playheadX <= scrollX + visibleWidth) return;
 
     setScrollX(playheadX - visibleWidth * LEAD_IN_FRACTION);

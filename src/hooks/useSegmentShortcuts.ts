@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
+import { editorStore } from '@/store/editorStore';
 import { flattenSegments } from '@/engine/timeline';
 
 /** True for the elements that own their own arrow keys — selects, text fields. */
@@ -24,6 +25,7 @@ function isTextEntry(target: EventTarget | null): boolean {
  * | `i` | — | cycle inversion, wrapping to root position |
  * | `Del` `⌫` | delete every selected block | |
  * | `Ctrl/Cmd+A` | select every block in the project | |
+ * | `Alt+` `+` `-` | zoom the beat axis in / out | |
  * | `Esc` | clear the selection | |
  *
  * Every edit applies to the whole selection in one store write, so a keypress is
@@ -67,6 +69,24 @@ export function useSegmentShortcuts(): void {
         clearSegmentSelection();
         e.preventDefault();
         return;
+      }
+
+      // Zoom. Modified, because the bare `+`/`-` are the octave shift below, and
+      // like select-all it works from an empty selection — the scale of the view is
+      // not a property of whatever happens to be selected. Alt rather than Ctrl/Cmd:
+      // browsers reserve `Ctrl` `+`/`-` for zooming the whole page, and Firefox in
+      // particular takes it before the page ever sees the event.
+      if (e.altKey && !e.ctrlKey && !e.metaKey) {
+        if (e.key === '=' || e.key === '+') {
+          editorStore.getState().zoomIn();
+          e.preventDefault();
+          return;
+        }
+        if (e.key === '-' || e.key === '_') {
+          editorStore.getState().zoomOut();
+          e.preventDefault();
+          return;
+        }
       }
 
       // Let the remaining Ctrl/Cmd combinations through to the shortcuts that own

@@ -22,6 +22,8 @@ const NOTE_VALUES: Array<{ beats: number; name: string }> = [
   { beats: 0.5, name: 'eighth' },
   { beats: 0.375, name: 'dotted sixteenth' },
   { beats: 0.25, name: 'sixteenth' },
+  { beats: 0.1875, name: 'dotted thirty-second' },
+  { beats: 0.125, name: 'thirty-second' },
 ];
 
 /** Plural names for the denominators a time signature may use. */

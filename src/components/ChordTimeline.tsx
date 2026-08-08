@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { Bar, ChordSegment, TimeSignature } from '@/types/music';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
-import { editorStore } from '@/store/editorStore';
+import { editorStore, ZOOM_LEVELS } from '@/store/editorStore';
 import {
   barChords,
   flattenSegments,
@@ -158,7 +158,9 @@ export const ChordTimeline: React.FC = () => {
   const clearSegmentSelection = selectionStore(s => s.clearSegmentSelection);
 
   const snapBeats = editorStore(s => s.snapBeats);
+  const pixelsPerBeat = editorStore(s => s.pixelsPerBeat);
   const setSnapBeats = editorStore(s => s.setSnapBeats);
+  const setPixelsPerBeat = editorStore(s => s.setPixelsPerBeat);
   const paletteScale = editorStore(s => s.paletteScale);
   const scrollX = editorStore(s => s.scrollX);
   const setScrollX = editorStore(s => s.setScrollX);
@@ -181,7 +183,7 @@ export const ChordTimeline: React.FC = () => {
   useEffect(() => {
     /** Beats from the start of a lane element to a viewport x coordinate. */
     const beatIn = (lane: Element, clientX: number): number => {
-      const beat = (clientX - lane.getBoundingClientRect().left) / PIXELS_PER_BEAT;
+      const beat = (clientX - lane.getBoundingClientRect().left) / pixelsPerBeat;
       return Number.isFinite(beat) ? Math.max(0, beat) : 0;
     };
 
@@ -253,7 +255,7 @@ export const ChordTimeline: React.FC = () => {
       const moved =
         state.moved ||
         barDelta !== 0 ||
-        Math.abs(beatDelta) * PIXELS_PER_BEAT > DRAG_THRESHOLD_PX;
+        Math.abs(beatDelta) * pixelsPerBeat > DRAG_THRESHOLD_PX;
 
       setDrag({ ...state, preview, moved });
     };
@@ -281,17 +283,17 @@ export const ChordTimeline: React.FC = () => {
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
     };
-  }, [snapBeats, moveSegments]);
+  }, [snapBeats, moveSegments, pixelsPerBeat]);
 
   /** Absolute beat under a viewport x coordinate, snapped to the editing grid. */
   const rulerBeatAt = useCallback(
     (clientX: number): number => {
       const ruler = rulerRef.current;
       if (!ruler) return 0;
-      const beat = (clientX - ruler.getBoundingClientRect().left) / PIXELS_PER_BEAT;
+      const beat = (clientX - ruler.getBoundingClientRect().left) / pixelsPerBeat;
       return snapBeat(Number.isFinite(beat) ? beat : 0, snapBeats);
     },
-    [snapBeats]
+    [snapBeats, pixelsPerBeat]
   );
 
   // The play-range drag, on the same window-listener pattern as the segment drag
@@ -307,7 +309,7 @@ export const ChordTimeline: React.FC = () => {
         beat,
         moved:
           state.moved ||
-          Math.abs(beat - state.originBeat) * PIXELS_PER_BEAT > DRAG_THRESHOLD_PX,
+          Math.abs(beat - state.originBeat) * pixelsPerBeat > DRAG_THRESHOLD_PX,
       });
     };
 
@@ -335,7 +337,7 @@ export const ChordTimeline: React.FC = () => {
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
     };
-  }, [rulerBeatAt, setLoopRegion]);
+  }, [rulerBeatAt, setLoopRegion, pixelsPerBeat]);
 
   // The lanes follow the shared offset, so scrolling the piano roll or the bar at
   // the bottom of the editor moves them too. Writing only on a real difference is
@@ -357,7 +359,7 @@ export const ChordTimeline: React.FC = () => {
 
     const updateMouseBeat = (clientX: number) => {
       const rect = ruler.getBoundingClientRect();
-      const beat = (clientX - rect.left) / PIXELS_PER_BEAT;
+      const beat = (clientX - rect.left) / pixelsPerBeat;
       const totalBeats = getTotalBeats(project.bars, project.timeSignature);
       if (clientX >= rect.left && clientX <= rect.right && Number.isFinite(beat)) {
         setTimelineMouseBeat(Math.max(0, Math.min(beat, totalBeats)));
@@ -392,7 +394,7 @@ export const ChordTimeline: React.FC = () => {
       scrollEl.removeEventListener('pointerleave', handlePointerLeave);
       ruler.removeEventListener('pointerleave', handlePointerLeave);
     };
-  }, [project, setTimelineMouseBeat]);
+  }, [project, setTimelineMouseBeat, pixelsPerBeat]);
 
   // Nothing tells the selection when a block is deleted, so it would otherwise keep
   // a dead id and arm the keyboard shortcuts over nothing. Only write on a real
@@ -453,7 +455,7 @@ export const ChordTimeline: React.FC = () => {
   /** Beats from the start of a lane to the pointer. */
   const beatAt = (e: React.DragEvent<HTMLDivElement>): number => {
     const rect = e.currentTarget.getBoundingClientRect();
-    const beat = (e.clientX - rect.left) / PIXELS_PER_BEAT;
+    const beat = (e.clientX - rect.left) / pixelsPerBeat;
     // A drag with no usable coordinate lands at the bar's start rather than
     // poisoning the drop position with NaN.
     return Number.isFinite(beat) ? Math.max(0, beat) : 0;
@@ -560,7 +562,7 @@ export const ChordTimeline: React.FC = () => {
 
     const lane = (e.target as Element).closest(`[${LANE_ATTRIBUTE}]`);
     const pointerBeat = lane
-      ? Math.max(0, (e.clientX - lane.getBoundingClientRect().left) / PIXELS_PER_BEAT)
+      ? Math.max(0, (e.clientX - lane.getBoundingClientRect().left) / pixelsPerBeat)
       : startBeat;
 
     setDrag({
@@ -632,6 +634,22 @@ export const ChordTimeline: React.FC = () => {
           </select>
         </label>
 
+        <label className="flex items-center gap-1">
+          Zoom
+          <select
+            aria-label="Zoom"
+            value={pixelsPerBeat}
+            onChange={e => setPixelsPerBeat(Number(e.target.value))}
+            className="bg-gray-700 border border-gray-600 rounded text-gray-200 px-1 focus:outline-none focus:border-indigo-500"
+          >
+            {ZOOM_LEVELS.map(level => (
+              <option key={level} value={level}>
+                {`${Math.round((level / PIXELS_PER_BEAT) * 100)}%`}
+              </option>
+            ))}
+          </select>
+        </label>
+
         {/* Which instrument a drop will land on. The lanes show only this one's
             blocks, so without this the timeline going empty on an instrument
             switch reads as data loss. */}
@@ -671,7 +689,7 @@ export const ChordTimeline: React.FC = () => {
           ref={rulerRef}
           data-testid="timeline-ruler"
           onPointerDown={e => startRangeDrag(e)}
-          style={{ width: `${totalBeats * PIXELS_PER_BEAT}px` }}
+          style={{ width: `${totalBeats * pixelsPerBeat}px` }}
           title="Drag to set the play range, click to clear it"
           className="relative h-5 bg-gray-800 border-b border-gray-700 cursor-ew-resize select-none"
         >
@@ -680,7 +698,7 @@ export const ChordTimeline: React.FC = () => {
             <div
               key={bar.id}
               data-testid="ruler-tick"
-              style={{ left: `${getBarStartBeat(bars, barIndex, projectTs) * PIXELS_PER_BEAT}px` }}
+              style={{ left: `${getBarStartBeat(bars, barIndex, projectTs) * pixelsPerBeat}px` }}
               className="absolute top-0 bottom-0 w-px bg-gray-600"
             />
           ))}
@@ -689,8 +707,8 @@ export const ChordTimeline: React.FC = () => {
             <div
               data-testid="loop-range"
               style={{
-                left: `${shownRange.start * PIXELS_PER_BEAT}px`,
-                width: `${(shownRange.end - shownRange.start) * PIXELS_PER_BEAT}px`,
+                left: `${shownRange.start * pixelsPerBeat}px`,
+                width: `${(shownRange.end - shownRange.start) * pixelsPerBeat}px`,
               }}
               className="absolute top-0 bottom-0 bg-indigo-500/30 border-x-2 border-indigo-400"
             >
@@ -716,7 +734,7 @@ export const ChordTimeline: React.FC = () => {
         <div className="flex items-stretch">
         {bars.map((bar, barIndex) => {
           const beats = getBarBeats(bar, projectTs);
-          const width = beats * PIXELS_PER_BEAT;
+          const width = beats * pixelsPerBeat;
           const pulse = getBarPulse(bar, projectTs);
           const isSelectedBar = selectedBarId === bar.id;
 
@@ -785,7 +803,7 @@ export const ChordTimeline: React.FC = () => {
                   <div
                     key={beat}
                     data-testid="beat-line"
-                    style={{ left: `${beat * PIXELS_PER_BEAT}px` }}
+                    style={{ left: `${beat * pixelsPerBeat}px` }}
                     className={`absolute top-0 bottom-0 w-px ${
                       i === 0 ? 'bg-transparent' : 'bg-gray-700'
                     }`}
@@ -797,7 +815,7 @@ export const ChordTimeline: React.FC = () => {
                   <div
                     key={beat}
                     data-testid="subdivision-line"
-                    style={{ left: `${beat * PIXELS_PER_BEAT}px` }}
+                    style={{ left: `${beat * pixelsPerBeat}px` }}
                     className="absolute top-0 bottom-0 w-px bg-gray-800"
                   />
                 ))}
@@ -806,7 +824,7 @@ export const ChordTimeline: React.FC = () => {
                 {dropIndicator?.barId === bar.id && (
                   <div
                     data-testid="drop-indicator"
-                    style={{ left: `${dropIndicator.beat * PIXELS_PER_BEAT}px` }}
+                    style={{ left: `${dropIndicator.beat * pixelsPerBeat}px` }}
                     className="absolute top-0 bottom-0 w-0.5 bg-indigo-400 pointer-events-none"
                   />
                 )}
@@ -821,13 +839,15 @@ export const ChordTimeline: React.FC = () => {
                       isSelected={selectedSegmentIds.includes(segment.id)}
                       isDragging={drag?.preview.has(segment.id) ?? false}
                       startBeat={startBeat}
-                      pixelsPerBeat={PIXELS_PER_BEAT}
+                      pixelsPerBeat={pixelsPerBeat}
                       onSelect={id => {
                         selectBar(bar.id);
                         selectSegment(id);
                       }}
                       onRemove={removeSegment}
-                      onResize={resizeSegmentDuration}
+                      onResize={(id, duration) =>
+                        resizeSegmentDuration(id, duration, snapBeats)
+                      }
                       onMoveStart={e => handleMoveStart(e, bar, segment, startBeat)}
                       onMoveLeft={() => nudge(bar, segment, startBeat, -1)}
                       onMoveRight={() => nudge(bar, segment, startBeat, 1)}

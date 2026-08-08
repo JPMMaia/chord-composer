@@ -71,10 +71,15 @@ export function withoutTrackContent(bars: Bar[], trackId: string): Bar[] {
 }
 
 /**
- * Smallest editable segment length, in beats. Matches the piano roll's grid size
- * so resizing a chord and drawing a note snap to the same lattice.
+ * Smallest editable segment length, in beats — a thirty-second note. The piano roll
+ * is handed this same value as its grid size, so resizing a chord and drawing a note
+ * snap to the same lattice.
+ *
+ * An eighth of a beat is a binary fraction and therefore exact in floating point,
+ * which is why the lattice can be refined this far without the rounding guards
+ * elsewhere (`gridKey`, `EPSILON`) having to widen. A triplet grid would not be.
  */
-export const MIN_SEGMENT_BEATS = 0.25;
+export const MIN_SEGMENT_BEATS = 0.125;
 
 /** Snap a beat value to the editing grid, avoiding float drift (1.3 -> 1.25). */
 function snapToGrid(beats: number): number {
@@ -85,7 +90,7 @@ function snapToGrid(beats: number): number {
  * Snap resolutions offered in the timeline toolbar, labelled as note values.
  *
  * The beat figures assume a quarter-note beat: a whole note is four beats, a
- * sixteenth is a quarter of one — which is also `MIN_SEGMENT_BEATS`, so no option
+ * thirty-second an eighth of one — which is also `MIN_SEGMENT_BEATS`, so no option
  * can ask for a position finer than a segment can be.
  */
 export const SNAP_OPTIONS = [
@@ -94,6 +99,7 @@ export const SNAP_OPTIONS = [
   { label: '1/4', beats: 1 },
   { label: '1/8', beats: 0.5 },
   { label: '1/16', beats: 0.25 },
+  { label: '1/32', beats: 0.125 },
 ] as const;
 
 /** Quarter notes: the resolution most progressions are written at. */
@@ -101,8 +107,8 @@ export const DEFAULT_SNAP_BEATS = 1;
 
 /**
  * Snap a beat to the chosen grid. The second rounding is not redundant: it pulls
- * the result back onto the 0.25 lattice so a chain of snapped edits cannot
- * accumulate float error.
+ * the result back onto the `MIN_SEGMENT_BEATS` lattice so a chain of snapped edits
+ * cannot accumulate float error.
  */
 export function snapBeat(beat: number, snapBeats: number): number {
   if (!Number.isFinite(beat) || snapBeats <= 0) return 0;
@@ -597,16 +603,26 @@ export function removeSegmentById(
 }
 
 /**
- * Set a segment's duration, snapped to the grid and clamped to at least one grid
- * step. Pass `maxBeats` (usually the containing bar's capacity) to cap it.
+ * Set a segment's duration, snapped to `snapBeats` and clamped to at least
+ * `MIN_SEGMENT_BEATS`. Pass `maxBeats` (usually the containing bar's capacity) to
+ * cap it.
+ *
+ * The snap resolution is passed in rather than assumed so that resizing lands on the
+ * same lattice as dragging and dropping. Resize used to quantise to the floor
+ * instead, which was invisible only while the floor and the finest menu option were
+ * the same value — once the floor moved below the menu, a resize at a coarse snap
+ * setting would have ignored it entirely.
  */
 export function resizeSegment(
   segments: ChordSegment[],
   id: string,
   duration: number,
+  snapBeats: number,
   maxBeats?: number
 ): ChordSegment[] {
-  let next = Math.max(MIN_SEGMENT_BEATS, snapToGrid(duration));
+  // `snapBeat` rounds to nearest, so a drag shorter than half a step lands on zero.
+  // The floor is applied after snapping to pull that back up to a drawable block.
+  let next = Math.max(MIN_SEGMENT_BEATS, snapBeat(duration, snapBeats));
   if (maxBeats !== undefined) {
     next = Math.min(next, maxBeats);
   }

@@ -117,7 +117,7 @@ describe('useRecordShortcuts', () => {
     beatsIn(2);
     press(1);
 
-    expect(takes()).toEqual(['C@2+0.25']);
+    expect(takes()).toEqual(['C@2+0.125']);
   });
 
   it('sounds the block while held and releases it on key-up', () => {

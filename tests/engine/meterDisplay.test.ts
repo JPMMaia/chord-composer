@@ -18,6 +18,8 @@ describe('meterDisplay', () => {
       expect(formatNoteValue(0.75)).toBe('dotted eighth');
       expect(formatNoteValue(0.5)).toBe('eighth');
       expect(formatNoteValue(0.25)).toBe('sixteenth');
+      expect(formatNoteValue(0.1875)).toBe('dotted thirty-second');
+      expect(formatNoteValue(0.125)).toBe('thirty-second');
     });
 
     it('tolerates the float drift a chain of snapped edits leaves', () => {

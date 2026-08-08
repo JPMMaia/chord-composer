@@ -4,17 +4,7 @@ import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { getBarBeats, getTotalBeats } from '@/engine/timeline';
 import { editorStore } from '@/store/editorStore';
-
-/** True for elements that should keep their own key handling. */
-function isTextEntry(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  return (
-    target.tagName === 'INPUT' ||
-    target.tagName === 'SELECT' ||
-    target.tagName === 'TEXTAREA' ||
-    target.isContentEditable
-  );
-}
+import { isTextEntry } from '@/utils/keyboard';
 
 /**
  * Convert an absolute beat position into a paste target:

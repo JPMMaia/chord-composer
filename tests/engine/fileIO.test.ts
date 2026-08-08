@@ -3,7 +3,7 @@ import {
   serializeProject,
   deserializeProject,
   validateProject,
-  saveToFile,
+  serializeForSave,
   loadFromFile,
   autoSaveToLocalStorage,
   loadFromLocalStorage,
@@ -303,52 +303,15 @@ describe('fileIO', () => {
     });
   });
 
-  describe('saveToFile', () => {
-    it('creates a downloadable file with project JSON', async () => {
-      // Mock the File System Access API and fallback download
-      const mockBlob = new Blob(['test'], { type: 'application/json' });
-      const mockUrl = 'http://mock.url/test.mid';
-      const mockDownload = vi.fn();
-      const mockRemove = vi.fn();
-
-      // Mock URL.createObjectURL and URL.revokeObjectURL
-      global.URL.createObjectURL = vi.fn().mockReturnValue(mockUrl);
-      global.URL.revokeObjectURL = mockRemove as any;
-
-      // Mock anchor element for download fallback
-      const mockAnchor = {
-        href: '',
-        download: '',
-        click: mockDownload,
-      };
-      const mockCreateElement = vi.fn().mockReturnValue(mockAnchor);
-      document.createElement = mockCreateElement as any;
-
+  describe('serializeForSave', () => {
+    it('produces the same text as serializeProject for a valid project', () => {
       const project = createTestProject();
-      await saveToFile(project, 'my-project.json');
-
-      expect(mockDownload).toHaveBeenCalled();
-      expect(mockRemove).toHaveBeenCalledWith(mockUrl);
+      expect(serializeForSave(project)).toBe(serializeProject(project));
     });
 
-    it('uses the provided filename', async () => {
-      const mockAnchor = {
-        href: '',
-        download: '',
-        click: vi.fn(),
-      };
-      document.createElement = vi.fn().mockReturnValue(mockAnchor) as any;
-      global.URL.createObjectURL = vi.fn().mockReturnValue('http://mock.url');
-
-      const project = createTestProject();
-      await saveToFile(project, 'custom-name.json');
-
-      expect(mockAnchor.download).toBe('custom-name.json');
-    });
-
-    it('throws on invalid project', async () => {
+    it('refuses a project that would not load back', () => {
       const invalidProject = { name: '', bpm: 0 } as any;
-      await expect(saveToFile(invalidProject, 'test.json')).rejects.toThrow();
+      expect(() => serializeForSave(invalidProject)).toThrow(/Cannot save/);
     });
   });
 
@@ -570,6 +533,17 @@ describe('fileIO', () => {
       expect(restored.loopStart).toBe(4);
       expect(restored.loopEnd).toBe(12);
       expect(restored.loopEnabled).toBe(true);
+    });
+
+    it('round-trips the metronome', () => {
+      const project = createTestProject({ metronomeEnabled: true });
+      expect(deserializeProject(serializeProject(project)).metronomeEnabled).toBe(true);
+    });
+
+    it('reads a file written before the metronome was saved as having it off', () => {
+      const json = JSON.parse(serializeProject(createTestProject()));
+      delete json.metronomeEnabled;
+      expect(deserializeProject(JSON.stringify(json)).metronomeEnabled).toBe(false);
     });
 
     it('reads a pre-1.4 file as having no range and no repeat', () => {

@@ -1,4 +1,4 @@
 export { projectStore } from './projectStore';
 export { playbackStore } from './playbackStore';
-export { autoSaveStore } from './autoSaveStore';
+export { projectFileStore } from './projectFileStore';
 export { clipboardStore } from './clipboardStore';

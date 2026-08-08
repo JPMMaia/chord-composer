@@ -21,6 +21,9 @@ import { useSegmentCopyPaste } from '@/hooks/useSegmentCopyPaste';
 import { usePlaybackShortcuts } from '@/hooks/usePlaybackShortcuts';
 import { useRecordShortcuts } from '@/hooks/useRecordShortcuts';
 import { useFollowPlayhead } from '@/hooks/useFollowPlayhead';
+import { useFileIO } from '@/hooks/useFileIO';
+import { useFileShortcuts } from '@/hooks/useFileShortcuts';
+import { FileIOContext } from '@/context/fileIOContext';
 import { editorStore } from '@/store/editorStore';
 import { songTimeToBeat } from '@/engine/scheduler';
 import {
@@ -178,6 +181,15 @@ function App() {
   // Spacebar toggles play/stop.
   usePlaybackShortcuts({ isPlaying, isLoading, onPlay: handlePlay, onStop: stop });
 
+  // File operations live here rather than in the File menu because the menu is not
+  // the only thing that uses them — the shortcuts below do too, and the auto-save
+  // timer inside has to be the only one in the app. `FileMenu` reads them back out
+  // of the context.
+  const fileIO = useFileIO();
+
+  // Ctrl+S / Ctrl+Shift+S / Ctrl+O.
+  useFileShortcuts(fileIO);
+
   // Gated recording: the key-down call is wrapped so it skips history;
   // the key-up call (in useRecordShortcuts) uses the plain recordSegment,
   // which is captured by the subscribe → one history entry per take.
@@ -285,6 +297,7 @@ function App() {
 
   return (
     <UndoRedoContext.Provider value={undoRedoValue}>
+    <FileIOContext.Provider value={fileIO}>
     <div className="flex flex-col h-screen bg-gray-900 text-gray-100">
       {/* File Menu */}
       <div className="px-4 py-2 bg-gray-800 border-b border-gray-700">
@@ -402,6 +415,7 @@ function App() {
         </div>
       </div>
     </div>
+    </FileIOContext.Provider>
     </UndoRedoContext.Provider>
   );
 }

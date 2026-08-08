@@ -3,17 +3,7 @@ import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { editorStore } from '@/store/editorStore';
 import { flattenSegments } from '@/engine/timeline';
-
-/** True for the elements that own their own arrow keys — selects, text fields. */
-function isTextEntry(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  return (
-    target.tagName === 'INPUT' ||
-    target.tagName === 'SELECT' ||
-    target.tagName === 'TEXTAREA' ||
-    target.isContentEditable
-  );
-}
+import { isTextEntry } from '@/utils/keyboard';
 
 /**
  * Keyboard shortcuts that act on the timeline's selected segments.

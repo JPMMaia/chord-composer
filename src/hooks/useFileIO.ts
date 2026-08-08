@@ -1,20 +1,49 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { Project } from '@/types/music';
 import {
   autoSaveToLocalStorage,
+  clearLocalStorage,
+  deserializeProject,
   loadFromFile,
   loadFromLocalStorage,
-  saveToFile,
+  serializeForSave,
+  serializeProject,
 } from '@/engine/fileIO';
+import {
+  autosaveRef,
+  ensureWritable,
+  fileLabel,
+  pickOpenRef,
+  pickSaveRef,
+  readRef,
+  refExists,
+  refModifiedAt,
+  removeRef,
+  writeRef,
+  type ProjectFileRef,
+} from '@/engine/projectFile';
 import { midiToProject, projectToMidi } from '@/engine/midiExporter';
 import { projectToMusicXML } from '@/engine/musicxmlExporter';
 import { projectStore } from '@/store/projectStore';
+import { projectFileStore } from '@/store/projectFileStore';
 import { captureVst3State } from '@/engine/vst3Instrument';
 
 /** How long to wait after the last change before writing an auto-save. */
 const AUTO_SAVE_DELAY_MS = 5000;
 
 export type AutoSaveStatus = 'idle' | 'pending' | 'saved' | 'error';
+
+/**
+ * Work found in an auto-save that the project file does not have.
+ *
+ * Offered rather than applied. The auto-save is newer, but "newer" is not the same
+ * as "wanted" — the user may have closed the app precisely to throw those changes
+ * away, and silently reopening them would make the explicit save meaningless.
+ */
+export interface RecoveryOffer {
+  project: Project;
+  savedAt: Date;
+}
 
 export interface UseFileIOResult {
   /** Last error raised by a file operation, cleared on the next attempt. */
@@ -23,13 +52,27 @@ export interface UseFileIOResult {
   /** Auto-save state, for the status indicator in the file menu. */
   autoSaveStatus: AutoSaveStatus;
   lastSavedAt: Date | null;
+  /** Name of the file the project is saved in, or null while it is untitled. */
+  currentFileName: string | null;
+  /** True when the project differs from what was last written. */
+  isDirty: boolean;
+  /** Write to the current file, asking for one only if there is none. */
   handleSave: () => Promise<void>;
+  /** Always ask where to write, and adopt that file as the current one. */
+  handleSaveAs: () => Promise<void>;
+  /** Open through the shell's own dialog. */
+  handleOpen: () => Promise<void>;
+  /** Open a `File` from the hidden input, for shells with no dialog. */
   handleLoad: (file: File) => Promise<void>;
+  /** Discard the project and start a fresh one. */
+  handleNew: () => void;
   handleExportMidi: () => void;
   handleExportMusicXML: () => void;
   handleImportMidi: (file: File) => Promise<void>;
-  /** Restore the most recent auto-save; returns false when there is none. */
-  restoreAutoSave: () => boolean;
+  /** Unsaved work found on start-up or on open, awaiting a decision. */
+  recovery: RecoveryOffer | null;
+  acceptRecovery: () => void;
+  discardRecovery: () => void;
 }
 
 /** Turn an arbitrary thrown value into a message suitable for the UI. */
@@ -54,76 +97,246 @@ function downloadBlob(blob: Blob, filename: string): void {
 }
 
 /**
- * File operations for the current project: save/load JSON, MIDI and MusicXML
- * export, MIDI import, and debounced auto-save to localStorage.
+ * Where the auto-save for a given file lives, and how to clear it.
+ *
+ * Two destinations, because only one of them is always available. A desktop project
+ * gets a sidecar file next to itself, which survives the browser's storage being
+ * cleared and is visible to the user. Everything else — an untitled project, or any
+ * browser, where a file handle cannot address its own siblings — falls back to
+ * localStorage, which is where auto-save has always gone.
+ */
+async function writeAutoSave(ref: ProjectFileRef | null, project: Project): Promise<void> {
+  const sidecar = autosaveRef(ref);
+  // Deliberately not `serializeForSave`: an auto-save of a project that would fail
+  // validation is still the only copy of that work, and refusing to write it is the
+  // one outcome with nothing to recover.
+  if (sidecar) await writeRef(sidecar, serializeProject(project));
+  else autoSaveToLocalStorage(project);
+}
+
+async function clearAutoSave(ref: ProjectFileRef | null): Promise<void> {
+  const sidecar = autosaveRef(ref);
+  if (sidecar) await removeRef(sidecar);
+  else clearLocalStorage();
+}
+
+/**
+ * Look for unsaved work belonging to a file, and read it back if it is newer.
+ *
+ * A sidecar older than the project file describes a save that already happened —
+ * that is the normal aftermath of a crash-free session, and offering it back would
+ * train the user to dismiss the prompt.
+ */
+async function findRecovery(ref: ProjectFileRef | null): Promise<RecoveryOffer | null> {
+  const sidecar = autosaveRef(ref);
+
+  if (sidecar) {
+    try {
+      if (!(await refExists(sidecar))) return null;
+      const [sidecarAt, fileAt] = await Promise.all([
+        refModifiedAt(sidecar),
+        ref ? refModifiedAt(ref) : Promise.resolve(null),
+      ]);
+      if (sidecarAt && fileAt && sidecarAt <= fileAt) return null;
+      const project = deserializeProject(await readRef(sidecar));
+      return { project, savedAt: sidecarAt ?? project.updatedAt };
+    } catch {
+      // An unreadable sidecar is not worth reporting: nothing has been lost that
+      // the user knows about, and the project file itself opened fine.
+      return null;
+    }
+  }
+
+  const stored = loadFromLocalStorage();
+  return stored ? { project: stored, savedAt: stored.updatedAt } : null;
+}
+
+/**
+ * File operations for the current project.
+ *
+ * Call this once, at the top of the tree, and share the result through
+ * `fileIOContext` — it owns the auto-save timer, and a second instance would run a
+ * second timer against the same files.
  */
 export function useFileIO(): UseFileIOResult {
   const project = projectStore(state => state.project);
   const loadProject = projectStore(state => state.loadProject);
+  const resetProject = projectStore(state => state.resetProject);
+  const ref = projectFileStore(state => state.ref);
+  const savedSnapshot = projectFileStore(state => state.savedSnapshot);
 
   const [error, setError] = useState<string | null>(null);
   const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>('idle');
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [recovery, setRecovery] = useState<RecoveryOffer | null>(null);
+  // Auto-save waits for the start-up check: writing one before it has run would
+  // overwrite the very work the check exists to find.
+  const [recoveryChecked, setRecoveryChecked] = useState(false);
+
+  const isDirty = project !== null && project !== savedSnapshot;
+
+  // Restore the remembered file and look for unsaved work, once, on mount.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      await projectFileStore.getState().rehydrate();
+      const found = await findRecovery(projectFileStore.getState().ref);
+      if (cancelled) return;
+      setRecovery(found);
+      setRecoveryChecked(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const runAutoSave = useCallback(async () => {
+    const current = projectStore.getState().project;
+    if (!current) return;
+    // Nothing to recover when the file already holds exactly this.
+    if (current === projectFileStore.getState().savedSnapshot) {
+      setAutoSaveStatus('idle');
+      return;
+    }
+    try {
+      // A plugin's preset lives inside the plugin, so it has to be asked for rather
+      // than read from the store, or a recovered project would come back on the
+      // plugin's defaults instead of what was being worked on.
+      const captured = await captureVst3State(current);
+      await writeAutoSave(projectFileStore.getState().ref, captured);
+      setAutoSaveStatus('saved');
+      setLastSavedAt(new Date());
+    } catch {
+      setAutoSaveStatus('error');
+    }
+  }, []);
 
   // Debounced auto-save: every project change restarts the timer.
   useEffect(() => {
-    if (!project) return;
+    if (!project || !recoveryChecked) return;
+    if (project === projectFileStore.getState().savedSnapshot) {
+      setAutoSaveStatus('idle');
+      return;
+    }
 
     setAutoSaveStatus('pending');
-    timeoutRef.current = setTimeout(() => {
-      // Plugin state too, or a restored auto-save would come back on the
-      // plugin's defaults rather than what was being worked on.
-      captureVst3State(project)
-        .then(withState => {
-          autoSaveToLocalStorage(withState);
-          setAutoSaveStatus('saved');
-          setLastSavedAt(new Date());
-        })
-        .catch(() => setAutoSaveStatus('error'));
-    }, AUTO_SAVE_DELAY_MS);
+    const timer = setTimeout(() => void runAutoSave(), AUTO_SAVE_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [project, recoveryChecked, savedSnapshot, runAutoSave]);
 
-    return () => {
-      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+  // Closing the window inside the debounce window would otherwise lose the last few
+  // seconds of work. Only the localStorage write is guaranteed to finish here — a
+  // sidecar write is a round trip to the native side, which the shell may not wait
+  // for — so this is a best-effort flush, not a substitute for the timer above.
+  useEffect(() => {
+    const flush = () => {
+      const current = projectStore.getState().project;
+      if (!current || current === projectFileStore.getState().savedSnapshot) return;
+      void writeAutoSave(projectFileStore.getState().ref, current);
     };
-  }, [project]);
+    window.addEventListener('beforeunload', flush);
+    return () => window.removeEventListener('beforeunload', flush);
+  }, []);
 
   const clearError = useCallback(() => setError(null), []);
 
   /**
-   * Apply a loaded project. Instruments ride along inside it, so this is now just
-   * `loadProject` — it stays as a named seam because three callers share it.
+   * Write the project, to `chosen` if given and otherwise to the file it already
+   * has. Returns false when the user cancelled or the write failed.
    */
-  const applyProject = useCallback(
-    (loaded: Project) => {
+  const saveTo = useCallback(async (chosen: ProjectFileRef | null): Promise<boolean> => {
+    const current = projectStore.getState().project;
+    if (!current) return false;
+    setError(null);
+
+    try {
+      const captured = await captureVst3State(current);
+
+      let target = chosen;
+      if (!target) {
+        const existing = projectFileStore.getState().ref;
+        // A handle restored from a previous session has no permission yet, and the
+        // re-grant prompt only opens from the gesture that got us here.
+        target = existing && (await ensureWritable(existing)) ? existing : null;
+      }
+      if (!target) {
+        target = await pickSaveRef(toFilename(captured.name, 'json'));
+        if (!target) return false; // Cancelled — not an error, and nothing written.
+      }
+
+      await writeRef(target, serializeForSave(captured));
+      projectFileStore.getState().markSaved(current, target);
+      // The explicit save is now the newer truth; a stale auto-save must not
+      // outlive it and offer itself back on the next launch.
+      await clearAutoSave(target);
+      setAutoSaveStatus('idle');
+      setRecovery(null);
+      return true;
+    } catch (err) {
+      setError(toMessage(err, 'Failed to save the project.'));
+      return false;
+    }
+  }, []);
+
+  const handleSave = useCallback(async () => {
+    await saveTo(null);
+  }, [saveTo]);
+
+  const handleSaveAs = useCallback(async () => {
+    const current = projectStore.getState().project;
+    if (!current) return;
+    const target = await pickSaveRef(toFilename(current.name, 'json'));
+    if (!target) return;
+    await saveTo(target);
+  }, [saveTo]);
+
+  /** Apply a project that has just been read, and adopt the file it came from. */
+  const adopt = useCallback(
+    (loaded: Project, from: ProjectFileRef | null) => {
       loadProject(loaded);
+      // `loadProject` normalises what it is given, so the object now in the store is
+      // not the one passed in — and it is that object the dirty check compares.
+      const stored = projectStore.getState().project;
+      if (from && stored) projectFileStore.getState().markSaved(stored, from);
+      else projectFileStore.getState().clear();
     },
     [loadProject]
   );
 
-  const handleSave = useCallback(async () => {
-    if (!project) return;
+  const handleOpen = useCallback(async () => {
     setError(null);
     try {
-      // A plugin's preset lives inside the plugin, so it has to be asked for
-      // rather than read from the store.
-      await saveToFile(await captureVst3State(project), toFilename(project.name, 'json'));
+      const target = await pickOpenRef();
+      if (!target) return;
+      adopt(deserializeProject(await readRef(target)), target);
+      setRecovery(await findRecovery(target));
     } catch (err) {
-      setError(toMessage(err, 'Failed to save the project.'));
+      setError(toMessage(err, 'Failed to open the project file.'));
     }
-  }, [project]);
+  }, [adopt]);
 
   const handleLoad = useCallback(
     async (file: File) => {
       setError(null);
       try {
-        applyProject(await loadFromFile(file));
+        // A `File` from an input is a snapshot, not a reference — there is nothing
+        // to write back to, so the project opens untitled and the first save asks.
+        adopt(await loadFromFile(file), null);
       } catch (err) {
         setError(toMessage(err, 'Failed to load the project file.'));
       }
     },
-    [applyProject]
+    [adopt]
   );
+
+  const handleNew = useCallback(() => {
+    setError(null);
+    setRecovery(null);
+    // `resetProject` leaves the project null; the app's own start-up effect builds
+    // the empty piece, so a new project here is the same one as on first launch.
+    resetProject();
+    projectFileStore.getState().clear();
+  }, [resetProject]);
 
   const handleExportMidi = useCallback(() => {
     if (!project) return;
@@ -152,31 +365,44 @@ export function useFileIO(): UseFileIOResult {
       setError(null);
       try {
         const bytes = new Uint8Array(await file.arrayBuffer());
-        applyProject(midiToProject(bytes));
+        adopt(midiToProject(bytes), null);
       } catch (err) {
         setError(toMessage(err, 'Failed to import the MIDI file.'));
       }
     },
-    [applyProject]
+    [adopt]
   );
 
-  const restoreAutoSave = useCallback((): boolean => {
-    const saved = loadFromLocalStorage();
-    if (!saved) return false;
-    applyProject(saved);
-    return true;
-  }, [applyProject]);
+  const acceptRecovery = useCallback(() => {
+    if (!recovery) return;
+    // The file itself is unchanged, so the project stays dirty against it — which
+    // is true, and means the next Ctrl+S writes the recovered work back.
+    loadProject(recovery.project);
+    setRecovery(null);
+  }, [recovery, loadProject]);
+
+  const discardRecovery = useCallback(() => {
+    void clearAutoSave(projectFileStore.getState().ref);
+    setRecovery(null);
+  }, []);
 
   return {
     error,
     clearError,
     autoSaveStatus,
     lastSavedAt,
+    currentFileName: ref ? fileLabel(ref) : null,
+    isDirty,
     handleSave,
+    handleSaveAs,
+    handleOpen,
     handleLoad,
+    handleNew,
     handleExportMidi,
     handleExportMusicXML,
     handleImportMidi,
-    restoreAutoSave,
+    recovery,
+    acceptRecovery,
+    discardRecovery,
   };
 }

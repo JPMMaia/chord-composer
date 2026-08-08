@@ -1,3 +1,4 @@
+pub mod projectfile;
 pub mod vst3;
 
 /// The native half of Chord Composer.
@@ -8,7 +9,15 @@ pub mod vst3;
 pub fn run() {
     tauri::Builder::default()
         .manage(vst3::Vst3State::default())
+        // The native save/open dialogs. The browser build uses the File System Access
+        // API for the same job; see `src/engine/projectFile.ts`.
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            projectfile::project_read,
+            projectfile::project_write,
+            projectfile::project_exists,
+            projectfile::project_remove,
+            projectfile::project_modified_ms,
             vst3::vst3_list,
             vst3::vst3_scan,
             vst3::vst3_load,

@@ -11,6 +11,7 @@ import type {
   Track,
 } from '@/types/music';
 import type { CopiedSegment } from './clipboardStore';
+import { clearLocalStorage } from '@/engine/fileIO';
 import { generateId } from '@/utils/id';
 import {
   barChords,
@@ -1080,12 +1081,9 @@ export const projectStore = create<ProjectState>((set, get) => ({
 
   resetProject: () => {
     set({ project: null });
-    // Clear autosave
-    try {
-      localStorage.removeItem('chord-composer-autosave');
-    } catch {
-      // Ignore localStorage errors
-    }
+    // The auto-save described a project that no longer exists, so it goes with it —
+    // otherwise the next start-up would offer to recover the piece just discarded.
+    clearLocalStorage();
   },
 
   // Recording gate: execute `fn` while recording mode is active — pushState

@@ -70,6 +70,12 @@ const LEGACY_TRACK_ID = 'track-legacy';
  * bar's scale down onto its segments and the piece sounds identical. The bar's
  * own `scale` is no longer written; a segment with no key of its own falls back
  * to the project key.
+ *
+ * 1.8 also carries `metronomeEnabled`, which the project always had but which no
+ * version ever wrote — reopening a file silently turned the click off. Every file
+ * older than this one, whatever version it states, reads as off, which is exactly
+ * what those files have always come back as; so nothing changes for them and the
+ * version stays where it is.
  */
 export const SCHEMA_VERSION = '1.8';
 
@@ -127,6 +133,10 @@ export function serializeProject(project: Project): string {
     loopStart: project.loopStart,
     loopEnd: project.loopEnd,
     loopEnabled: project.loopEnabled ?? false,
+    // Part of how the piece is worked on rather than of the piece, but it lives on
+    // the project and was being dropped on every round-trip — reopening a file
+    // silently turned the click off.
+    metronomeEnabled: project.metronomeEnabled ?? false,
     tracks: project.tracks.map(t => ({
       id: t.id,
       name: t.name,
@@ -477,6 +487,7 @@ export function deserializeProject(json: string): Project {
     loopStart: hasRange ? (p.loopStart as number) : undefined,
     loopEnd: hasRange ? (p.loopEnd as number) : undefined,
     loopEnabled: p.loopEnabled === true,
+    metronomeEnabled: p.metronomeEnabled === true,
     createdAt: new Date(p.createdAt as string),
     updatedAt: new Date(p.updatedAt as string),
   };
@@ -591,45 +602,19 @@ export function validateProject(project: Project): ValidationResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Save a project to a file using the File System Access API (if available)
- * or fall back to a traditional download via a Blob URL.
+ * The text to write for a project, refusing to produce any for one that is broken.
+ *
+ * Where that text *goes* is not decided here — see `writeRef` in `projectFile.ts`,
+ * which knows about paths, file handles and downloads. This function is the last
+ * gate before a project reaches a file, and the check belongs at that gate rather
+ * than at each of the three call sites that write one.
  */
-export async function saveToFile(project: Project, filename: string): Promise<void> {
+export function serializeForSave(project: Project): string {
   const validation = validateProject(project);
   if (!validation.valid) {
     throw new Error(`Cannot save: ${validation.errors.join(' ')}`);
   }
-
-  const json = serializeProject(project);
-  const blob = new Blob([json], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-
-  // Try File System Access API first
-  if (typeof window !== 'undefined' && 'showSaveFilePicker' in window) {
-    try {
-      const handle = await (window as any).showSaveFilePicker({
-        suggestedName: filename,
-        types: [{
-          description: 'Chord Composer Project',
-          accept: { 'application/json': ['.json'] },
-        }],
-      });
-      const writable = await handle.createWritable();
-      await writable.write(blob);
-      await writable.close();
-      URL.revokeObjectURL(url);
-      return;
-    } catch {
-      // User cancelled or API failed — fall through to download
-    }
-  }
-
-  // Fallback: trigger a download through a detached anchor
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+  return serializeProject(project);
 }
 
 /**

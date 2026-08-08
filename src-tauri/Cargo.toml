@@ -22,6 +22,12 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# The native save/open dialogs. Only the *picker* comes from a plugin: reading and
+# writing go through this crate's own commands in `projectfile`, because the paths
+# a plugin would accept are scoped per-session and the scope is dropped on restart —
+# which is exactly the case quick-save has to survive.
+tauri-plugin-dialog = "2"
+
 # Raw COM bindings generated from the VST 3.8 headers. MIT/Apache — which is the
 # whole reason this is possible without relicensing the project.
 vst3 = "0.3"

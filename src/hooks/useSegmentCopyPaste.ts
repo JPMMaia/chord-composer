@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { clipboardStore } from '@/store/clipboardStore';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
-import { getBarBeats, getTotalBeats } from '@/engine/timeline';
+import { getBarBeats, getTotalBeats, snapBeat } from '@/engine/timeline';
 import { editorStore } from '@/store/editorStore';
 import { isTextEntry } from '@/utils/keyboard';
 
@@ -104,10 +104,18 @@ export function useSegmentCopyPaste(): void {
         const mouseX = lastMouseX.current;
         if (mouseX < rect.left || mouseX > rect.right) return;
 
-        const mouseBeat =
-          (mouseX - rect.left) / editorStore.getState().pixelsPerBeat;
+        const { pixelsPerBeat, snapBeats } = editorStore.getState();
+        const mouseBeat = (mouseX - rect.left) / pixelsPerBeat;
+        // Pull the anchor onto the editing grid before clamping, exactly like
+        // dragging does — a paste must land on the grid, not wherever the pixel
+        // under the cursor happened to fall. Relative spacing between the pasted
+        // segments is preserved by `pasteSegments`, so snapping the anchor snaps
+        // the whole group.
         const totalBeats = getTotalBeats(project.bars, project.timeSignature);
-        const clampedBeat = Math.max(0, Math.min(mouseBeat, totalBeats));
+        const clampedBeat = Math.max(
+          0,
+          Math.min(snapBeat(mouseBeat, snapBeats), totalBeats)
+        );
 
         const target = resolvePasteTarget(
           clampedBeat,

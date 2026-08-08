@@ -4,6 +4,7 @@ import { useSegmentCopyPaste } from '@/hooks/useSegmentCopyPaste';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { clipboardStore } from '@/store/clipboardStore';
+import { editorStore } from '@/store/editorStore';
 import { createUndoRedoMiddleware } from '@/engine/undoRedo';
 import type { Project } from '@/types/music';
 import type { ChordSegment } from '@/types/music';
@@ -167,6 +168,32 @@ describe('useSegmentCopyPaste', () => {
     // Undo reverts to the state before paste
     ur.undo();
     expect(ur.current()?.bars[0].content[trackId()]!.chords.length).toBe(chordCountBefore);
+  });
+
+  it('Ctrl+V snaps the pasted segment to the editing grid', () => {
+    placeAndCopyChord();
+    renderHook(() => useSegmentCopyPaste());
+
+    // A ruler starting at viewport x=0, so mouse x maps straight to pixels.
+    const ruler = document.createElement('div');
+    ruler.setAttribute('data-testid', 'timeline-ruler');
+    ruler.getBoundingClientRect = () =>
+      ({ left: 0, right: 10000, top: 0, bottom: 40, width: 10000, height: 40 }) as DOMRect;
+    document.body.appendChild(ruler);
+
+    const { pixelsPerBeat, snapBeats } = editorStore.getState();
+    expect(snapBeats).toBe(1); // default grid: quarter notes
+
+    // Park the cursor at beat 2.4 — deliberately between grid lines.
+    fireEvent.mouseMove(window, { clientX: 2.4 * pixelsPerBeat });
+    fireEvent.keyDown(window, { key: 'v', ctrlKey: true });
+
+    const chords = state().project!.bars[0].content[trackId()]!.chords;
+    expect(chords.length).toBe(2);
+    const pasted = chords.find(c => c.id !== 'seg-src')!;
+    expect(pasted.startBeat).toBe(2);
+
+    ruler.remove();
   });
 
   it('multiple pastes each create one undo entry', () => {

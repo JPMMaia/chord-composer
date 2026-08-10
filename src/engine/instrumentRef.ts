@@ -12,26 +12,54 @@
  * that survives a project file moving between machines — an install path would
  * not, and the plugin's display name changes between versions. Resolving a class
  * id back to a file on disk is the scanner's job, not this module's.
+ *
+ * An SFZ instrument gets the opposite treatment, because it has no choice: a
+ * sample set on disk has no id, no registry to look it up in, and nothing about
+ * it is globally unique. So the ref *is* the absolute path, and unlike a class id
+ * it does not survive the file being moved or the project being opened on another
+ * machine. That is a real limitation rather than an oversight — the mitigation is
+ * that the picker keeps offering an unrecognised ref rather than quietly replacing
+ * it, so a project that travels comes back with its instrument intact once the
+ * file is found again.
  */
 
 /** The prefix marking a native plugin rather than a General MIDI sound. */
 const VST3_PREFIX = 'vst3:';
+
+/** The prefix marking a local sample set. */
+const SFZ_PREFIX = 'sfz:';
 
 /** A VST3 class id: the 16-byte TUID, lowercase hex. */
 const CLASS_ID_PATTERN = /^[0-9a-f]{32}$/;
 
 export type InstrumentRef =
   | { kind: 'gm'; instrumentId: string }
-  | { kind: 'vst3'; classId: string };
+  | { kind: 'vst3'; classId: string }
+  | { kind: 'sfz'; path: string };
 
 /** Whether a string names a VST3 plugin. Cheap enough for render paths. */
 export function isVst3Ref(instrument: string): boolean {
   return instrument.startsWith(VST3_PREFIX);
 }
 
+/** Whether a string names a local SFZ instrument. */
+export function isSfzRef(instrument: string): boolean {
+  return instrument.startsWith(SFZ_PREFIX);
+}
+
 /** Build the `Track.instrument` value for a plugin class id. */
 export function vst3Ref(classId: string): string {
   return `${VST3_PREFIX}${normalizeClassId(classId)}`;
+}
+
+/**
+ * Build the `Track.instrument` value for a path to an `.sfz`.
+ *
+ * The path is kept exactly as the OS gave it. There is nothing to normalise the way a
+ * class id is normalised, and case-folding it would break every filesystem that cares.
+ */
+export function sfzRef(path: string): string {
+  return `${SFZ_PREFIX}${path}`;
 }
 
 /**
@@ -52,6 +80,13 @@ function normalizeClassId(classId: string): string {
  * unrecognised id to the acoustic grand, which is the app's universal fallback.
  */
 export function parseInstrumentRef(instrument: string): InstrumentRef {
+  if (isSfzRef(instrument)) {
+    const path = instrument.slice(SFZ_PREFIX.length);
+    // A prefix with nothing after it names no file, so it is as malformed as a bad
+    // class id and falls back the same way.
+    return path ? { kind: 'sfz', path } : { kind: 'gm', instrumentId: instrument };
+  }
+
   if (!isVst3Ref(instrument)) {
     return { kind: 'gm', instrumentId: instrument };
   }

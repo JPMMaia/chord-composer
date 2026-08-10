@@ -5,6 +5,7 @@ import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
 import { SmplrPianoInstrument } from '@/engine/smplrPiano';
 import { SoundfontInstrument } from '@/engine/soundfontInstrument';
 import { parseInstrumentRef } from '@/engine/instrumentRef';
+import { SfzInstrument } from '@/engine/sfzInstrument';
 import { Vst3Instrument } from '@/engine/vst3Instrument';
 import { vst3NameFor } from '@/engine/vst3Catalog';
 
@@ -107,6 +108,20 @@ export class InstrumentPool {
       });
 
       return plugin;
+    }
+
+    if (ref.kind === 'sfz') {
+      const sampler = new SfzInstrument(this.ctx, ref.path, this.limiter);
+
+      // Loaded on sight, for the plugin's reason rather than the samplers': the files
+      // are on this machine already, so there is nothing to download and no reason to
+      // make the user press Play before the first audition makes a sound. `load` is
+      // idempotent, so `loadAll` still waits on this same read.
+      sampler.load().catch(err => {
+        console.error('sfz: could not load instrument', err);
+      });
+
+      return sampler;
     }
 
     // The acoustic grand gets smplr's dedicated piano; every other General MIDI

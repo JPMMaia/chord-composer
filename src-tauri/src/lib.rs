@@ -1,3 +1,4 @@
+pub mod localfile;
 pub mod projectfile;
 pub mod vst3;
 
@@ -18,6 +19,9 @@ pub fn run() {
             projectfile::project_exists,
             projectfile::project_remove,
             projectfile::project_modified_ms,
+            localfile::file_read_text,
+            localfile::file_read_bytes,
+            localfile::file_exists,
             vst3::vst3_list,
             vst3::vst3_scan,
             vst3::vst3_load,

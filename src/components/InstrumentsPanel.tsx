@@ -4,10 +4,22 @@ import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { gmInstrumentsByFamily } from '@/engine/instrumentCatalog';
 import { vst3Option } from '@/engine/vst3Catalog';
-import { isVst3Ref, parseInstrumentRef } from '@/engine/instrumentRef';
+import { sfzNameFor, sfzOption } from '@/engine/sfzCatalog';
+import { isSfzRef, isVst3Ref, parseInstrumentRef } from '@/engine/instrumentRef';
 import { openVst3Editor } from '@/engine/vst3Editor';
+import { isTauri } from '@/engine/platform';
 import { useVst3Plugins, type Vst3PluginsState } from '@/hooks/useVst3Plugins';
+import { useSfzInstruments, type SfzInstrumentsState } from '@/hooks/useSfzInstruments';
 import { trackColorAt } from '@/utils/constants';
+
+/**
+ * The picker value that means "open the file dialog" rather than "play this".
+ *
+ * A `<select>` can only offer sounds that already exist, and an SFZ on disk does not
+ * exist as far as the app is concerned until someone points at it — so one entry in
+ * the list is a verb rather than a noun.
+ */
+const LOAD_SFZ_VALUE = '__load-sfz__';
 
 /**
  * The instruments sidebar.
@@ -27,6 +39,10 @@ export const InstrumentsPanel: React.FC = () => {
   // Scanned once for the whole panel rather than per row: the scan is native and
   // expensive, and every row offers the same list.
   const vst3 = useVst3Plugins();
+
+  // Held at the panel for a different reason: loading a file in one row has to appear
+  // in every other row's picker, and one piece of state is what makes that automatic.
+  const sfz = useSfzInstruments();
 
   // Solo is a project-wide mode, not a per-row one — see `isTrackAudible` — so
   // whether anything is soloed has to be decided here, where every row is known.
@@ -65,6 +81,7 @@ export const InstrumentsPanel: React.FC = () => {
           onSelect={(id?: string) => selectTrack(id ?? track.id)}
           silencedBySolo={anySoloed && !track.solo}
           vst3={vst3}
+          sfz={sfz}
         />
       ))}
 
@@ -77,6 +94,22 @@ export const InstrumentsPanel: React.FC = () => {
   );
 };
 
+/**
+ * Whether a track's sound is one the picker has no option for.
+ *
+ * Only ever true of a prefixed ref: a General MIDI id is always in the list, and an
+ * unrecognised one already resolves to the acoustic grand further down.
+ */
+function unlistedRef(
+  instrument: string,
+  vst3Options: { value: string }[],
+  sfzOptions: { value: string }[]
+): boolean {
+  if (isVst3Ref(instrument)) return !vst3Options.some(o => o.value === instrument);
+  if (isSfzRef(instrument)) return !sfzOptions.some(o => o.value === instrument);
+  return false;
+}
+
 interface InstrumentRowProps {
   track: Track;
   index: number;
@@ -86,6 +119,8 @@ interface InstrumentRowProps {
   silencedBySolo: boolean;
   /** Empty in a browser build, and until the native scan finishes. */
   vst3: Vst3PluginsState;
+  /** The sample sets this machine has been shown. Empty in a browser build. */
+  sfz: SfzInstrumentsState;
 }
 
 const InstrumentRow: React.FC<InstrumentRowProps> = ({
@@ -95,6 +130,7 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
   onSelect,
   silencedBySolo,
   vst3,
+  sfz,
 }) => {
   const duplicateTrack = projectStore(s => s.duplicateTrack);
   const removeTrack = projectStore(s => s.removeTrack);
@@ -140,24 +176,52 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
   const color = track.color ?? trackColorAt(index);
 
   const vst3Options = vst3.plugins.map(vst3Option);
+  const sfzOptions = sfz.instruments.map(sfzOption);
+  const ref = parseInstrumentRef(track.instrument);
 
   /**
-   * A plugin the picker cannot offer — the project names one that is not
-   * installed here, or the scan has not finished yet. Without an option
-   * carrying this value the `select` would silently display, and on the next
-   * change submit, some *other* instrument.
+   * A sound the picker cannot offer — the project names a plugin that is not
+   * installed here or a sample set this machine has not been shown, or the scan
+   * has not finished yet. Without an option carrying this value the `select`
+   * would silently display, and on the next change submit, some *other*
+   * instrument.
    */
-  const unresolved =
-    isVst3Ref(track.instrument) && !vst3Options.some(o => o.value === track.instrument)
+  const unresolved = !unlistedRef(track.instrument, vst3Options, sfzOptions)
+    ? null
+    : isVst3Ref(track.instrument)
       ? {
           value: track.instrument,
           label: vst3.loading
             ? 'Loading plugins…'
             : `Missing plugin (${track.instrument.slice(5, 13)}…)`,
         }
-      : null;
+      : {
+          // Not "missing": unlike a plugin there was no scan, so all this says is
+          // that the list has not seen the file — usually a project from another
+          // machine. The instrument still loads if the path is good.
+          value: track.instrument,
+          label: `SFZ ${ref.kind === 'sfz' ? sfzNameFor(ref.path) : track.instrument}`,
+        };
 
-  const ref = parseInstrumentRef(track.instrument);
+  /**
+   * Ask for a file, and set the sound only once one comes back.
+   *
+   * The dialog is asynchronous, so the `select` is put back to what the track really
+   * plays first: until the user has chosen, the row must not claim a sound it has not
+   * got, and a cancelled dialog must leave it exactly as it was.
+   */
+  const loadSfz = (picker: HTMLSelectElement) => {
+    picker.value = track.instrument;
+    sfz
+      .add()
+      .then(instrument => {
+        if (instrument) setTrackInstrument(track.id, instrument);
+      })
+      .catch(err => {
+        console.error('sfz: could not load the instrument', err);
+      });
+  };
+
   // Offered only for a plugin the scan actually found: opening the editor of
   // something that is not installed can only fail.
   const editable = ref.kind === 'vst3' && !unresolved ? ref.classId : null;
@@ -303,11 +367,30 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
         aria-label={`Sound for ${track.name}`}
         value={track.instrument}
         onPointerDown={e => e.stopPropagation()}
-        onChange={e => setTrackInstrument(track.id, e.target.value)}
+        onChange={e => {
+          if (e.target.value === LOAD_SFZ_VALUE) {
+            loadSfz(e.target);
+            return;
+          }
+          setTrackInstrument(track.id, e.target.value);
+        }}
         className="mt-1 w-full bg-gray-700 border border-gray-600 rounded text-gray-200 text-[11px] px-1 py-0.5 focus:outline-none focus:border-indigo-500"
       >
         {unresolved && (
           <option value={unresolved.value}>{unresolved.label}</option>
+        )}
+
+        {/* Desktop only: there is no way to read a file by path in a browser, so
+            offering to load one there could only ever fail. */}
+        {isTauri() && (
+          <optgroup label="SFZ">
+            {sfzOptions.map(option => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+            <option value={LOAD_SFZ_VALUE}>Load SFZ file…</option>
+          </optgroup>
         )}
 
         {/* Above the GM families: on a desktop build these are the sounds the

@@ -9,9 +9,11 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke }));
 const SmplrPianoInstrument = vi.hoisted(() => vi.fn());
 const SoundfontInstrument = vi.hoisted(() => vi.fn());
 const Vst3Instrument = vi.hoisted(() => vi.fn());
+const SfzInstrument = vi.hoisted(() => vi.fn());
 
 vi.mock('@/engine/smplrPiano', () => ({ SmplrPianoInstrument }));
 vi.mock('@/engine/soundfontInstrument', () => ({ SoundfontInstrument }));
+vi.mock('@/engine/sfzInstrument', () => ({ SfzInstrument, resetSfzSampleCache: vi.fn() }));
 vi.mock('@/engine/vst3Instrument', () => ({
   Vst3Instrument,
   syncVst3Clock: vi.fn(),
@@ -23,6 +25,7 @@ import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
 import type { Track } from '@/types/music';
 
 const CLASS_ID = '565354416d736e6f53757267652058ab';
+const SFZ_PATH = 'C:/lib/Ocarina/Ocarina 20241002.sfz';
 
 const track = (over: Partial<Track> = {}): Track => ({
   id: 'track-1',
@@ -56,7 +59,12 @@ beforeEach(() => {
   invoke.mockReset();
   invoke.mockResolvedValue(undefined);
 
-  for (const backend of [SmplrPianoInstrument, SoundfontInstrument, Vst3Instrument]) {
+  for (const backend of [
+    SmplrPianoInstrument,
+    SoundfontInstrument,
+    Vst3Instrument,
+    SfzInstrument,
+  ]) {
     backend.mockReset();
     backend.mockImplementation(function (this: Record<string, unknown>) {
       this.setVolume = vi.fn();
@@ -94,6 +102,51 @@ describe('InstrumentPool backend dispatch', () => {
     const [, trackId, classId] = Vst3Instrument.mock.calls[0];
     expect(trackId).toBe('abc');
     expect(classId).toBe(CLASS_ID);
+  });
+
+  it('gives a namespaced path the local sample player', () => {
+    new InstrumentPool(mockContext()).ensure([
+      track({ id: 'abc', instrument: `sfz:${SFZ_PATH}` }),
+    ]);
+
+    expect(SfzInstrument).toHaveBeenCalledTimes(1);
+    expect(SfzInstrument.mock.calls[0][1]).toBe(SFZ_PATH);
+    expect(SoundfontInstrument).not.toHaveBeenCalled();
+  });
+
+  // The files are on this machine already, so there is nothing to download and no
+  // reason to make the user press Play before the first audition sounds.
+  it('loads a sample set as soon as it is chosen', () => {
+    new InstrumentPool(mockContext()).ensure([track({ instrument: `sfz:${SFZ_PATH}` })]);
+
+    const instance = SfzInstrument.mock.instances[0] as { load: ReturnType<typeof vi.fn> };
+    expect(instance.load).toHaveBeenCalled();
+  });
+
+  it('rebuilds a sample set when its path changes', () => {
+    const pool = new InstrumentPool(mockContext());
+    pool.ensure([track({ id: 'a', instrument: `sfz:${SFZ_PATH}` })]);
+    pool.ensure([track({ id: 'a', instrument: 'sfz:C:/lib/Other/Other.sfz' })]);
+
+    expect(SfzInstrument).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves a sample set alone when nothing about it changed', () => {
+    const pool = new InstrumentPool(mockContext());
+    const sampled = track({ id: 'a', instrument: `sfz:${SFZ_PATH}` });
+
+    pool.ensure([sampled]);
+    pool.ensure([{ ...sampled, volume: 0.5 }]);
+
+    expect(SfzInstrument).toHaveBeenCalledTimes(1);
+  });
+
+  // A prefix naming no file is as malformed as a bad class id.
+  it('falls back to the piano for an empty sample-set path', () => {
+    new InstrumentPool(mockContext()).ensure([track({ instrument: 'sfz:' })]);
+
+    expect(SfzInstrument).not.toHaveBeenCalled();
+    expect(SoundfontInstrument).toHaveBeenCalledTimes(1);
   });
 
   // Files written before instruments could choose a sound leave this behind,

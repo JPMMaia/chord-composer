@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { isVst3Ref, parseInstrumentRef, vst3Ref } from '@/engine/instrumentRef';
+import {
+  isSfzRef,
+  isVst3Ref,
+  parseInstrumentRef,
+  sfzRef,
+  vst3Ref,
+} from '@/engine/instrumentRef';
 import { DEFAULT_INSTRUMENT_ID, GM_INSTRUMENTS } from '@/engine/instrumentCatalog';
 
 /** A syntactically valid VST3 class id: the 16-byte TUID as 32 hex characters. */
@@ -97,5 +103,48 @@ describe('isVst3Ref', () => {
   // different callers, and `parseInstrumentRef` is the one that validates.
   it('is true for a malformed ref that still carries the prefix', () => {
     expect(isVst3Ref('vst3:garbage')).toBe(true);
+  });
+});
+
+/** A real library path: spaces, a drive letter, backslashes, and a `+`. */
+const OCARINA = 'C:\\Users\\JPMMa\\Documents\\SFZ\\Ocarina SFZ+WAV-20241002\\Ocarina.sfz';
+
+describe('sfzRef', () => {
+  it('round-trips through parseInstrumentRef', () => {
+    expect(parseInstrumentRef(sfzRef(OCARINA))).toEqual({ kind: 'sfz', path: OCARINA });
+  });
+
+  // Unlike a class id there is nothing to normalise, and touching the path would
+  // break every filesystem that distinguishes case.
+  it('keeps the path exactly as the OS gave it', () => {
+    expect(sfzRef(OCARINA)).toBe(`sfz:${OCARINA}`);
+    expect(parseInstrumentRef(sfzRef('/home/jp/Lib/A.sfz'))).toEqual({
+      kind: 'sfz',
+      path: '/home/jp/Lib/A.sfz',
+    });
+  });
+
+  it('keeps a colon in the path, which every Windows path has', () => {
+    expect(parseInstrumentRef('sfz:C:/lib/a.sfz')).toEqual({
+      kind: 'sfz',
+      path: 'C:/lib/a.sfz',
+    });
+  });
+
+  // Same posture as a malformed class id: a hand-edited file should still open.
+  it('falls back to GM for a prefix naming no file', () => {
+    expect(parseInstrumentRef('sfz:')).toEqual({ kind: 'gm', instrumentId: 'sfz:' });
+  });
+});
+
+describe('isSfzRef', () => {
+  it('is false for GM ids and plugins', () => {
+    expect(isSfzRef(DEFAULT_INSTRUMENT_ID)).toBe(false);
+    expect(isSfzRef('')).toBe(false);
+    expect(isSfzRef(vst3Ref(VALID_CID))).toBe(false);
+  });
+
+  it('is true for the prefixed form', () => {
+    expect(isSfzRef(sfzRef(OCARINA))).toBe(true);
   });
 });

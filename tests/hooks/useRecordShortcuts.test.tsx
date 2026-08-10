@@ -226,13 +226,26 @@ describe('useRecordShortcuts', () => {
     expect(stopped).toEqual([60, 64, 67]);
   });
 
-  it('names nothing beyond the degrees the key actually has', () => {
-    editorStore.getState().setPaletteScale({ root: 'C', type: 'pentatonicMajor' });
+  it('wraps the degree past the end of the scale into the octave above', () => {
+    editorStore.setState({ paletteMode: 'notes' });
     mount();
-    press(7);
-    release(7);
+    press(8);
+    release(8);
 
-    expect(takes()).toEqual([]);
+    // 8 is 1 an octave up: C4 is 60, so this is C5.
+    expect(started).toEqual([72]);
+    expect(takes()).toEqual(['C5@0+1']);
+  });
+
+  it('wraps at whatever width the scale actually has', () => {
+    editorStore.getState().setPaletteScale({ root: 'C', type: 'pentatonicMajor' });
+    editorStore.setState({ paletteMode: 'notes' });
+    mount();
+    // Five degrees, so 6 is the tonic an octave up rather than nothing at all.
+    press(6);
+    release(6);
+
+    expect(started).toEqual([72]);
   });
 
   it('leaves the key alone while a text field has it', () => {

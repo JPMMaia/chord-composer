@@ -65,7 +65,9 @@ interface UseRecordShortcutsProps {
  *
  * `1`–`9` are the degrees of the palette's current key, in its current mode and
  * register — so `2` is `Dm` in C major with the palette on chords, `Dm7` on sevenths
- * and `D4` on notes. Pressing a key sounds the block; **while armed and playing** it
+ * and `D4` on notes. Degrees past the end of the scale wrap into the octave above,
+ * so on a seven-note scale `8` is `1` an octave up and `9` is `2`.
+ * Pressing a key sounds the block; **while armed and playing** it
  * also writes it to the timeline at the playhead, and releasing the key sets its
  * length. `r` arms and disarms.
  *
@@ -157,10 +159,16 @@ export function useRecordShortcuts({
 
       const { paletteScale, paletteMode, paletteOctave, recordArmed } = editorStore.getState();
       const items = getPaletteItems(paletteScale, paletteMode, paletteOctave);
-      // A pentatonic key has five degrees, not seven; `6` simply names nothing.
-      if (degree >= items.length) return;
+      if (items.length === 0) return;
+      // Past the last degree the run keeps climbing rather than stopping: on a
+      // seven-note scale `8` is `1` an octave up, and on a pentatonic one `6` is —
+      // the same relationship either way, at whatever width the scale happens to be.
+      const shift = Math.floor(degree / items.length);
+      const item = shift
+        ? getPaletteItems(paletteScale, paletteMode, paletteOctave + shift)[degree % items.length]
+        : items[degree];
 
-      const segment = paletteItemToSegment(items[degree], MIN_SEGMENT_BEATS, paletteScale);
+      const segment = paletteItemToSegment(item, MIN_SEGMENT_BEATS, paletteScale);
       const release = auditionSegment(
         getPool()?.get(trackId),
         segment,

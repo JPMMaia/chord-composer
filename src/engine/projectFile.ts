@@ -183,6 +183,30 @@ export async function ensureWritable(ref: ProjectFileRef): Promise<boolean> {
   return (await handle.requestPermission?.({ mode: 'readwrite' })) === 'granted';
 }
 
+/**
+ * Whether a reference can be read right now without asking the user for anything.
+ *
+ * Start-up reopens the remembered file, and start-up has no user gesture to spend: a
+ * desktop path is readable as long as the file is still there, while a restored
+ * browser handle carries no permission until the next save re-grants it. Answering
+ * false is not an error — it means the project opens untitled-looking rather than
+ * with a prompt the user never asked for.
+ */
+export async function canReadSilently(ref: ProjectFileRef): Promise<boolean> {
+  switch (ref.kind) {
+    case 'path':
+      return refExists(ref);
+    case 'handle': {
+      const handle = ref.handle as PermissionCapableHandle;
+      // Nothing to ask means nothing to refuse; the read itself will say.
+      if (!handle.queryPermission) return true;
+      return (await handle.queryPermission({ mode: 'read' })) === 'granted';
+    }
+    case 'download':
+      return false;
+  }
+}
+
 /** Write text to a reference. A `download` ref sends it to the Downloads folder. */
 export async function writeRef(ref: ProjectFileRef, text: string): Promise<void> {
   switch (ref.kind) {

@@ -11,6 +11,7 @@ import {
 } from '@/engine/fileIO';
 import {
   autosaveRef,
+  canReadSilently,
   ensureWritable,
   fileLabel,
   pickOpenRef,
@@ -175,21 +176,6 @@ export function useFileIO(): UseFileIOResult {
 
   const isDirty = project !== null && project !== savedSnapshot;
 
-  // Restore the remembered file and look for unsaved work, once, on mount.
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      await projectFileStore.getState().rehydrate();
-      const found = await findRecovery(projectFileStore.getState().ref);
-      if (cancelled) return;
-      setRecovery(found);
-      setRecoveryChecked(true);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   const runAutoSave = useCallback(async () => {
     const current = projectStore.getState().project;
     if (!current) return;
@@ -302,6 +288,55 @@ export function useFileIO(): UseFileIOResult {
     },
     [loadProject]
   );
+
+  /**
+   * Reopen the file the last session was working in.
+   *
+   * Remembering the file was only ever half of "carry on where I left off": the ref
+   * alone made the title bar name a project whose notes were nowhere on screen,
+   * because the app's start-up effect had already built an empty piece and nothing
+   * ever read the file back.
+   *
+   * A file that has since been deleted or moved is forgotten rather than reported —
+   * on start-up there is nothing the user did to fail, and keeping the ref would
+   * leave the UI naming a file that quick-save cannot reach.
+   */
+  const reopenRemembered = useCallback(async (): Promise<void> => {
+    const ref = projectFileStore.getState().ref;
+    if (!ref) return;
+    try {
+      if (!(await canReadSilently(ref))) {
+        // A missing path is gone for good; a handle is only waiting for permission,
+        // which the next save asks for, so that one is worth keeping.
+        if (ref.kind === 'path') projectFileStore.getState().clear();
+        return;
+      }
+      adopt(deserializeProject(await readRef(ref)), ref);
+    } catch {
+      projectFileStore.getState().clear();
+    }
+  }, [adopt]);
+
+  // Restore the remembered file, read it back, and look for unsaved work — once, on
+  // mount. Auto-save stays parked until this finishes (`recoveryChecked`), so the
+  // empty project the app starts with can never be written over the real one.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      await projectFileStore.getState().rehydrate();
+      if (cancelled) return;
+      await reopenRemembered();
+      const found = await findRecovery(projectFileStore.getState().ref);
+      if (cancelled) return;
+      setRecovery(found);
+      setRecoveryChecked(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Mount-only: reopening again on a later render would throw away live edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleOpen = useCallback(async () => {
     setError(null);

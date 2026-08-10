@@ -89,8 +89,31 @@ pub fn vst3_load(
 }
 
 /// Detach a track's plugin.
+///
+/// Any editor it has open is closed first, and waited for: the window holds an
+/// `IPlugView` belonging to the component that is about to be terminated, and a
+/// plugin still drawing into a window whose component has gone takes the app
+/// down with it.
 #[tauri::command]
-pub fn vst3_unload(state: tauri::State<'_, Vst3State>, track_id: String) -> Result<(), String> {
+pub fn vst3_unload(
+    #[allow(unused_variables)] app: tauri::AppHandle,
+    state: tauri::State<'_, Vst3State>,
+    track_id: String,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        if editor::is_open(&track_id) {
+            let id = track_id.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.run_on_main_thread(move || {
+                editor::close(&id);
+                let _ = tx.send(());
+            })
+            .map_err(|e| format!("could not reach the main thread: {e}"))?;
+            let _ = rx.recv();
+        }
+    }
+
     state.with_engine(|engine| engine.unload(&track_id))
 }
 

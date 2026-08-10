@@ -125,6 +125,28 @@ describe('InstrumentPool backend dispatch', () => {
     expect(Vst3Instrument).toHaveBeenCalledTimes(1);
   });
 
+  // Until the plugin exists there is nothing for its editor to show, so a
+  // freshly chosen plugin has to come up without waiting for Play.
+  it('loads a plugin as soon as it is chosen', () => {
+    new InstrumentPool(mockContext()).ensure([
+      track({ id: 'abc', instrument: `vst3:${CLASS_ID}` }),
+    ]);
+
+    const instance = Vst3Instrument.mock.instances[0] as { load: ReturnType<typeof vi.fn> };
+    expect(instance.load).toHaveBeenCalled();
+  });
+
+  // Samplers download their samples, which is not work to do before it is asked
+  // for.
+  it('leaves a sampler to load at Play', () => {
+    new InstrumentPool(mockContext()).ensure([track({ instrument: 'string_ensemble_1' })]);
+
+    const instance = SoundfontInstrument.mock.instances[0] as {
+      load: ReturnType<typeof vi.fn>;
+    };
+    expect(instance.load).not.toHaveBeenCalled();
+  });
+
   it('disposes a plugin when its track goes away', () => {
     const pool = new InstrumentPool(mockContext());
     pool.ensure([track({ id: 'a', instrument: `vst3:${CLASS_ID}` })]);

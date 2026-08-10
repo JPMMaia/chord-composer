@@ -87,13 +87,26 @@ export class InstrumentPool {
     const ref = parseInstrumentRef(instrumentId);
 
     if (ref.kind === 'vst3') {
-      return new Vst3Instrument(
+      const plugin = new Vst3Instrument(
         this.ctx,
         trackId,
         ref.classId,
         vst3NameFor(ref.classId),
         vst3State
       );
+
+      // Loaded as soon as it is chosen, rather than at the first Play like the
+      // samplers. A plugin is on this machine already, so there is nothing to
+      // download and no reason to defer — and until it exists there is nothing
+      // to open an editor onto, which would mean pressing Play before you could
+      // pick an articulation.
+      plugin.load().catch(err => {
+        // A plugin that will not load is reported when Play retries it; failing
+        // here would be a rejection nobody is waiting on.
+        console.error('vst3: could not load plugin', err);
+      });
+
+      return plugin;
     }
 
     // The acoustic grand gets smplr's dedicated piano; every other General MIDI

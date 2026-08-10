@@ -190,6 +190,33 @@ describe('Vst3Instrument', () => {
     expect(callsTo('vst3_set_volume')).toEqual([[{ trackId: TRACK, volume: 0.4 }]]);
   });
 
+  // The pool sets a volume the moment it builds an instrument, which for a
+  // plugin is before the native side has anything to set it on. Without this a
+  // plugin comes up at full volume however the track's fader is set.
+  it('re-applies a volume that was set before the plugin existed', async () => {
+    const instrument = makeLoaded();
+    instrument.setVolume(0.25);
+
+    await instrument.load();
+
+    expect(callsTo('vst3_set_volume').at(-1)).toEqual([{ trackId: TRACK, volume: 0.25 }]);
+  });
+
+  it('re-applies only the last volume set before the plugin existed', async () => {
+    const instrument = makeLoaded();
+    instrument.setVolume(0.25);
+    instrument.setVolume(0.75);
+
+    await instrument.load();
+
+    // Two while unloaded, one re-applied — not one re-application each.
+    expect(callsTo('vst3_set_volume')).toEqual([
+      [{ trackId: TRACK, volume: 0.25 }],
+      [{ trackId: TRACK, volume: 0.75 }],
+      [{ trackId: TRACK, volume: 0.75 }],
+    ]);
+  });
+
   describe('dispose', () => {
     it('unloads the plugin', async () => {
       const instrument = makeLoaded();

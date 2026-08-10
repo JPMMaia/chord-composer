@@ -38,6 +38,14 @@ const MAX_BLOCK: usize = 2048;
 /// A slot index in the audio thread's plugin table.
 type SlotId = u32;
 
+/// What a track currently hosts.
+struct Hosted {
+    slot: SlotId,
+    /// Which plugin class is in that slot, so a redundant load can be
+    /// recognised as one.
+    class_id: String,
+}
+
 /// A `Plugin` on its way to or from the audio thread.
 ///
 /// VST3 explicitly allows a component to be created on one thread and processed
@@ -79,8 +87,8 @@ pub struct Engine {
     /// Plugins the audio thread has handed back, waiting to be dropped here
     /// rather than on it.
     retired: Mutex<mpsc::Receiver<Box<SendPlugin>>>,
-    /// Which slot each track's plugin lives in.
-    slots: Mutex<HashMap<String, SlotId>>,
+    /// What each track hosts, and where.
+    slots: Mutex<HashMap<String, Hosted>>,
     /// Control-side component references, for state.
     components: Mutex<HashMap<String, SendComponent>>,
     /// Control-side controller references, for the editor.
@@ -172,7 +180,17 @@ impl Engine {
 
     /// Load `class_id` from `path` and attach it to `track_id`, replacing
     /// whatever that track had.
+    ///
+    /// A track already hosting this exact plugin is left strictly alone. The
+    /// call arrives more than once by design — the editor loads on demand and
+    /// Play loads again — and a second instance would come up on its defaults,
+    /// discarding whatever was set up in the plugin's own editor and leaving
+    /// that editor attached to a component about to be terminated.
     pub fn load(&self, track_id: &str, path: &PathBuf, class_id: &str) -> Result<(), String> {
+        if self.hosts(track_id, class_id) {
+            return Ok(());
+        }
+
         self.collect_retired();
 
         // Built here, on this thread: loading a plugin reads files, allocates
@@ -200,17 +218,25 @@ impl Engine {
         drop(controllers);
 
         let mut slots = self.slots.lock().unwrap();
+        // Reusing the track's slot when it had one: a track changing plugin
+        // must not leak the slot the old one occupied.
         let slot = match slots.get(track_id) {
-            Some(existing) => *existing,
+            Some(existing) => existing.slot,
             None => {
-                let used: Vec<SlotId> = slots.values().copied().collect();
-                let free = (0..MAX_PLUGINS as SlotId)
+                let used: Vec<SlotId> = slots.values().map(|h| h.slot).collect();
+                (0..MAX_PLUGINS as SlotId)
                     .find(|s| !used.contains(s))
-                    .ok_or("no free plugin slots")?;
-                slots.insert(track_id.to_string(), free);
-                free
+                    .ok_or("no free plugin slots")?
             }
         };
+        slots.insert(
+            track_id.to_string(),
+            Hosted {
+                slot,
+                class_id: class_id.to_string(),
+            },
+        );
+        drop(slots);
 
         self.send(Command::Insert {
             slot,
@@ -231,9 +257,9 @@ impl Engine {
         self.components.lock().unwrap().remove(track_id);
         self.controllers.lock().unwrap().remove(track_id);
 
-        let slot = self.slots.lock().unwrap().remove(track_id);
-        if let Some(slot) = slot {
-            self.send(Command::Remove { slot })?;
+        let hosted = self.slots.lock().unwrap().remove(track_id);
+        if let Some(hosted) = hosted {
+            self.send(Command::Remove { slot: hosted.slot })?;
         }
         self.collect_retired();
         Ok(())
@@ -286,8 +312,17 @@ impl Engine {
         self.slots.lock().unwrap().contains_key(track_id)
     }
 
+    /// Whether `track_id` already hosts exactly `class_id`.
+    fn hosts(&self, track_id: &str, class_id: &str) -> bool {
+        self.slots
+            .lock()
+            .unwrap()
+            .get(track_id)
+            .is_some_and(|hosted| hosted.class_id == class_id)
+    }
+
     fn slot_of(&self, track_id: &str) -> Option<SlotId> {
-        self.slots.lock().unwrap().get(track_id).copied()
+        self.slots.lock().unwrap().get(track_id).map(|h| h.slot)
     }
 
     /// Schedule one note. `host_time` and `duration` are in the webview's

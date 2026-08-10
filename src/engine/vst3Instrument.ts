@@ -153,6 +153,15 @@ export class Vst3Instrument implements Instrument {
   /** The preset to restore once the plugin exists, from the project file. */
   private initialState: string | undefined;
 
+  /**
+   * A volume set before the plugin existed, or null if none was.
+   *
+   * The pool sets a volume on an instrument the moment it builds one, which for
+   * a plugin is before the native side has anything to set it on — so it is
+   * kept here and applied once the plugin exists.
+   */
+  private pendingVolume: number | null = null;
+
   constructor(
     audioContext: AudioContext,
     trackId: string,
@@ -218,6 +227,9 @@ export class Vst3Instrument implements Instrument {
         if (this.disposed) return;
         this.loaded = true;
         live.set(this.trackId, this);
+        // Whatever the track's volume was set to while there was no plugin to
+        // set it on.
+        if (this.pendingVolume !== null) this.setVolume(this.pendingVolume);
         // Starting the clock only once a plugin exists keeps a project with no
         // VST3 tracks from ever opening a native audio device.
         sharedClock.acquire(this.ctx);
@@ -258,6 +270,8 @@ export class Vst3Instrument implements Instrument {
 
   setVolume(volume: number): void {
     if (this.disposed) return;
+
+    this.pendingVolume = this.loaded ? null : volume;
     invoke('vst3_set_volume', { trackId: this.trackId, volume }).catch(() => {});
   }
 

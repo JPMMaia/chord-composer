@@ -228,9 +228,11 @@ fn plugin_state_round_trips() {
 }
 
 // A fresh instance must come up on its own defaults, or a "restored" project
-// would silently inherit whatever the last one happened to be set to.
+// would silently inherit whatever the last one happened to be set to. Detaching
+// is what makes an instance fresh — the webview unloads a track's plugin before
+// putting a different one on it.
 #[test]
-fn a_freshly_loaded_plugin_starts_from_its_defaults() {
+fn a_plugin_loaded_after_an_unload_starts_from_its_defaults() {
     let Some(engine) = engine() else { return };
 
     let path = fixture();
@@ -238,10 +240,28 @@ fn a_freshly_loaded_plugin_starts_from_its_defaults() {
     engine.load(TRACK, &path, &cid).expect("plugin loads");
     engine.set_state(TRACK, vec![9, 8, 7, 6]).expect("set");
 
-    // Replacing the plugin on the same track is what reopening a project does.
+    engine.unload(TRACK).expect("unload");
     engine.load(TRACK, &path, &cid).expect("plugin reloads");
 
     assert_eq!(engine.get_state(TRACK).expect("get"), DEFAULT_BLOB);
+}
+
+// The same plugin is loaded onto the same track more than once by design: the
+// editor loads on demand and Play loads again. Rebuilding it would throw away
+// everything the user set up in the editor — and leave that editor attached to
+// a component on its way to being terminated.
+#[test]
+fn re_loading_the_same_plugin_leaves_it_exactly_as_it_was() {
+    let Some(engine) = engine() else { return };
+
+    let path = fixture();
+    let cid = class_id(&path);
+    engine.load(TRACK, &path, &cid).expect("plugin loads");
+    engine.set_state(TRACK, vec![9, 8, 7, 6]).expect("set");
+
+    engine.load(TRACK, &path, &cid).expect("second load");
+
+    assert_eq!(engine.get_state(TRACK).expect("get"), vec![9, 8, 7, 6]);
 }
 
 #[test]

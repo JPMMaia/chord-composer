@@ -84,6 +84,28 @@ describe('InstrumentsPanel', () => {
     expect(tracks()[0].muted).toBe(false);
   });
 
+  it('solos and unsolos an instrument', () => {
+    render(<InstrumentsPanel />);
+
+    fireEvent.click(screen.getByLabelText('Solo Piano'));
+    expect(tracks()[0].solo).toBe(true);
+
+    fireEvent.click(screen.getByLabelText('Unsolo Piano'));
+    expect(tracks()[0].solo).toBe(false);
+  });
+
+  // Solo is project-wide: soloing one instrument is what silences the others, so
+  // the rows that are not soloed have to say so.
+  it('marks the instruments a solo silences', () => {
+    projectStore.getState().addTrack('Strings');
+    render(<InstrumentsPanel />);
+
+    fireEvent.click(screen.getByLabelText('Solo Piano'));
+
+    expect(screen.getByLabelText('Solo Strings').className).toContain('text-yellow-600/70');
+    expect(screen.getByLabelText('Unsolo Piano').className).toContain('bg-yellow-500');
+  });
+
   it('hides and shows an instrument\'s notes', () => {
     render(<InstrumentsPanel />);
 

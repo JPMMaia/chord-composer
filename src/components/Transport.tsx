@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import type { TimeSignature } from '@/types/music';
+import { SongTimer } from '@/components/SongTimer';
 
 interface TransportProps {
   isPlaying: boolean;
@@ -20,6 +21,8 @@ interface TransportProps {
   isRecordArmed: boolean;
   /** Whether a recorded take snaps to the timeline's grid. */
   recordQuantize: boolean;
+  /** Live song position in seconds, for the timer readout. From `usePlayback`. */
+  getSongTime: () => number;
   onPlay: () => void;
   onPause: () => void;
   onStop: () => void;
@@ -54,6 +57,7 @@ export const Transport: React.FC<TransportProps> = ({
   isMetronomeOn,
   isRecordArmed,
   recordQuantize,
+  getSongTime,
   onPlay,
   onPause,
   onStop,
@@ -141,6 +145,9 @@ export const Transport: React.FC<TransportProps> = ({
           ⏺ Record
         </button>
       </div>
+
+      {/* Timer readout — beside the controls that move it. */}
+      <SongTimer getSongTime={getSongTime} isPlaying={isPlaying} isPaused={isPaused} />
 
       {/* BPM control */}
       <div className="flex items-center gap-2">

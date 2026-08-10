@@ -318,6 +318,7 @@ function App() {
         isMetronomeOn={metronomeEnabled}
         isRecordArmed={recordArmed}
         recordQuantize={recordQuantize}
+        getSongTime={getSongTime}
         onPlay={handlePlay}
         onPause={pause}
         onStop={stop}

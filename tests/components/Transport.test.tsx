@@ -23,6 +23,7 @@ describe('Transport', () => {
     loopRangeLabel: null,
     isRecordArmed: false,
     recordQuantize: true,
+    getSongTime: () => 0,
     onRecordToggle: mockOnRecordToggle,
     onQuantizeToggle: mockOnQuantizeToggle,
     onPlay: mockOnPlay,
@@ -44,6 +45,11 @@ describe('Transport', () => {
     render(<Transport {...defaultProps} />);
     const bpmInput = screen.getByLabelText('BPM') as HTMLInputElement;
     expect(bpmInput.value).toBe('120');
+  });
+
+  it('shows the song timer', () => {
+    render(<Transport {...defaultProps} />);
+    expect(screen.getByTestId('song-timer')).toBeInTheDocument();
   });
 
   it('shows current time signature', () => {

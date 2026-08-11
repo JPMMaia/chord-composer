@@ -157,6 +157,61 @@ describe('Vst3Instrument', () => {
     });
   });
 
+  // A held key has no length when it starts, so it cannot go through
+  // `schedule` — which would have to guess one, and a library with a slow
+  // release goes on sounding for whatever it guessed.
+  describe('sustain', () => {
+    it('holds the note and releases it only when told to', async () => {
+      const instrument = makeLoaded();
+      await instrument.load();
+
+      const release = instrument.sustain({ midiNote: 64, velocity: 90 });
+      await flushed();
+
+      expect(callsTo('vst3_hold')).toEqual([[{ trackId: TRACK, midiNote: 64, velocity: 90 }]]);
+      expect(callsTo('vst3_release')).toHaveLength(0);
+
+      release();
+      await flushed();
+
+      expect(callsTo('vst3_release')).toEqual([[{ trackId: TRACK, midiNote: 64 }]]);
+    });
+
+    // Two `invoke`s are two independent round trips: an off that overtook its
+    // on would leave the note sounding until the next Stop.
+    it('does not release before the hold has landed', async () => {
+      let land: () => void = () => {};
+      invoke.mockImplementation((command: string) =>
+        command === 'vst3_hold'
+          ? new Promise<void>(resolve => {
+              land = resolve;
+            })
+          : Promise.resolve()
+      );
+
+      const instrument = makeLoaded();
+      await instrument.load();
+
+      instrument.sustain({ midiNote: 64, velocity: 90 })();
+      await flushed();
+      expect(callsTo('vst3_release')).toHaveLength(0);
+
+      land();
+      await flushed();
+      expect(callsTo('vst3_release')).toHaveLength(1);
+    });
+
+    it('sends nothing before the plugin has loaded', async () => {
+      const instrument = makeLoaded();
+
+      instrument.sustain({ midiNote: 64, velocity: 90 })();
+      await flushed();
+
+      expect(callsTo('vst3_hold')).toHaveLength(0);
+      expect(callsTo('vst3_release')).toHaveLength(0);
+    });
+  });
+
   describe('stopAll', () => {
     it('stops this track rather than every track', async () => {
       const instrument = makeLoaded();

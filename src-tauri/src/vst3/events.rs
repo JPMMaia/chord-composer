@@ -38,18 +38,46 @@ impl EventKind {
     }
 }
 
-/// Anything scheduled at or before this frame is "immediately" — used for the
-/// note-offs that a stop has to emit without knowing the current frame.
+/// Anything scheduled at or before this frame is "immediately" — the frame an
+/// event carries when it was queued without reference to the clock at all.
 const IMMEDIATELY: i64 = i64::MIN;
+
+/// How many immediate events may queue up between two blocks. A held chord is
+/// a handful, a stop at most 128; the rest is headroom.
+const IMMEDIATE_CAPACITY: usize = 256;
 
 /// The pending events for one plugin, and which of its notes are sounding.
 pub struct Scheduler {
     /// Sorted by `(frame, kind)`. Never grows past its initial capacity.
     pending: Vec<Event>,
+    /// Events that belong in the next block whatever frame it starts at, in the
+    /// order they were queued.
+    ///
+    /// Kept apart from `pending` rather than given a sentinel frame in it,
+    /// because `pending` is sorted with offs before ons — right for a note
+    /// repeated on the same beat, and exactly wrong for a key pressed and
+    /// released inside one block, which would release before it sounded and
+    /// hang forever.
+    immediate: Vec<Event>,
     /// Pitches currently held down, so a stop knows what to release.
     sounding: Vec<i16>,
     /// Events refused because the buffer was full, for diagnostics.
     dropped: u64,
+}
+
+/// Track what a single event does to the set of sounding pitches.
+///
+/// A free function rather than a method: the callers are iterating over another
+/// of the scheduler's fields, and borrowck sees fields, not methods.
+fn mark(sounding: &mut Vec<i16>, event: &Event) {
+    match event.kind {
+        EventKind::NoteOn { .. } => {
+            if !sounding.contains(&event.pitch) {
+                sounding.push(event.pitch);
+            }
+        }
+        EventKind::NoteOff => sounding.retain(|p| *p != event.pitch),
+    }
 }
 
 impl Scheduler {
@@ -58,6 +86,7 @@ impl Scheduler {
     pub fn new(capacity: usize) -> Scheduler {
         Scheduler {
             pending: Vec::with_capacity(capacity),
+            immediate: Vec::with_capacity(IMMEDIATE_CAPACITY),
             // 128 MIDI pitches is the hard ceiling on simultaneously held notes.
             sounding: Vec::with_capacity(128),
             dropped: 0,
@@ -106,6 +135,36 @@ impl Scheduler {
         true
     }
 
+    /// Sound `pitch` in the next block and hold it until it is released.
+    ///
+    /// The counterpart to `schedule_note` for a note whose length is not known
+    /// when it starts — a key being held down. No off is queued for it, so the
+    /// only things that will ever release it are [`Scheduler::release_note`]
+    /// and a stop.
+    pub fn hold_note(&mut self, pitch: i16, velocity: u8) {
+        self.queue_immediate(pitch, EventKind::NoteOn { velocity });
+    }
+
+    /// Release a held note in the next block.
+    ///
+    /// Harmless for a pitch that is not sounding: an unmatched off is what a
+    /// plugin already has to tolerate from any MIDI keyboard.
+    pub fn release_note(&mut self, pitch: i16) {
+        self.queue_immediate(pitch, EventKind::NoteOff);
+    }
+
+    fn queue_immediate(&mut self, pitch: i16, kind: EventKind) {
+        if self.immediate.len() == self.immediate.capacity() {
+            self.dropped += 1;
+            return;
+        }
+        self.immediate.push(Event {
+            frame: IMMEDIATELY,
+            pitch,
+            kind,
+        });
+    }
+
     /// Insert keeping `pending` sorted. Does not allocate: the caller has
     /// already checked there is room.
     fn insert(&mut self, event: Event) {
@@ -124,11 +183,14 @@ impl Scheduler {
     /// every plugin does.
     pub fn stop_all(&mut self) {
         self.pending.clear();
+        // Whatever was queued for the next block has not sounded yet, so a stop
+        // cancels it rather than releasing it.
+        self.immediate.clear();
 
-        // `sounding` is drained into `pending`, which was just emptied, so the
-        // capacity is guaranteed to be there.
+        // `sounding` holds at most 128 pitches and `immediate` was just
+        // emptied, so the capacity is guaranteed to be there.
         for pitch in std::mem::take(&mut self.sounding) {
-            self.pending.push(Event {
+            self.immediate.push(Event {
                 frame: IMMEDIATELY,
                 pitch,
                 kind: EventKind::NoteOff,
@@ -146,24 +208,28 @@ impl Scheduler {
     /// the only option once its moment has passed, and is far better than
     /// dropping it.
     pub fn take_due<F: FnMut(u32, Event)>(&mut self, block_start: i64, block_end: i64, mut emit: F) {
+        // Immediate events first, and among themselves in the order they were
+        // queued: press-then-release inside one block has to reach the plugin
+        // that way round.
+        //
+        // Moved out and put back rather than drained in place, so the loop can
+        // reach `sounding` — and so the buffer keeps its capacity, which is
+        // what makes this allocation-free.
+        let mut immediate = std::mem::take(&mut self.immediate);
+        for event in immediate.drain(..) {
+            mark(&mut self.sounding, &event);
+            emit(0, event);
+        }
+        self.immediate = immediate;
+
         let count = self.pending.partition_point(|e| e.frame < block_end);
 
         for event in self.pending.drain(..count) {
-            // Saturating, not plain subtraction: the `IMMEDIATELY` sentinel a
-            // stop uses is `i64::MIN`, which underflows against any block start.
+            // Saturating, not plain subtraction: a late event's frame can sit
+            // arbitrarily far behind the block start.
             let offset = event.frame.saturating_sub(block_start).max(0) as u32;
 
-            match event.kind {
-                EventKind::NoteOn { .. } => {
-                    if !self.sounding.contains(&event.pitch) {
-                        self.sounding.push(event.pitch);
-                    }
-                }
-                EventKind::NoteOff => {
-                    self.sounding.retain(|p| *p != event.pitch);
-                }
-            }
-
+            mark(&mut self.sounding, &event);
             emit(offset, event);
         }
     }
@@ -311,6 +377,58 @@ mod tests {
 
         s.stop_all();
         assert!(due(&mut s, 1_024, 2_048).is_empty());
+    }
+
+    #[test]
+    fn a_held_note_sounds_in_the_next_block_and_stays_down() {
+        let mut s = Scheduler::new(16);
+        s.hold_note(60, 90);
+
+        let events = due(&mut s, 5_000, 5_512);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, 0);
+        assert_eq!(events[0].1.kind, on(90));
+
+        // Nothing releases it on its own, however many blocks go by.
+        assert!(due(&mut s, 5_512, 100_000).is_empty());
+    }
+
+    #[test]
+    fn releasing_a_held_note_stops_it_in_the_next_block() {
+        let mut s = Scheduler::new(16);
+        s.hold_note(60, 90);
+        due(&mut s, 0, 512);
+
+        s.release_note(60);
+
+        let events = due(&mut s, 512, 1_024);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], (0, Event { frame: i64::MIN, pitch: 60, kind: EventKind::NoteOff }));
+    }
+
+    // The whole reason immediate events are kept out of the sorted buffer: in
+    // there the off would sort ahead of the on and the note would hang.
+    #[test]
+    fn a_key_pressed_and_released_within_one_block_still_releases() {
+        let mut s = Scheduler::new(16);
+        s.hold_note(60, 90);
+        s.release_note(60);
+
+        let kinds: Vec<EventKind> = due(&mut s, 0, 512).iter().map(|(_, e)| e.kind).collect();
+        assert_eq!(kinds, vec![on(90), EventKind::NoteOff]);
+    }
+
+    #[test]
+    fn stop_releases_a_held_note_too() {
+        let mut s = Scheduler::new(16);
+        s.hold_note(60, 90);
+        due(&mut s, 0, 512);
+
+        s.stop_all();
+
+        let events = due(&mut s, 512, 1_024);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1.kind, EventKind::NoteOff);
     }
 
     // A note-on with no matching off sounds forever, so the pair is refused

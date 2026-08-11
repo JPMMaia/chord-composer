@@ -184,6 +184,32 @@ pub fn vst3_schedule(
     })
 }
 
+/// Sound a note now and hold it until `vst3_release`.
+///
+/// What a held key needs, and what `vst3_schedule` cannot express: a scheduled
+/// note carries its length up front, so playing a key through it means guessing
+/// how long it will be held. Guessing long leaves a plugin with a slow release —
+/// an orchestral library, typically — sounding well after the key came up.
+#[tauri::command]
+pub fn vst3_hold(
+    state: tauri::State<'_, Vst3State>,
+    track_id: String,
+    midi_note: i16,
+    velocity: u8,
+) -> Result<(), String> {
+    state.with_engine(|engine| engine.hold(&track_id, midi_note, velocity))
+}
+
+/// Release a note held by `vst3_hold`.
+#[tauri::command]
+pub fn vst3_release(
+    state: tauri::State<'_, Vst3State>,
+    track_id: String,
+    midi_note: i16,
+) -> Result<(), String> {
+    state.with_engine(|engine| engine.release(&track_id, midi_note))
+}
+
 /// Re-anchor the native clock against the webview's.
 #[tauri::command]
 pub fn vst3_sync(state: tauri::State<'_, Vst3State>, host_time: f64) -> Result<(), String> {

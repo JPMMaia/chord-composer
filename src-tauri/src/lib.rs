@@ -30,6 +30,8 @@ pub fn run() {
             vst3::vst3_load,
             vst3::vst3_unload,
             vst3::vst3_schedule,
+            vst3::vst3_hold,
+            vst3::vst3_release,
             vst3::vst3_sync,
             vst3::vst3_set_volume,
             vst3::vst3_stop,

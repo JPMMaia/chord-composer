@@ -260,6 +260,42 @@ export class Vst3Instrument implements Instrument {
     });
   }
 
+  /**
+   * Sound a note for as long as the returned function goes uncalled.
+   *
+   * Not expressible through `schedule`, which wants a length up front: a held
+   * key has none, and the fixed-length preview `audition.ts` falls back to
+   * leaves a slow-releasing library — an orchestral one, typically — sounding
+   * long after the key came up.
+   *
+   * The release is chained onto the hold rather than fired alongside it. Two
+   * `invoke`s are two independent round trips and nothing promises they arrive
+   * in order; an off overtaking its on would hang the note until the next Stop.
+   */
+  sustain(note: { midiNote: number; velocity: number }): () => void {
+    if (this.disposed || !this.loaded) return () => {};
+
+    const held = invoke('vst3_hold', {
+      trackId: this.trackId,
+      midiNote: note.midiNote,
+      velocity: note.velocity,
+    }).catch(err => {
+      console.error('vst3: could not hold note', err);
+    });
+
+    return () => {
+      void held.then(() => {
+        if (this.disposed) return;
+        invoke('vst3_release', {
+          trackId: this.trackId,
+          midiNote: note.midiNote,
+        }).catch(err => {
+          console.error('vst3: could not release note', err);
+        });
+      });
+    };
+  }
+
   stopAll(): void {
     if (this.disposed) return;
     // Drop anything not yet sent as well, or a Stop is immediately followed by

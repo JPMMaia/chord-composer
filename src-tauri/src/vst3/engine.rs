@@ -68,6 +68,9 @@ enum Command {
     Insert { slot: SlotId, plugin: Box<SendPlugin> },
     Remove { slot: SlotId },
     Note { slot: SlotId, pitch: i16, velocity: u8, host_time: f64, duration: f64 },
+    /// Sound a note now and hold it until a `Release` for the same pitch.
+    Hold { slot: SlotId, pitch: i16, velocity: u8 },
+    Release { slot: SlotId, pitch: i16 },
     Gain { slot: SlotId, gain: f32 },
     /// Release everything sounding on one plugin.
     Stop { slot: SlotId },
@@ -384,6 +387,30 @@ impl Engine {
             host_time,
             duration,
         })
+    }
+
+    /// Sound one note now and hold it down.
+    ///
+    /// For a key being held, whose length is not known when it starts — so it
+    /// carries no time and no duration, and goes out in the next block rather
+    /// than being placed on the clock. [`Engine::release`] ends it.
+    pub fn hold(&self, track_id: &str, pitch: i16, velocity: u8) -> Result<(), String> {
+        let Some(slot) = self.slot_of(track_id) else {
+            return Ok(());
+        };
+        self.send(Command::Hold {
+            slot,
+            pitch,
+            velocity,
+        })
+    }
+
+    /// Release a note held by [`Engine::hold`].
+    pub fn release(&self, track_id: &str, pitch: i16) -> Result<(), String> {
+        let Some(slot) = self.slot_of(track_id) else {
+            return Ok(());
+        };
+        self.send(Command::Release { slot, pitch })
     }
 
     pub fn set_gain(&self, track_id: &str, gain: f32) -> Result<(), String> {
@@ -737,6 +764,20 @@ fn apply(
                     .0
                     .scheduler
                     .schedule_note(pitch, velocity, at, clock.frames_in(duration));
+            }
+        }
+        Command::Hold {
+            slot: id,
+            pitch,
+            velocity,
+        } => {
+            if let Some(slot) = slots.iter_mut().find(|s| s.id == id) {
+                slot.plugin.0.scheduler.hold_note(pitch, velocity);
+            }
+        }
+        Command::Release { slot: id, pitch } => {
+            if let Some(slot) = slots.iter_mut().find(|s| s.id == id) {
+                slot.plugin.0.scheduler.release_note(pitch);
             }
         }
         Command::Gain { slot: id, gain } => {

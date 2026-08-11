@@ -99,31 +99,48 @@ pub struct Engine {
     /// audio thread. A single atomic, so the callback pays almost nothing.
     peak: Arc<AtomicU32>,
     sample_rate: f64,
+    /// Device switches, sent to the thread that owns the stream along with a
+    /// channel to answer on. Requests are answered rather than fired and
+    /// forgotten, so the picker can say what went wrong.
+    switches: Mutex<mpsc::Sender<Switch>>,
     /// Keeps the audio thread — and with it the stream — alive.
     _stream_thread: std::thread::JoinHandle<()>,
 }
 
+/// A request to move rendering to another device, and where to report back.
+struct Switch {
+    /// The endpoint's name, or `None` for whatever the system default is.
+    name: Option<String>,
+    reply: mpsc::Sender<Result<(), String>>,
+}
+
 impl Engine {
-    /// Open the default output device and start the audio thread.
-    pub fn start() -> Result<Engine, String> {
+    /// Open an output device and start the audio thread.
+    ///
+    /// `preferred` names the endpoint to open; the system default is used when
+    /// it is absent or no longer connected.
+    pub fn start(preferred: Option<String>) -> Result<Engine, String> {
         let (tx, rx) = rtrb::RingBuffer::new(QUEUE_CAPACITY);
         let (retire_tx, retire_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
+        let (switch_tx, switch_rx) = mpsc::channel::<Switch>();
         let peak = Arc::new(AtomicU32::new(0));
         let callback_peak = Arc::clone(&peak);
 
         // The stream is neither `Send` nor `Sync`, so it lives out its life on
-        // the thread that made it. This thread exists purely to own it.
+        // the thread that made it. This thread exists purely to own it — and,
+        // now, to be the one place a stream is ever replaced.
         let stream_thread = std::thread::spawn(move || {
-            match build_stream(rx, retire_tx, callback_peak) {
-                Ok((stream, sample_rate)) => {
-                    if stream.play().is_err() {
-                        let _ = ready_tx.send(Err("could not start the audio stream".to_string()));
-                        return;
-                    }
+            match build_stream(rx, retire_tx, callback_peak, preferred.as_deref()) {
+                Ok((mut stream, shared, sample_rate)) => {
                     let _ = ready_tx.send(Ok(sample_rate));
-                    loop {
-                        std::thread::park();
+                    // Parking would be enough to keep the stream alive, but the
+                    // thread has work now: it waits for switches instead, and
+                    // ends when the engine that sends them is dropped.
+                    while let Ok(switch) = switch_rx.recv() {
+                        let result =
+                            switch_device(&mut stream, &shared, sample_rate, switch.name.as_deref());
+                        let _ = switch.reply.send(result);
                     }
                 }
                 Err(err) => {
@@ -144,8 +161,30 @@ impl Engine {
             controllers: Mutex::new(HashMap::new()),
             peak,
             sample_rate,
+            switches: Mutex::new(switch_tx),
             _stream_thread: stream_thread,
         })
+    }
+
+    /// Move rendering to the endpoint called `name`, or to the system default.
+    ///
+    /// Plugins keep playing throughout: only the stream underneath them is
+    /// replaced. Blocks until the swap has happened, so the picker reports a
+    /// device that could not be opened instead of quietly appearing to work.
+    pub fn set_output_device(&self, name: Option<&str>) -> Result<(), String> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.switches
+            .lock()
+            .unwrap()
+            .send(Switch {
+                name: name.map(str::to_string),
+                reply: reply_tx,
+            })
+            .map_err(|_| "the audio thread is not running".to_string())?;
+
+        reply_rx
+            .recv()
+            .map_err(|_| "the audio thread stopped while switching device".to_string())?
     }
 
     pub fn sample_rate(&self) -> f64 {
@@ -389,70 +428,95 @@ struct Slot {
     plugin: Box<SendPlugin>,
 }
 
-/// Build the output stream and the callback that drives every plugin.
-fn build_stream(
-    mut rx: rtrb::Consumer<Command>,
+/// Everything the audio callback works on, in one place.
+///
+/// Split out of the callback so that the *stream* can be replaced — when the
+/// user picks another output device — without losing the plugins, the clock or
+/// the command queue along with it. A cpal stream owns its callback and hands
+/// nothing back when it is dropped, so anything that has to outlive one cannot
+/// live inside it.
+struct Renderer {
+    rx: rtrb::Consumer<Command>,
     retire: mpsc::Sender<Box<SendPlugin>>,
     peak: Arc<AtomicU32>,
-) -> Result<(cpal::Stream, f64), String> {
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or("no audio output device")?;
-    let config = device
-        .default_output_config()
-        .map_err(|e| format!("no default output config: {e}"))?;
+    clock: Clock,
+    slots: Vec<Slot>,
+    /// Interleaved stereo scratch, mixed once per block and then spread across
+    /// however many channels the device actually has.
+    mix: Vec<f32>,
+    frame: i64,
+    /// Channel count of the device currently being rendered to. Re-read on
+    /// every switch, because the next device need not be stereo either.
+    device_channels: usize,
+}
 
-    let sample_rate = config.sample_rate().0 as f64;
-    let device_channels = config.channels() as usize;
-    let mut stream_config: cpal::StreamConfig = config.clone().into();
-    // Ask for a bounded block so the plugins' `maxSamplesPerBlock` is honoured.
-    stream_config.buffer_size = cpal::BufferSize::Default;
+impl Renderer {
+    fn new(
+        rx: rtrb::Consumer<Command>,
+        retire: mpsc::Sender<Box<SendPlugin>>,
+        peak: Arc<AtomicU32>,
+        sample_rate: f64,
+        device_channels: usize,
+    ) -> Renderer {
+        Renderer {
+            rx,
+            retire,
+            peak,
+            clock: Clock::new(sample_rate),
+            slots: Vec::with_capacity(MAX_PLUGINS),
+            mix: vec![0.0f32; MAX_BLOCK * 2],
+            frame: 0,
+            device_channels,
+        }
+    }
 
-    let mut clock = Clock::new(sample_rate);
-    let mut slots: Vec<Slot> = Vec::with_capacity(MAX_PLUGINS);
-    // Interleaved stereo scratch, mixed once per block and then spread across
-    // however many channels the device actually has.
-    let mut mix = vec![0.0f32; MAX_BLOCK * 2];
-    let mut frame: i64 = 0;
-
-    let callback = move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
+    /// One block: drain the queue, then mix every plugin into `out`.
+    fn render(&mut self, out: &mut [f32]) {
         // Drain commands first: a note that arrived for this block should be
         // heard in it, not in the next one.
-        while let Ok(command) = rx.pop() {
-            apply(command, &mut slots, &mut clock, frame, &retire);
+        while let Ok(command) = self.rx.pop() {
+            apply(
+                command,
+                &mut self.slots,
+                &mut self.clock,
+                self.frame,
+                &self.retire,
+            );
         }
 
-        let frames_total = out.len() / device_channels;
+        let channels = self.device_channels;
+        let frames_total = out.len() / channels;
         let mut done = 0;
 
         // A device asking for more than the plugins were set up for is split
         // rather than truncated.
         while done < frames_total {
             let frames = (frames_total - done).min(MAX_BLOCK);
-            let block_start = frame + done as i64;
+            let block_start = self.frame + done as i64;
 
-            mix[..frames * 2].fill(0.0);
-            for slot in slots.iter_mut() {
-                slot.plugin.0.process_into(&mut mix, frames, block_start);
+            self.mix[..frames * 2].fill(0.0);
+            for slot in self.slots.iter_mut() {
+                slot.plugin.0.process_into(&mut self.mix, frames, block_start);
             }
 
-            let block_peak = mix[..frames * 2].iter().fold(0.0f32, |a, s| a.max(s.abs()));
-            if block_peak > f32::from_bits(peak.load(Ordering::Relaxed)) {
-                peak.store(block_peak.to_bits(), Ordering::Relaxed);
+            let block_peak = self.mix[..frames * 2]
+                .iter()
+                .fold(0.0f32, |a, s| a.max(s.abs()));
+            if block_peak > f32::from_bits(self.peak.load(Ordering::Relaxed)) {
+                self.peak.store(block_peak.to_bits(), Ordering::Relaxed);
             }
 
             for f in 0..frames {
-                let left = mix[f * 2];
-                let right = mix[f * 2 + 1];
-                let base = (done + f) * device_channels;
+                let left = self.mix[f * 2];
+                let right = self.mix[f * 2 + 1];
+                let base = (done + f) * channels;
 
-                match device_channels {
+                match channels {
                     1 => out[base] = (left + right) * 0.5,
                     _ => {
                         out[base] = left;
                         out[base + 1] = right;
-                        for extra in out[base + 2..base + device_channels].iter_mut() {
+                        for extra in out[base + 2..base + channels].iter_mut() {
                             *extra = 0.0;
                         }
                     }
@@ -462,19 +526,170 @@ fn build_stream(
             done += frames;
         }
 
-        frame += frames_total as i64;
-    };
+        self.frame += frames_total as i64;
+    }
+}
 
+/// The renderer, shared between the audio callback and the thread that swaps
+/// streams over.
+///
+/// The audio thread only ever `try_lock`s it, so it still never blocks — the
+/// promise the rest of this module is built on. The one time the lock is
+/// contended is a device switch, and for those few milliseconds the callback
+/// writes silence, which is what the old device should be producing anyway.
+type Shared = Arc<Mutex<Renderer>>;
+
+/// The endpoint called `name`, if this machine has one.
+fn named_device(name: &str) -> Option<cpal::Device> {
+    cpal::default_host()
+        .output_devices()
+        .ok()?
+        .find(|device| device.name().is_ok_and(|found| found == name))
+}
+
+/// The system default endpoint.
+fn default_device() -> Result<cpal::Device, String> {
+    cpal::default_host()
+        .default_output_device()
+        .ok_or("no audio output device".to_string())
+}
+
+/// The endpoint to *start* on: the saved one, or the default if it has gone.
+///
+/// Falling back rather than failing, because this runs at engine start with a
+/// setting that may be months old. A keyboard unplugged since then must not be
+/// what stops the app making any sound at all.
+fn start_device(name: Option<&str>) -> Result<cpal::Device, String> {
+    match name.and_then(named_device) {
+        Some(device) => Ok(device),
+        None => default_device(),
+    }
+}
+
+/// The endpoint to *switch* to, which must be the one that was asked for.
+///
+/// Unlike starting up, this answers a choice the user is making right now. A
+/// silent fall back to the default would leave the picker showing a device that
+/// is not the one playing — the exact confusion it exists to end.
+fn switch_target(name: Option<&str>) -> Result<cpal::Device, String> {
+    match name {
+        None => default_device(),
+        Some(wanted) => named_device(wanted).ok_or_else(|| format!("{wanted} is not connected")),
+    }
+}
+
+/// A config for `device` at `sample_rate`, or `None` if it cannot run at it.
+///
+/// The session's sample rate is fixed when the engine starts, because every
+/// plugin is instantiated for it. So a device is only usable here if it can
+/// meet that rate; re-rating the whole graph mid-session would mean rebuilding
+/// every plugin and losing its state.
+fn config_at(device: &cpal::Device, sample_rate: f64) -> Option<cpal::SupportedStreamConfig> {
+    let rate = cpal::SampleRate(sample_rate as u32);
+    device
+        .supported_output_configs()
+        .ok()?
+        .find(|range| {
+            range.sample_format() == cpal::SampleFormat::F32
+                && range.min_sample_rate() <= rate
+                && range.max_sample_rate() >= rate
+        })
+        .map(|range| range.with_sample_rate(rate))
+}
+
+/// Open a stream on `device` and start it, rendering from `shared`.
+fn open_stream(
+    device: &cpal::Device,
+    config: &cpal::SupportedStreamConfig,
+    shared: &Shared,
+) -> Result<cpal::Stream, String> {
+    let mut stream_config: cpal::StreamConfig = config.clone().into();
+    // Ask for a bounded block so the plugins' `maxSamplesPerBlock` is honoured.
+    stream_config.buffer_size = cpal::BufferSize::Default;
+
+    let renderer = Arc::clone(shared);
     let stream = device
         .build_output_stream(
             &stream_config,
-            callback,
+            move |out: &mut [f32], _: &cpal::OutputCallbackInfo| match renderer.try_lock() {
+                Ok(mut renderer) => renderer.render(out),
+                // A switch is in progress and this stream is on its way out, or
+                // is the one just built and not yet configured. Either way the
+                // buffer must still be written, or the device repeats whatever
+                // was last in it.
+                Err(_) => out.fill(0.0),
+            },
             |err| eprintln!("vst3: audio stream error: {err}"),
             None,
         )
         .map_err(|e| format!("could not open the audio stream: {e}"))?;
 
-    Ok((stream, sample_rate))
+    stream
+        .play()
+        .map_err(|e| format!("could not start the audio stream: {e}"))?;
+    Ok(stream)
+}
+
+/// Build the first output stream, and with it the renderer everything after
+/// this shares.
+fn build_stream(
+    rx: rtrb::Consumer<Command>,
+    retire: mpsc::Sender<Box<SendPlugin>>,
+    peak: Arc<AtomicU32>,
+    preferred: Option<&str>,
+) -> Result<(cpal::Stream, Shared, f64), String> {
+    let device = start_device(preferred)?;
+    // The device's own default config, not a requested one: this is what fixes
+    // the session's sample rate, so it should be the rate the hardware likes.
+    let config = device
+        .default_output_config()
+        .map_err(|e| format!("no default output config: {e}"))?;
+
+    let sample_rate = config.sample_rate().0 as f64;
+    let shared: Shared = Arc::new(Mutex::new(Renderer::new(
+        rx,
+        retire,
+        peak,
+        sample_rate,
+        config.channels() as usize,
+    )));
+
+    let stream = open_stream(&device, &config, &shared)?;
+    Ok((stream, shared, sample_rate))
+}
+
+/// Move rendering onto `name`, keeping everything that is loaded and playing.
+///
+/// The new stream is opened *before* the old one is let go, so a device that
+/// cannot be opened leaves the engine exactly as it was rather than silent. The
+/// renderer lock is held across the swap, which is what stops the two streams
+/// rendering the same block twice on the way through.
+fn switch_device(
+    current: &mut cpal::Stream,
+    shared: &Shared,
+    sample_rate: f64,
+    name: Option<&str>,
+) -> Result<(), String> {
+    let device = switch_target(name)?;
+    let config = config_at(&device, sample_rate).ok_or_else(|| {
+        format!(
+            "{} cannot run at {} Hz, which is the rate this session's plugins were built for",
+            device.name().unwrap_or_else(|_| "that device".to_string()),
+            sample_rate as u32
+        )
+    })?;
+
+    let mut renderer = shared.lock().unwrap();
+    let stream = open_stream(&device, &config, shared)?;
+    renderer.device_channels = config.channels() as usize;
+
+    // The old stream is dropped here, while the lock is still held, so its
+    // callback cannot render one last block against the new channel count.
+    let old = std::mem::replace(current, stream);
+    drop(old);
+    drop(renderer);
+
+    Ok(())
 }
 
 /// Apply one command on the audio thread.

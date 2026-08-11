@@ -9,6 +9,7 @@ import {
 import { setRecordingGate } from '@/store/projectStore';
 import { Transport } from '@/components/Transport';
 import { FileMenu } from '@/components/FileMenu';
+import { AudioSettings } from '@/components/AudioSettings';
 import { InstrumentsPanel } from '@/components/InstrumentsPanel';
 import { ScalePalette } from '@/components/ScalePalette';
 import { ChordTimeline } from '@/components/ChordTimeline';
@@ -20,6 +21,7 @@ import { useSegmentShortcuts } from '@/hooks/useSegmentShortcuts';
 import { useSegmentCopyPaste } from '@/hooks/useSegmentCopyPaste';
 import { usePlaybackShortcuts } from '@/hooks/usePlaybackShortcuts';
 import { useRecordShortcuts } from '@/hooks/useRecordShortcuts';
+import { useMidiInput } from '@/hooks/useMidiInput';
 import { useFollowPlayhead } from '@/hooks/useFollowPlayhead';
 import { useFileIO } from '@/hooks/useFileIO';
 import { useFileShortcuts } from '@/hooks/useFileShortcuts';
@@ -145,8 +147,18 @@ function App() {
 
   // Playback state lives in the hook, which is the only thing that knows when sound
   // actually starts — a local copy would claim "playing" during the sample load.
-  const { play, pause, stop, isPlaying, isPaused, isLoading, currentTime, getSongTime, getPool } =
-    usePlayback(playbackConfig!, metronomeEnabled);
+  const {
+    play,
+    pause,
+    stop,
+    isPlaying,
+    isPaused,
+    isLoading,
+    currentTime,
+    getSongTime,
+    getPool,
+    ensureAudio,
+  } = usePlayback(playbackConfig!, metronomeEnabled);
 
   const playheadBeat = songTimeToBeat(currentTime, project?.bpm ?? 120);
 
@@ -204,6 +216,16 @@ function App() {
 
   // 1–7 play the palette's degrees, and record them while armed. `r` arms.
   useRecordShortcuts({ isPlaying, getSongTime, getPool, recordGated });
+
+  // A MIDI keyboard plays the selected instrument, and records into `custom` blocks
+  // while armed. Same gating as above: one history entry per take.
+  const midiStatus = useMidiInput({
+    isPlaying,
+    getSongTime,
+    getPool,
+    ensureAudio,
+    recordGated,
+  });
 
   // Page the view along during playback so the playhead never runs off screen.
   useFollowPlayhead(playheadBeat, isPlaying);
@@ -300,8 +322,12 @@ function App() {
     <FileIOContext.Provider value={fileIO}>
     <div className="flex flex-col h-screen bg-gray-900 text-gray-100">
       {/* File Menu */}
-      <div className="px-4 py-2 bg-gray-800 border-b border-gray-700">
+      <div className="px-4 py-2 bg-gray-800 border-b border-gray-700 flex items-center gap-3">
         <FileMenu />
+        {/* Beside the file menu rather than in the transport: which speakers the
+            app uses is a property of the machine, set once, not a playback
+            control reached for while working. */}
+        <AudioSettings />
       </div>
 
       {/* Transport Bar */}
@@ -318,6 +344,7 @@ function App() {
         isMetronomeOn={metronomeEnabled}
         isRecordArmed={recordArmed}
         recordQuantize={recordQuantize}
+        midiStatus={midiStatus}
         getSongTime={getSongTime}
         onPlay={handlePlay}
         onPause={pause}

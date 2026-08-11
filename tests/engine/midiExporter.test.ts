@@ -221,6 +221,48 @@ describe('midiExporter', () => {
     });
   });
 
+  // A recorded take's dynamics reach the file by riding the derived notes, which
+  // the exporter already reads — but "already works" is worth a test, not an
+  // assumption.
+  it('writes the velocities a recorded block was played with', () => {
+    const project = createTestProject({
+      bars: [
+        {
+          id: generateId(),
+          barIndex: 0,
+          content: soloContent(
+            [
+              {
+                id: generateId(),
+                kind: 'custom',
+                startBeat: 0,
+                duration: 2,
+                customNotes: [
+                  { pitch: 60, startBeat: 0, duration: 2, velocity: 37 },
+                  { pitch: 64, startBeat: 0, duration: 2, velocity: 119 },
+                ],
+              },
+            ],
+            [
+              { id: generateId(), pitch: 60, startBeat: 0, duration: 2, velocity: 37 },
+              { id: generateId(), pitch: 64, startBeat: 0, duration: 2, velocity: 119 },
+            ]
+          ),
+        },
+      ],
+    });
+
+    const bytes = projectToMidi(project);
+    const velocities: number[] = [];
+    for (let i = 0; i < bytes.length - 2; i++) {
+      // Note-on with a non-zero velocity: 0x90 | channel.
+      if ((bytes[i] & 0xf0) === 0x90 && bytes[i + 2] > 0) velocities.push(bytes[i + 2]);
+    }
+
+    expect(velocities).toContain(37);
+    expect(velocities).toContain(119);
+  });
+
   // Before instruments, every track chunk was written the same notes. Each one now
   // carries only its own, plus a Program Change naming its sound.
   describe('instruments', () => {

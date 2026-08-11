@@ -11,6 +11,7 @@ import {
   toClockTime,
 } from '@/engine/scheduler';
 import { syncVst3Clock } from '@/engine/vst3Instrument';
+import { registerAudioContext } from '@/engine/audioOutput';
 import {
   buildClickQueue,
   resetClickQueue,
@@ -201,55 +202,76 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
     setCurrentTime(Math.max(0, Math.min(elapsed, endSong)));
   }, [clearTimer, buildClicks]);
 
+  /**
+   * Bring the audio graph up: context, instrument pool, samples loaded.
+   *
+   * Split out of `play` because Play is no longer the only thing that needs sound.
+   * A MIDI key pressed before the transport has ever run has to have something to
+   * sound on, and waiting for the user to press Play first would make the keyboard
+   * mysteriously dead until they did.
+   *
+   * Safe to call repeatedly: everything in it is idempotent, and an instrument
+   * whose samples are already loaded is not re-downloaded.
+   */
+  const ensureAudio = useCallback(async (): Promise<InstrumentPool> => {
+    // The context is created here, inside a click handler, rather than on mount:
+    // one created without a user gesture starts suspended, and scheduling against a
+    // suspended context's clock is what makes timing drift on the first Play.
+    if (!ctxRef.current) {
+      ctxRef.current = new (window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext })
+          .webkitAudioContext)();
+
+      // Handed over as it is made, so a context that has never played a note is
+      // already pointed at the speakers the user chose in an earlier session.
+      registerAudioContext(ctxRef.current);
+    }
+    const ctx = ctxRef.current;
+
+    // The clicks share playback's context rather than opening one of their own:
+    // a second context would be created outside the click handler (from the
+    // scheduling loop), start suspended under the autoplay policy, and run on a
+    // clock the note arithmetic knows nothing about. A browser also only allows
+    // a handful of contexts per page, and the metronome discards its reference
+    // on every Stop.
+    setAudioContextFactory(() => ctx);
+
+    if (!poolRef.current) {
+      poolRef.current = new InstrumentPool(ctx);
+    }
+    const pool = poolRef.current;
+
+    // Reconcile before loading: an instrument added or re-voiced since the last
+    // Play has to exist before there is anything to wait for. Deliberately only
+    // here, unlike the note list: building an instrument means downloading its
+    // samples, which is not something to start from inside a scheduling pass.
+    pool.ensure(configRef.current.tracks);
+
+    if (ctx.state === 'suspended') {
+      await ctx.resume();
+    }
+
+    // First Play in a session waits on the sample download; the transport shows a
+    // loading state rather than appearing to do nothing. Adding an instrument
+    // later puts it back into that state for just that instrument's samples.
+    if (!pool.isLoaded) {
+      setIsLoading(true);
+      try {
+        await pool.loadAll();
+      } finally {
+        setIsLoading(false);
+      }
+    }
+
+    return pool;
+  }, []);
+
   const play = useCallback(async () => {
     if (startingRef.current) return;
     startingRef.current = true;
 
     try {
-      // The context is created here, inside the click handler, rather than on mount:
-      // one created without a user gesture starts suspended, and scheduling against a
-      // suspended context's clock is what makes timing drift on the first Play.
-      if (!ctxRef.current) {
-        ctxRef.current = new (window.AudioContext ||
-          (window as unknown as { webkitAudioContext: typeof AudioContext })
-            .webkitAudioContext)();
-      }
-      const ctx = ctxRef.current;
-
-      // The clicks share playback's context rather than opening one of their own:
-      // a second context would be created outside the click handler (from the
-      // scheduling loop), start suspended under the autoplay policy, and run on a
-      // clock the note arithmetic knows nothing about. A browser also only allows
-      // a handful of contexts per page, and the metronome discards its reference
-      // on every Stop.
-      setAudioContextFactory(() => ctx);
-
-      if (!poolRef.current) {
-        poolRef.current = new InstrumentPool(ctx);
-      }
-      const pool = poolRef.current;
-
-      // Reconcile before loading: an instrument added or re-voiced since the last
-      // Play has to exist before there is anything to wait for. Deliberately only
-      // here, unlike the note list: building an instrument means downloading its
-      // samples, which is not something to start from inside a scheduling pass.
-      pool.ensure(configRef.current.tracks);
-
-      if (ctx.state === 'suspended') {
-        await ctx.resume();
-      }
-
-      // First Play in a session waits on the sample download; the transport shows a
-      // loading state rather than appearing to do nothing. Adding an instrument
-      // later puts it back into that state for just that instrument's samples.
-      if (!pool.isLoaded) {
-        setIsLoading(true);
-        try {
-          await pool.loadAll();
-        } finally {
-          setIsLoading(false);
-        }
-      }
+      const pool = await ensureAudio();
 
       // Any natively-hosted plugin renders on its own audio device, whose clock
       // is only kept in step with this one periodically. Re-anchoring here means
@@ -289,7 +311,7 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
     } finally {
       startingRef.current = false;
     }
-  }, [clearTimer, tick, buildClicks]);
+  }, [clearTimer, tick, buildClicks, ensureAudio]);
 
   const pause = useCallback(() => {
     clearTimer();
@@ -364,6 +386,7 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
     stop,
     getSongTime,
     getPool,
+    ensureAudio,
     pool: poolRef.current,
   };
 }

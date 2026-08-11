@@ -9,6 +9,7 @@ import type {
   ScaleType,
   SegmentBreak,
   SegmentKind,
+  SegmentNote,
   SegmentVoicing,
   SpacingPreset,
   TimeSignature,
@@ -76,8 +77,15 @@ const LEGACY_TRACK_ID = 'track-legacy';
  * older than this one, whatever version it states, reads as off, which is exactly
  * what those files have always come back as; so nothing changes for them and the
  * version stays where it is.
+ *
+ * 1.9 added the custom block — a segment carrying the notes it was played with,
+ * each with its own onset, length and velocity — and an optional velocity on every
+ * segment. Both are what live MIDI recording produces. Neither key is written when
+ * absent, so a project nobody has recorded into serialises byte for byte as it did
+ * under 1.8, and a pre-1.9 file has no custom blocks and no velocities: its notes
+ * sound at the fixed 100 they always did.
  */
-export const SCHEMA_VERSION = '1.8';
+export const SCHEMA_VERSION = '1.9';
 
 /**
  * Validation error returned by validateProject.
@@ -175,6 +183,10 @@ export function serializeProject(project: Project): string {
               root: c.root,
               inversion: c.inversion,
               quality: c.quality,
+              // Custom blocks only, and absent everywhere else — so a project with
+              // nothing recorded in it still serialises exactly as it did under 1.8.
+              customNotes: c.customNotes,
+              velocity: c.velocity,
               // The key this block is written in — a bar-level `scale` is no
               // longer written, so this is where a 1.8 file states its keys.
               scale: c.scale,
@@ -291,6 +303,50 @@ function readBreak(raw: unknown): SegmentBreak | undefined {
 }
 
 /**
+ * Read a MIDI velocity, or undefined when the file states none or states nonsense.
+ *
+ * Undefined rather than 100: the two sound the same, but only the absence
+ * round-trips back to a file that says nothing, which is what keeps a pre-1.9
+ * project serialising unchanged.
+ */
+function readVelocity(raw: unknown): number | undefined {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return undefined;
+  return Math.max(1, Math.min(127, Math.round(raw)));
+}
+
+/**
+ * Read the notes of a custom block, dropping any that do not describe a note.
+ *
+ * Dropped rather than repaired, for `readVoicing`'s reason: an entry with no pitch
+ * says nothing about what was played, and inventing one would put a note in the
+ * piece that nobody performed. An empty or absent list reads as undefined — a
+ * block with nothing in it, which is what every pre-1.9 segment is.
+ */
+function readCustomNotes(raw: unknown): SegmentNote[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+
+  const notes = (raw as Record<string, unknown>[])
+    .filter(
+      n =>
+        typeof n?.pitch === 'number' &&
+        Number.isFinite(n.pitch) &&
+        typeof n.startBeat === 'number' &&
+        Number.isFinite(n.startBeat) &&
+        typeof n.duration === 'number' &&
+        Number.isFinite(n.duration)
+    )
+    .map(n => ({
+      pitch: Math.max(0, Math.min(127, Math.round(n.pitch as number))),
+      // A note cannot start before the block that holds it, nor sound backwards.
+      startBeat: Math.max(0, n.startBeat as number),
+      duration: Math.max(0, n.duration as number),
+      velocity: readVelocity(n.velocity),
+    }));
+
+  return notes.length > 0 ? notes : undefined;
+}
+
+/**
  * Deserialize a JSON string back to a Project.
  * Throws on invalid JSON or missing required fields.
  */
@@ -394,8 +450,10 @@ export function deserializeProject(json: string): Project {
           // Schema 1.1 and earlier had no positions; leaving it undefined lets
           // the store pack the bar, which is what those files meant.
           startBeat: typeof c.startBeat === 'number' ? c.startBeat : undefined,
-          // Schema 1.0 had no note segments, so anything unlabelled is a chord.
-          kind: (c.kind === 'note' ? 'note' : 'chord') as SegmentKind,
+          // Schema 1.0 had no note segments, so anything unlabelled is a chord —
+          // and so is anything unrecognised, which is what a file from a future
+          // version can look like.
+          kind: (c.kind === 'note' || c.kind === 'custom' ? c.kind : 'chord') as SegmentKind,
           romanNumeral: typeof c.romanNumeral === 'string' ? c.romanNumeral : undefined,
           chordSymbol: typeof c.chordSymbol === 'string' ? c.chordSymbol : undefined,
           duration: typeof c.duration === 'number' ? c.duration : 4,
@@ -413,6 +471,10 @@ export function deserializeProject(json: string): Project {
           // Schema 1.5 and earlier had no voicing; an absent one means the plain
           // block chord, which is all those files could express.
           voicing: readVoicing(c.voicing),
+          // Schema 1.8 and earlier had neither. An absent velocity is the fixed 100
+          // every note used to carry, and only a custom block has notes of its own.
+          customNotes: readCustomNotes(c.customNotes),
+          velocity: readVelocity(c.velocity),
         }))
       : [];
 

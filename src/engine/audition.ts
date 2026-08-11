@@ -36,12 +36,48 @@ export function auditionPitches(
 }
 
 /**
- * Sound a segment on an instrument for as long as the returned function goes
- * uncalled — what a held number key does.
+ * Sound one pitch for as long as the returned function goes uncalled — what a held
+ * key does, whether it is a number key, a palette block or a MIDI keyboard.
  *
  * A backend with no `sustain` gets a fixed-length preview instead of a held one, and
  * its release is a no-op: better a note that outstays its key than one that never
  * stops, which is what cutting it would take (`stopAll` would silence playback too).
+ * This is the one place that fallback lives, so a VST3 track behaves the same
+ * wherever a note is played by hand.
+ *
+ * The returned release is safe to call more than once: a key-up and a window blur
+ * can race, and smplr's stopper is not documented to be idempotent.
+ */
+export function sustainPitch(
+  instrument: Instrument | undefined,
+  midiNote: number,
+  velocity: number = AUDITION_VELOCITY
+): () => void {
+  if (!instrument) return () => {};
+
+  if (!instrument.sustain) {
+    instrument.schedule({
+      midiNote,
+      velocity,
+      when: instrument.now(),
+      duration: FALLBACK_PREVIEW_SECONDS,
+    });
+    return () => {};
+  }
+
+  const stop = instrument.sustain({ midiNote, velocity });
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    stop();
+  };
+}
+
+/**
+ * Sound a segment on an instrument for as long as the returned function goes
+ * uncalled — what a held number key does.
  */
 export function auditionSegment(
   instrument: Instrument | undefined,
@@ -51,31 +87,11 @@ export function auditionSegment(
 ): () => void {
   if (!instrument) return () => {};
 
-  const pitches = auditionPitches(segment, scale, projectTs);
-
-  if (!instrument.sustain) {
-    const when = instrument.now();
-    for (const midiNote of pitches) {
-      instrument.schedule({
-        midiNote,
-        velocity: AUDITION_VELOCITY,
-        when,
-        duration: FALLBACK_PREVIEW_SECONDS,
-      });
-    }
-    return () => {};
-  }
-
-  const stoppers = pitches.map(midiNote =>
-    instrument.sustain!({ midiNote, velocity: AUDITION_VELOCITY })
+  const releases = auditionPitches(segment, scale, projectTs).map(midiNote =>
+    sustainPitch(instrument, midiNote, AUDITION_VELOCITY)
   );
 
-  // Guarded because a release can arrive twice — a keyup and a window blur racing —
-  // and smplr's stopper is not documented to be idempotent.
-  let released = false;
   return () => {
-    if (released) return;
-    released = true;
-    for (const stop of stoppers) stop();
+    for (const release of releases) release();
   };
 }

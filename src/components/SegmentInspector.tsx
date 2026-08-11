@@ -5,7 +5,7 @@ import { currentKind, resolveSegmentChord } from '@/engine/chordOperations';
 import type { SegmentKindTarget } from '@/engine/chordOperations';
 import { projectScale, segmentScale } from '@/engine/scales';
 import { ScaleSelect } from '@/components/ScaleSelect';
-import { voicedPitches } from '@/engine/voicing';
+import { DEFAULT_VELOCITY, voicedPitches } from '@/engine/voicing';
 import { CHORD_INTERVALS, midiToNoteLabel } from '@/engine/chords';
 import { describePosition, formatNoteValue } from '@/engine/meterDisplay';
 import { DEFAULT_TIME_SIGNATURE, PIANO_ROLL_MAX_MIDI, PIANO_ROLL_MIN_MIDI } from '@/utils/constants';
@@ -152,8 +152,19 @@ export function SegmentInspector() {
 
   const segments = located.map(l => l.segment);
   const ids = segments.map(s => s.id);
-  const chords = located.filter(l => l.segment.kind !== 'note');
+  // Custom blocks are excluded alongside notes: a recorded take has no named
+  // harmony, so there is nothing to invert, space, double or break.
+  const chords = located.filter(
+    l => l.segment.kind !== 'note' && l.segment.kind !== 'custom'
+  );
   const first = located[0];
+
+  // A recorded block names no degree and is written in no key, so neither
+  // conversion nor retuning means anything for it. Withheld for the whole
+  // selection when any of it is custom rather than quietly applied to the rest:
+  // the controls act on everything selected, and a half-applied edit is worse
+  // than an absent one.
+  const anyCustom = segments.some(s => s.kind === 'custom');
 
   const fallbackScale = projectScale(project.key, project.keyMode);
   const scaleOf = (segment: ChordSegment) => segmentScale(segment, fallbackScale);
@@ -186,34 +197,50 @@ export function SegmentInspector() {
         }
       />
 
-      <Section label="Kind">
-        <select
-          data-testid="segment-kind-select"
-          value={sharedKind ?? ''}
-          disabled={located.length === 0}
-          onChange={e => convertSegmentsKind(ids, e.target.value as SegmentKindTarget)}
-          className={FIELD_CLASS}
-        >
-          <option value="note">Note</option>
-          <option value="triad">Triad</option>
-          <option value="seventh">Seventh</option>
-        </select>
-      </Section>
+      {!anyCustom && (
+        <Section label="Kind">
+          <select
+            data-testid="segment-kind-select"
+            value={sharedKind ?? ''}
+            disabled={located.length === 0}
+            onChange={e => convertSegmentsKind(ids, e.target.value as SegmentKindTarget)}
+            className={FIELD_CLASS}
+          >
+            <option value="note">Note</option>
+            <option value="triad">Triad</option>
+            <option value="seventh">Seventh</option>
+          </select>
+        </Section>
+      )}
 
       {/* Outside the chords-only branch below: a note is written in a key too, and
           retuning one moves it to the same degree of the new scale. */}
-      <Section label="Key">
-        <ScaleSelect
-          idPrefix="segment"
-          layout="stacked"
-          root={sharedRoot}
-          type={sharedType}
-          onChange={patch => setSegmentsScale(ids, patch)}
-        />
-      </Section>
+      {!anyCustom && (
+        <Section label="Key">
+          <ScaleSelect
+            idPrefix="segment"
+            layout="stacked"
+            root={sharedRoot}
+            type={sharedType}
+            onChange={patch => setSegmentsScale(ids, patch)}
+          />
+        </Section>
+      )}
+
+      {/* The one place a block's actual notes are shown, because a recorded block
+          is the one kind whose notes cannot be read off its name. */}
+      {segments.length === 1 && first.segment.kind === 'custom' && (
+        <CustomNotes segment={first.segment} />
+      )}
 
       {chords.length === 0 ? (
-        <p className="text-xs text-gray-500">A single note has no chord tones to voice.</p>
+        anyCustom ? (
+          <p className="text-xs text-gray-500">
+            A recorded block holds the notes it was played with.
+          </p>
+        ) : (
+          <p className="text-xs text-gray-500">A single note has no chord tones to voice.</p>
+        )
       ) : (
         <>
           {perToneControls && (
@@ -353,18 +380,29 @@ function Identity({
     );
   }
 
+  const isCustom = segment.kind === 'custom';
+  const played = segment.customNotes ?? [];
+
   return (
     <div className="text-sm text-gray-300 space-y-0.5">
-      <div>{segment.chordSymbol ?? segment.root}</div>
+      <div>
+        {isCustom
+          ? `${played.length} ${played.length === 1 ? 'note' : 'notes'}`
+          : (segment.chordSymbol ?? segment.root)}
+      </div>
       <div className="text-xs text-gray-500">
-        {segment.kind === 'note' ? 'Note' : 'Chord'}
+        {isCustom ? 'Recorded' : segment.kind === 'note' ? 'Note' : 'Chord'}
         {segment.romanNumeral ? ` · ${segment.romanNumeral}` : ''}
       </div>
-      <div className="text-xs text-gray-500">
-        {segment.kind === 'note' && segment.pitch !== undefined
-          ? midiToNoteLabel(segment.pitch)
-          : `Octave ${segment.octave ?? 4}`}
-      </div>
+      {/* A recorded block has no one register to state — every pitch in it is
+          absolute, and the list below names them all. */}
+      {!isCustom && (
+        <div className="text-xs text-gray-500">
+          {segment.kind === 'note' && segment.pitch !== undefined
+            ? midiToNoteLabel(segment.pitch)
+            : `Octave ${segment.octave ?? 4}`}
+        </div>
+      )}
       {/* Named as a note value and located in the bar's own metre — "1.5 beats"
           says nothing about whether the bar counts in quarters or dotted quarters. */}
       <div className="text-xs text-gray-500">
@@ -374,6 +412,52 @@ function Identity({
       </div>
     </div>
   );
+}
+
+/**
+ * What a recorded block actually holds, note by note.
+ *
+ * Read-only: a take is edited by playing it again, not by retyping it. It is here
+ * at all because a custom block is the one kind whose contents cannot be read off
+ * its name — "Recorded" says nothing about what was played, and the block on the
+ * timeline has room for three pitches at most.
+ *
+ * Ordered by onset, then by pitch, so a chord reads bottom-up and a run reads
+ * left-to-right — which is the order they were played in either way.
+ */
+function CustomNotes({ segment }: { segment: ChordSegment }) {
+  const notes = [...(segment.customNotes ?? [])].sort(
+    (a, b) => a.startBeat - b.startBeat || a.pitch - b.pitch
+  );
+
+  if (notes.length === 0) {
+    return <p className="text-xs text-gray-500">This block holds no notes.</p>;
+  }
+
+  return (
+    <Section label="Notes">
+      <ul className="space-y-0.5 max-h-40 overflow-y-auto">
+        {notes.map((note, index) => (
+          <li
+            key={`${note.pitch}-${note.startBeat}-${index}`}
+            data-testid={`custom-note-${index}`}
+            className="flex justify-between gap-2 text-xs text-gray-400 tabular-nums"
+          >
+            <span className="text-gray-300">{midiToNoteLabel(note.pitch)}</span>
+            <span>
+              +{formatBeats(note.startBeat)} · {formatBeats(note.duration)}
+            </span>
+            <span title="Velocity">{note.velocity ?? DEFAULT_VELOCITY}</span>
+          </li>
+        ))}
+      </ul>
+    </Section>
+  );
+}
+
+/** Beats, to at most two decimals, without a trailing `.00` on the whole ones. */
+function formatBeats(beats: number): string {
+  return `${Math.round(beats * 100) / 100}`;
 }
 
 /**

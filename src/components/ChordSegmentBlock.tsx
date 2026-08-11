@@ -25,8 +25,32 @@ interface ChordSegmentBlockProps {
   isDragging?: boolean;
 }
 
+/** How many of a recorded block's pitches are named before the label gives up counting. */
+const CUSTOM_LABEL_PITCHES = 3;
+
 /**
- * What the block leads with: a chord's symbol, a note's name with its octave.
+ * What a recorded block reads: the pitches it holds, lowest first.
+ *
+ * Named rather than counted because the pitches are the only thing that
+ * distinguishes one take from another at a glance — a block reading "5 notes" is
+ * indistinguishable from every other one. Each pitch appears once however often it
+ * was played, so a repeated note does not crowd out the rest of the chord, and a
+ * long run is cut off with a count so the label still fits a short block.
+ */
+function customLabel(segment: ChordSegment): string {
+  const pitches = [...new Set((segment.customNotes ?? []).map(n => n.pitch))].sort(
+    (a, b) => a - b
+  );
+  if (pitches.length === 0) return '(empty)';
+
+  const named = pitches.slice(0, CUSTOM_LABEL_PITCHES).map(midiToNoteLabel).join(' ');
+  const rest = pitches.length - CUSTOM_LABEL_PITCHES;
+  return rest > 0 ? `${named} +${rest}` : named;
+}
+
+/**
+ * What the block leads with: a chord's symbol, a note's name with its octave, a
+ * recorded block's pitches.
  *
  * A note's name is derived from its live pitch rather than the symbol it was
  * dropped with, so it stays honest after a key change retunes the segment.
@@ -34,6 +58,9 @@ interface ChordSegmentBlockProps {
 function primaryLabel(segment: ChordSegment): string {
   if (segment.kind === 'note' && segment.pitch !== undefined) {
     return midiToNoteLabel(segment.pitch);
+  }
+  if (segment.kind === 'custom') {
+    return customLabel(segment);
   }
   return segment.chordSymbol ?? segment.root ?? segment.romanNumeral ?? '?';
 }
@@ -72,6 +99,7 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
   isDragging = false,
 }) => {
   const isNote = segment.kind === 'note';
+  const isCustom = segment.kind === 'custom';
 
   // Captured once per gesture: reading the live duration on every move would
   // compound each delta against the previous result.
@@ -129,9 +157,11 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
       aria-label={
         isNote
           ? `Note ${primaryLabel(segment)}`
-          : `Chord ${primaryLabel(segment)} octave ${chordOctave(segment)}${
-              inversionLabel(segment) ? ` ${inversionLabel(segment)} inversion` : ''
-            }`
+          : isCustom
+            ? `Recorded ${primaryLabel(segment)}`
+            : `Chord ${primaryLabel(segment)} octave ${chordOctave(segment)}${
+                inversionLabel(segment) ? ` ${inversionLabel(segment)} inversion` : ''
+              }`
       }
       onKeyDown={handleKeyDown}
       // Selection happens here rather than on click. A click is dispatched on the
@@ -161,7 +191,9 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
         ${isSelected ? 'ring-2 ring-indigo-400' : ''}
         ${isNote
           ? 'bg-teal-800 border-teal-600 text-teal-50'
-          : 'bg-indigo-800 border-indigo-600 text-indigo-50'}
+          : isCustom
+            ? 'bg-amber-800 border-amber-600 text-amber-50'
+            : 'bg-indigo-800 border-indigo-600 text-indigo-50'}
       `}
     >
       <span className="text-sm font-semibold leading-tight truncate px-1">
@@ -173,8 +205,9 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
 
       {/* One bar can hold blocks from several registers and voicings, so a chord
           states its own. A note needs no badge — its label already ends in the
-          octave, and a single pitch has no inversion. */}
-      {!isNote && (
+          octave, and a single pitch has no inversion. Nor does a recorded block:
+          every pitch in it is absolute, so there is no one register to name. */}
+      {!isNote && !isCustom && (
         <span
           data-testid={`octave-badge-${segment.id}`}
           className="absolute bottom-0 left-1 text-[9px] opacity-60 leading-none pb-0.5"

@@ -43,8 +43,33 @@ export interface Scale {
   type: ScaleType;
 }
 
-// What a timeline segment represents: a single note or a stacked chord.
-export type SegmentKind = 'note' | 'chord';
+/**
+ * What a timeline segment represents: a single note, a stacked chord, or a
+ * `custom` block carrying whatever notes were played into it.
+ *
+ * The first two are *named* material — a pitch, or a harmony with a root and a
+ * quality — which is why they can be transposed by degree and re-voiced. A custom
+ * block is none of those things: it is a recording, a list of notes with their own
+ * onsets and dynamics, and it exists because a live performance has no name.
+ */
+export type SegmentKind = 'note' | 'chord' | 'custom';
+
+/**
+ * One note inside a custom block.
+ *
+ * `startBeat` is measured from the start of the *segment*, not of the bar, so
+ * moving the block moves everything in it and nothing has to be rewritten.
+ */
+export interface SegmentNote {
+  /** MIDI pitch, 0-127. */
+  pitch: number;
+  /** Beats from the start of the segment. */
+  startBeat: number;
+  /** Sounding length in beats. */
+  duration: number;
+  /** MIDI velocity, 0-127. Absent falls back to the segment's, then to 100. */
+  velocity?: number;
+}
 
 /** How a chord's tones are spread across registers. Absent reads as 'close'. */
 export type SpacingPreset = 'close' | 'open' | 'drop2' | 'drop3';
@@ -113,6 +138,22 @@ export interface ChordSegment {
   kind?: SegmentKind;
   /** MIDI pitch — only meaningful when kind === 'note'. */
   pitch?: number;
+  /**
+   * The notes a custom block sounds. Custom segments only — a note segment has one
+   * pitch and a chord segment derives its own from its harmony.
+   *
+   * This is the one place a segment states pitches outright rather than naming
+   * material to be interpreted, which is what lets a recorded take hold arbitrary
+   * polyphony without breaking the rule that `TrackContent.notes` is derived.
+   */
+  customNotes?: SegmentNote[];
+  /**
+   * MIDI velocity for everything this block sounds, 0-127. Absent reads as 100 —
+   * the fixed velocity every note carried before recording could capture one — so
+   * projects written before this sound identical. A custom block's notes may each
+   * override it.
+   */
+  velocity?: number;
   /**
    * Register a chord is voiced in, e.g. 4 for the middle-C octave. Chord
    * segments only — a note segment's register already lives in its absolute

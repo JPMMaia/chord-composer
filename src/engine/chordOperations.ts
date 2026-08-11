@@ -20,7 +20,7 @@ import {
   octaveForDegree,
   segmentScale,
 } from '@/engine/scales';
-import { breakChord, voicedPitches } from '@/engine/voicing';
+import { breakChord, DEFAULT_VELOCITY, voicedPitches } from '@/engine/voicing';
 import { getBarBeats, MIN_SEGMENT_BEATS, withStartBeats } from '@/engine/timeline';
 import { formatChordSymbol } from '@/engine/palette';
 import {
@@ -146,6 +146,20 @@ export function reorderChords(
  * @param octave - Fallback octave for chord segments that carry none of their own.
  * @returns The notes for this instrument in this bar, in segment order.
  */
+/**
+ * The velocity a segment's notes sound at.
+ *
+ * An absent one is the fixed 100 every note carried before recording could capture
+ * a real one, which is what keeps every project written before then sounding
+ * identical. A nonsensical value is treated as absent rather than passed on to a
+ * sampler that would have to guess.
+ */
+function segmentVelocity(segment: ChordSegment): number {
+  const velocity = segment.velocity;
+  if (velocity === undefined || !Number.isFinite(velocity)) return DEFAULT_VELOCITY;
+  return Math.max(1, Math.min(127, Math.round(velocity)));
+}
+
 export function generateNotesFromSegments(
   chords: ChordSegment[],
   bar: Bar,
@@ -175,7 +189,23 @@ export function generateNotesFromSegments(
           pitch: segment.pitch,
           startBeat: currentBeat,
           duration: segment.duration,
-          velocity: 100,
+          velocity: segmentVelocity(segment),
+        });
+      }
+      continue;
+    }
+
+    // A custom block states its notes outright — there is nothing to voice, and
+    // nothing to interpret. Onsets are relative to the block, so moving it moves
+    // everything in it.
+    if (segment.kind === 'custom') {
+      for (const played of segment.customNotes ?? []) {
+        notes.push({
+          id: generateId(),
+          pitch: played.pitch,
+          startBeat: currentBeat + played.startBeat,
+          duration: played.duration,
+          velocity: played.velocity ?? segmentVelocity(segment),
         });
       }
       continue;
@@ -202,7 +232,8 @@ export function generateNotesFromSegments(
       pitches,
       currentBeat,
       segment.duration,
-      segment.voicing?.break
+      segment.voicing?.break,
+      segmentVelocity(segment)
     )) {
       notes.push({ id: generateId(), ...timed });
     }
@@ -279,6 +310,10 @@ export function retuneSegmentsToScale(
     if (segment.kind === 'note') {
       return retuneNote(segment, fromScale, toScale);
     }
+
+    // A recorded block names no degree — it is chromatic by construction — so a
+    // change of key leaves it exactly as it was played.
+    if (segment.kind === 'custom') return segment;
 
     if (!segment.romanNumeral) return segment;
 
@@ -366,18 +401,26 @@ function isSeventhChord(segment: ChordSegment): boolean {
 /* Segment kind conversion                                                  */
 /* ------------------------------------------------------------------------ */
 
-/** Target kind for conversion. */
-export type SegmentKindTarget = 'note' | 'triad' | 'seventh';
+/**
+ * Target kind for conversion.
+ *
+ * `custom` is reported by `currentKind` but is never a target: a recorded block
+ * holds pitches, not a degree, so there is nothing to convert *to* it from — and
+ * converting away from one would throw away everything that was played.
+ */
+export type SegmentKindTarget = 'note' | 'triad' | 'seventh' | 'custom';
 
 /**
- * Inspect a segment and return its effective kind: 'note', 'triad' or 'seventh'.
+ * Inspect a segment and return its effective kind.
  *
- * A segment with `kind: 'note'` is a note. A chord segment is a triad when its
- * quality has three intervals and a seventh when it has four. A chord with no
- * quality is treated as a triad — the default chord size.
+ * A segment with `kind: 'note'` is a note and one with `kind: 'custom'` is custom.
+ * A chord segment is a triad when its quality has three intervals and a seventh
+ * when it has four. A chord with no quality is treated as a triad — the default
+ * chord size.
  */
 export function currentKind(segment: ChordSegment): SegmentKindTarget {
   if (segment.kind === 'note') return 'note';
+  if (segment.kind === 'custom') return 'custom';
   if (!segment.quality) return 'triad';
   const intervals = CHORD_INTERVALS[segment.quality as ChordQualityKey];
   return intervals.length === 4 ? 'seventh' : 'triad';
@@ -397,6 +440,10 @@ export function convertSegmentKind(
 ): ChordSegment {
   const kind = currentKind(segment);
   if (kind === target) return segment; // no-op
+
+  // A recorded block is neither a source nor a destination: it names no degree to
+  // carry into a chord, and nothing it holds would survive the trip back.
+  if (kind === 'custom' || target === 'custom') return segment;
 
   // Chord → note
   if (target === 'note') {
@@ -551,6 +598,24 @@ function degreeOfChord(segment: ChordSegment, scale: Scale): number {
  * @param scale - The scale of the bar the segment lives in.
  * @param direction - 1 for up, -1 for down.
  */
+/**
+ * The next pitch in the given direction that lies on the scale.
+ *
+ * Walks semitone by semitone rather than by degree: that is what makes B4 step to
+ * C5 across the octave line, and what snaps an off-scale pitch back on. Gives up
+ * after an octave, which can only happen for an empty scale.
+ *
+ * @param pitchClasses - The scale's pitch classes, as `getScalePitches` returns them.
+ */
+function stepPitchInScale(pitch: number, pitchClasses: number[], direction: -1 | 1): number {
+  let midi = pitch;
+  for (let i = 0; i < 12; i++) {
+    midi += direction;
+    if (pitchClasses.includes(((midi % 12) + 12) % 12)) return midi;
+  }
+  return pitch;
+}
+
 export function stepSegmentInScale(
   segment: ChordSegment,
   scale: Scale,
@@ -558,16 +623,33 @@ export function stepSegmentInScale(
 ): ChordSegment {
   const pitches = getScalePitches(scale.root, scale.type);
 
+  // A custom block moves as one gesture: the step its *lowest* note takes is
+  // applied to every note, so the voicing that was played keeps its shape. Stepping
+  // each note onto its own nearest scale tone would squash and spread the chord
+  // differently on every press, which is not what the arrow keys mean.
+  if (segment.kind === 'custom') {
+    const played = segment.customNotes ?? [];
+    if (played.length === 0) return segment;
+
+    const lowest = Math.min(...played.map(n => n.pitch));
+    const shift = stepPitchInScale(lowest, pitches, direction) - lowest;
+    if (shift === 0) return segment;
+
+    const shifted = played.map(n => ({ ...n, pitch: n.pitch + shift }));
+    // All or nothing: a block that dropped one voice at the edge of the roll would
+    // come back a different chord from the one that went in.
+    if (shifted.some(n => n.pitch < PIANO_ROLL_MIN_MIDI || n.pitch > PIANO_ROLL_MAX_MIDI)) {
+      return segment;
+    }
+    return { ...segment, customNotes: shifted };
+  }
+
   if (segment.kind === 'note') {
     if (segment.pitch === undefined) return segment;
 
     // Walk semitone by semitone rather than by degree: that is what makes B4 step
     // to C5 across the octave line, and what snaps an off-scale pitch back on.
-    let midi = segment.pitch;
-    for (let i = 0; i < 12; i++) {
-      midi += direction;
-      if (pitches.includes(((midi % 12) + 12) % 12)) break;
-    }
+    const midi = stepPitchInScale(segment.pitch, pitches, direction);
     if (midi < PIANO_ROLL_MIN_MIDI || midi > PIANO_ROLL_MAX_MIDI) return segment;
 
     const degree = pitches.indexOf(((midi % 12) + 12) % 12);
@@ -633,6 +715,19 @@ function registerShift(
  * @param direction - 1 for up, -1 for down.
  */
 export function shiftSegmentOctave(segment: ChordSegment, direction: -1 | 1): ChordSegment {
+  if (segment.kind === 'custom') {
+    const played = segment.customNotes ?? [];
+    if (played.length === 0) return segment;
+
+    const shifted = played.map(n => ({ ...n, pitch: n.pitch + direction * 12 }));
+    // Refused as a whole for the same reason as the scale step: a block that lost
+    // one voice at the edge of the roll would not be the block that went in.
+    if (shifted.some(n => n.pitch < PIANO_ROLL_MIN_MIDI || n.pitch > PIANO_ROLL_MAX_MIDI)) {
+      return segment;
+    }
+    return { ...segment, customNotes: shifted };
+  }
+
   if (segment.kind === 'note') {
     if (segment.pitch === undefined) return segment;
     const pitch = segment.pitch + direction * 12;
@@ -650,11 +745,12 @@ export function shiftSegmentOctave(segment: ChordSegment, direction: -1 | 1): Ch
  * meaning of the `i` key.
  *
  * The cycle is as long as the chord has notes, so a triad returns to root position
- * on the third press and a seventh on the fourth. Note segments have no voicing to
- * rotate and come back untouched.
+ * on the third press and a seventh on the fourth. Note and custom segments have no
+ * named harmony to rotate and come back untouched.
  */
 export function cycleSegmentInversion(segment: ChordSegment): ChordSegment {
-  if (segment.kind === 'note' || !segment.quality) return segment;
+  if (segment.kind === 'note' || segment.kind === 'custom') return segment;
+  if (!segment.quality) return segment;
   const size = CHORD_INTERVALS[segment.quality as ChordQualityKey].length;
   return { ...segment, inversion: ((segment.inversion ?? 0) + 1) % size };
 }
@@ -662,6 +758,11 @@ export function cycleSegmentInversion(segment: ChordSegment): ChordSegment {
 /**
  * Merge adjacent chords with the same Roman numeral into a single chord.
  * Preserves the total duration and the first chord's metadata.
+ *
+ * A custom block never merges, in either direction. The test is equality of roman
+ * numeral, and a recorded block carries none — so two takes played one after the
+ * other both read `undefined` and would silently fuse into a single block holding
+ * only the first one's notes.
  *
  * @param chords - The array of chord segments.
  * @returns A new array with merged adjacent chords.
@@ -675,7 +776,8 @@ export function mergeAdjacentChords(chords: ChordSegment[]): ChordSegment[] {
   let current = { ...chords[0] };
 
   for (let i = 1; i < chords.length; i++) {
-    if (chords[i].romanNumeral === current.romanNumeral) {
+    const mergeable = chords[i].kind !== 'custom' && current.kind !== 'custom';
+    if (mergeable && chords[i].romanNumeral === current.romanNumeral) {
       // Merge: extend duration
       current.duration += chords[i].duration;
       // Preserve chordSymbol if set

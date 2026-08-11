@@ -40,8 +40,12 @@ export interface TimedPitch {
   velocity: number;
 }
 
-/** The velocity every generated note carries — this app has no velocity editing yet. */
-const DEFAULT_VELOCITY = 100;
+/**
+ * The velocity a note carries when nothing states one — every note the palette
+ * and the chord blocks produce, and the fixed value this app used everywhere
+ * before live recording could capture a real one.
+ */
+export const DEFAULT_VELOCITY = 100;
 
 /** How far a tone may be pushed from its chord, in octaves, either way. */
 const MAX_OFFSET_OCTAVES = 3;
@@ -212,12 +216,16 @@ export function arpeggioOrder(pitches: number[], pattern: ArpeggioPattern): numb
  *
  * @param pitches - In tone order, as `voicedPitches` returns them.
  * @param spec - Absent means the block chord: every pitch at once, full length.
+ * @param velocity - How hard the whole chord sounds. One value for every voice:
+ *   a chord block is a single gesture, and per-voice dynamics are what a custom
+ *   block is for.
  */
 export function breakChord(
   pitches: number[],
   startBeat: number,
   duration: number,
-  spec: SegmentBreak | undefined
+  spec: SegmentBreak | undefined,
+  velocity: number = DEFAULT_VELOCITY
 ): TimedPitch[] {
   if (pitches.length === 0 || duration <= 0) return [];
 
@@ -226,7 +234,7 @@ export function breakChord(
     // high is the one every chord had before voicings existed.
     return [...pitches]
       .sort((a, b) => a - b)
-      .map(pitch => ({ pitch, startBeat, duration, velocity: DEFAULT_VELOCITY }));
+      .map(pitch => ({ pitch, startBeat, duration, velocity }));
   }
 
   if (spec.mode === 'arpeggio') {
@@ -243,7 +251,7 @@ export function breakChord(
         pitch,
         startBeat: startBeat + offset,
         duration: Math.max(span, 0),
-        velocity: DEFAULT_VELOCITY,
+        velocity,
       };
     });
   }
@@ -266,7 +274,7 @@ export function breakChord(
     // Every voice releases together, which is both what a strummed chord does
     // and what guarantees nothing extends past the segment.
     duration: duration - i * spread,
-    velocity: DEFAULT_VELOCITY,
+    velocity,
   }));
 }
 
@@ -378,9 +386,15 @@ export function withoutVoicing(segment: ChordSegment): ChordSegment {
 /* Internals                                                                   */
 /* -------------------------------------------------------------------------- */
 
-/** Note segments carry one pitch, so there is nothing to space, double or break. */
+/**
+ * Only a chord has a voicing to edit.
+ *
+ * A note segment carries one pitch, and a custom block carries the notes it was
+ * played with — neither has tones to space, double or break, and an absent `kind`
+ * has always meant a chord.
+ */
 function isChord(segment: ChordSegment): boolean {
-  return segment.kind !== 'note';
+  return segment.kind !== 'note' && segment.kind !== 'custom';
 }
 
 function clampOffset(value: number | undefined): number {

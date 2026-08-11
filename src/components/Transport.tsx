@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import type { TimeSignature } from '@/types/music';
+import type { MidiInputStatus } from '@/engine/midiInput';
 import { SongTimer } from '@/components/SongTimer';
 
 interface TransportProps {
@@ -21,6 +22,12 @@ interface TransportProps {
   isRecordArmed: boolean;
   /** Whether a recorded take snaps to the timeline's grid. */
   recordQuantize: boolean;
+  /**
+   * What MIDI input found. Absent while nothing has reported yet, which is not the
+   * same as having found nothing — so the lamp stays off rather than claiming a
+   * verdict it does not have.
+   */
+  midiStatus?: MidiInputStatus;
   /** Live song position in seconds, for the timer readout. From `usePlayback`. */
   getSongTime: () => number;
   onPlay: () => void;
@@ -41,6 +48,55 @@ interface TransportProps {
   canRedo: boolean;
 }
 
+/** How many keyboards are named outright before the lamp starts counting instead. */
+const MIDI_NAMES_SHOWN = 1;
+
+/**
+ * What the MIDI lamp says, and what it says on hover.
+ *
+ * The four states are worth telling apart because each calls for something
+ * different: play, plug a keyboard in, grant the permission, or use another
+ * browser. Collapsing them into "no MIDI" would leave the user guessing which.
+ */
+function midiReadout(status: MidiInputStatus): { label: string; title: string; lit: boolean } {
+  if (status.support === 'unsupported') {
+    return { label: 'MIDI', title: 'This browser has no MIDI support', lit: false };
+  }
+  if (status.support === 'denied') {
+    return { label: 'MIDI', title: 'MIDI access was refused', lit: false };
+  }
+  if (status.inputs.length === 0) {
+    return { label: 'MIDI', title: 'No MIDI input connected', lit: false };
+  }
+  return {
+    // One keyboard is named; several are counted, because the names are long and
+    // the count is the part that answers "did it see them all?".
+    label:
+      status.inputs.length > MIDI_NAMES_SHOWN ? `MIDI ${status.inputs.length}` : 'MIDI',
+    title: `MIDI input: ${status.inputs.join(', ')}`,
+    lit: true,
+  };
+}
+
+function MidiIndicator({ status }: { status: MidiInputStatus }) {
+  const { label, title, lit } = midiReadout(status);
+
+  return (
+    <div
+      data-testid="midi-indicator"
+      title={title}
+      aria-label={title}
+      className={`px-2 py-1.5 text-xs rounded border ${
+        lit
+          ? 'border-emerald-500 text-emerald-300 bg-emerald-900/40'
+          : 'border-gray-600 text-gray-500'
+      }`}
+    >
+      🎹 {label}
+    </div>
+  );
+}
+
 /**
  * Transport controls for playback: play, pause, stop, BPM, metronome, loop.
  */
@@ -57,6 +113,7 @@ export const Transport: React.FC<TransportProps> = ({
   isMetronomeOn,
   isRecordArmed,
   recordQuantize,
+  midiStatus,
   getSongTime,
   onPlay,
   onPause,
@@ -207,6 +264,11 @@ export const Transport: React.FC<TransportProps> = ({
       >
         ⊞ Quantize
       </button>
+
+      {/* Whether a keyboard is there to play. A readout rather than a control: every
+          input is listened to, so there is nothing to choose — the only question it
+          answers is why pressing a key made no sound. */}
+      {midiStatus && <MidiIndicator status={midiStatus} />}
 
       {/* Repeat toggle. Always shown: gating it on a range being set would hide the
           only control that can turn it back on. */}

@@ -903,6 +903,69 @@ describe('ChordTimeline', () => {
     });
   });
 
+  describe('custom blocks', () => {
+    /** Put a recorded block on the timeline, as MIDI recording would. */
+    function placeCustom(pitches: number[]) {
+      const segment: ChordSegment = {
+        id: 'take-1',
+        kind: 'custom',
+        startBeat: 0,
+        duration: 2,
+        customNotes: pitches.map(pitch => ({ pitch, startBeat: 0, duration: 2 })),
+      };
+      projectStore.getState().recordSegment(trackId(), 0, segment);
+      return segment;
+    }
+
+    it('names the block after the notes in it', () => {
+      placeCustom([60, 64, 67]);
+      render(<ChordTimeline />);
+
+      expect(screen.getByTestId('chord-block-take-1')).toHaveAccessibleName('Recorded C4 E4 G4');
+    });
+
+    it('lists only the first few, and counts the rest', () => {
+      placeCustom([60, 62, 64, 65, 67]);
+      render(<ChordTimeline />);
+
+      expect(screen.getByTestId('chord-block-take-1')).toHaveAccessibleName(
+        'Recorded C4 D4 E4 +2'
+      );
+    });
+
+    it('names each pitch once, however many times it was played', () => {
+      const segment: ChordSegment = {
+        id: 'take-1',
+        kind: 'custom',
+        startBeat: 0,
+        duration: 2,
+        customNotes: [
+          { pitch: 60, startBeat: 0, duration: 0.5 },
+          { pitch: 60, startBeat: 1, duration: 0.5 },
+          { pitch: 64, startBeat: 1.5, duration: 0.5 },
+        ],
+      };
+      projectStore.getState().recordSegment(trackId(), 0, segment);
+      render(<ChordTimeline />);
+
+      expect(screen.getByTestId('chord-block-take-1')).toHaveAccessibleName('Recorded C4 E4');
+    });
+
+    it('wears no octave badge — its notes carry their own registers', () => {
+      placeCustom([60, 64, 67]);
+      render(<ChordTimeline />);
+
+      expect(screen.queryByTestId('octave-badge-take-1')).not.toBeInTheDocument();
+    });
+
+    it('generates the notes it was played with', () => {
+      placeCustom([60, 64, 67]);
+      render(<ChordTimeline />);
+
+      expect(barNotes(bars()[0], trackId()).map(n => n.pitch)).toEqual([60, 64, 67]);
+    });
+  });
+
   it('offers no Add Chord, chord-symbol field or Auto-Fill control', () => {
     render(<ChordTimeline />);
     expect(screen.queryByText(/add chord/i)).not.toBeInTheDocument();

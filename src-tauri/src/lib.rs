@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod localfile;
 pub mod projectfile;
 pub mod vst3;
@@ -22,6 +23,8 @@ pub fn run() {
             localfile::file_read_text,
             localfile::file_read_bytes,
             localfile::file_exists,
+            audio::audio_output_devices,
+            vst3::vst3_set_output_device,
             vst3::vst3_list,
             vst3::vst3_scan,
             vst3::vst3_load,

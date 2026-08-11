@@ -12,9 +12,10 @@ import {
   convertSegmentKind,
   currentKind,
 } from "@/engine/chordOperations";
-import { Bar, Scale, ChordSegment, Note, TimeSignature } from "@/types/music";
+import { Bar, Scale, ChordSegment, Note, SegmentNote, TimeSignature } from "@/types/music";
 import { generateId } from "@/utils/id";
 import { barChords } from "@/engine/timeline";
+import { PIANO_ROLL_MAX_MIDI } from "@/utils/constants";
 import { soloContent, TEST_TRACK_ID } from "../helpers/tracks";
 
 const TS_4_4: TimeSignature = { beatsPerMeasure: 4, beatUnit: 4 };
@@ -1339,6 +1340,179 @@ describe("chordOperations", () => {
         );
         expect(result.inversion).toBe(0);
       });
+    });
+  });
+
+  // A custom block carries the notes it was played with, rather than naming
+  // material to be interpreted. These cover what that means for generation and
+  // for every transform that branches on kind.
+  describe("custom segments", () => {
+    const custom = (
+      customNotes: SegmentNote[],
+      overrides: Partial<ChordSegment> = {}
+    ): ChordSegment => ({
+      id: generateId(),
+      kind: "custom",
+      startBeat: 0,
+      duration: 2,
+      customNotes,
+      ...overrides,
+    });
+
+    /** A three-note stack played at once, as holding a chord would produce. */
+    const triadNotes: SegmentNote[] = [
+      { pitch: 60, startBeat: 0, duration: 2 },
+      { pitch: 64, startBeat: 0, duration: 2 },
+      { pitch: 67, startBeat: 0, duration: 2 },
+    ];
+
+    describe("generateNotesFromSegments", () => {
+      it("emits one note per custom note, offset from the segment start", () => {
+        const segment = custom(
+          [
+            { pitch: 60, startBeat: 0, duration: 1 },
+            { pitch: 64, startBeat: 0.5, duration: 1.5 },
+          ],
+          { startBeat: 2 }
+        );
+        const notes = generateNotesFromSegments([segment], barWith([segment]), C_MAJOR, TS_4_4);
+
+        expect(notes).toHaveLength(2);
+        expect(notes[0]).toMatchObject({ pitch: 60, startBeat: 2, duration: 1 });
+        expect(notes[1]).toMatchObject({ pitch: 64, startBeat: 2.5, duration: 1.5 });
+      });
+
+      it("keeps overlapping notes — that is what a custom block is for", () => {
+        const segment = custom(triadNotes);
+        const notes = generateNotesFromSegments([segment], barWith([segment]), C_MAJOR, TS_4_4);
+
+        expect(notes.map((n) => n.pitch).sort((a, b) => a - b)).toEqual([60, 64, 67]);
+        expect(notes.every((n) => n.startBeat === 0)).toBe(true);
+      });
+
+      it("uses each note's own velocity", () => {
+        const segment = custom([
+          { pitch: 60, startBeat: 0, duration: 1, velocity: 42 },
+          { pitch: 64, startBeat: 0, duration: 1, velocity: 118 },
+        ]);
+        const notes = generateNotesFromSegments([segment], barWith([segment]), C_MAJOR, TS_4_4);
+
+        expect(notes.map((n) => n.velocity)).toEqual([42, 118]);
+      });
+
+      it("falls back to the segment velocity, then to 100", () => {
+        const withSegmentVelocity = custom(
+          [{ pitch: 60, startBeat: 0, duration: 1 }],
+          { velocity: 70 }
+        );
+        const bare = custom([{ pitch: 60, startBeat: 0, duration: 1 }]);
+
+        expect(
+          generateNotesFromSegments(
+            [withSegmentVelocity],
+            barWith([withSegmentVelocity]),
+            C_MAJOR,
+            TS_4_4
+          )[0].velocity
+        ).toBe(70);
+        expect(
+          generateNotesFromSegments([bare], barWith([bare]), C_MAJOR, TS_4_4)[0].velocity
+        ).toBe(100);
+      });
+
+      it("yields nothing for a custom block with no notes", () => {
+        const segment = custom([]);
+        expect(
+          generateNotesFromSegments([segment], barWith([segment]), C_MAJOR, TS_4_4)
+        ).toEqual([]);
+      });
+
+      it("honours a velocity on a note segment", () => {
+        const segment: ChordSegment = {
+          id: generateId(),
+          kind: "note",
+          startBeat: 0,
+          pitch: 60,
+          duration: 1,
+          velocity: 55,
+        };
+        const notes = generateNotesFromSegments([segment], barWith([segment]), C_MAJOR, TS_4_4);
+        expect(notes[0].velocity).toBe(55);
+      });
+
+      it("honours a velocity on a chord segment", () => {
+        const segment: ChordSegment = {
+          id: generateId(),
+          kind: "chord",
+          startBeat: 0,
+          root: "C",
+          quality: "major",
+          duration: 1,
+          velocity: 55,
+        };
+        const notes = generateNotesFromSegments([segment], barWith([segment]), C_MAJOR, TS_4_4);
+        expect(notes).toHaveLength(3);
+        expect(notes.every((n) => n.velocity === 55)).toBe(true);
+      });
+    });
+
+    describe("shiftSegmentOctave", () => {
+      it("moves every note an octave", () => {
+        const result = shiftSegmentOctave(custom(triadNotes), 1);
+        expect(result.customNotes?.map((n) => n.pitch)).toEqual([72, 76, 79]);
+      });
+
+      it("refuses the shift when any note would leave the roll", () => {
+        const segment = custom([
+          { pitch: 60, startBeat: 0, duration: 1 },
+          { pitch: PIANO_ROLL_MAX_MIDI, startBeat: 0, duration: 1 },
+        ]);
+        expect(shiftSegmentOctave(segment, 1)).toBe(segment);
+      });
+    });
+
+    describe("stepSegmentInScale", () => {
+      it("moves the whole block by the step its lowest note takes, keeping its shape", () => {
+        // C4 steps up to D4 in C major: +2 semitones for every note.
+        const result = stepSegmentInScale(custom(triadNotes), C_MAJOR, 1);
+        expect(result.customNotes?.map((n) => n.pitch)).toEqual([62, 66, 69]);
+      });
+
+      it("steps down the same way", () => {
+        // C4 steps down to B3: -1 semitone for every note.
+        const result = stepSegmentInScale(custom(triadNotes), C_MAJOR, -1);
+        expect(result.customNotes?.map((n) => n.pitch)).toEqual([59, 63, 66]);
+      });
+    });
+
+    it("passes through retuneSegmentsToScale untouched — a played block is chromatic", () => {
+      const segment = custom(triadNotes);
+      const [result] = retuneSegmentsToScale(
+        [segment],
+        { root: "C", type: "major" },
+        { root: "D", type: "major" }
+      );
+      expect(result).toBe(segment);
+    });
+
+    it("passes through cycleSegmentInversion untouched — nothing named to invert", () => {
+      const segment = custom(triadNotes);
+      expect(cycleSegmentInversion(segment)).toBe(segment);
+    });
+
+    it("reports its own kind and refuses conversion", () => {
+      const segment = custom(triadNotes);
+      expect(currentKind(segment)).toBe("custom");
+      expect(convertSegmentKind(segment, C_MAJOR, "triad")).toBe(segment);
+      expect(convertSegmentKind(segment, C_MAJOR, "note")).toBe(segment);
+    });
+
+    it("is never merged into an adjacent block", () => {
+      // Both carry no roman numeral, which is exactly what the merge keys on —
+      // without a guard two separate takes would silently fuse into one.
+      const first = custom(triadNotes);
+      const second = custom([{ pitch: 65, startBeat: 0, duration: 2 }]);
+      expect(mergeAdjacentChords([first, second])).toHaveLength(2);
     });
   });
 });

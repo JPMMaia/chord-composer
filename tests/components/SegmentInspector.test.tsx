@@ -412,4 +412,68 @@ describe('SegmentInspector', () => {
     expect(screen.getByText('A single note has no chord tones to voice.')).toBeInTheDocument();
     expect(screen.queryByTestId('spacing-drop2')).not.toBeInTheDocument();
   });
+
+  describe('a recorded block', () => {
+    function customSegment(overrides: Partial<ChordSegment> = {}): ChordSegment {
+      return {
+        id: generateId(),
+        kind: 'custom',
+        duration: 2,
+        customNotes: [
+          { pitch: 60, startBeat: 0, duration: 2, velocity: 88 },
+          { pitch: 64, startBeat: 0.5, duration: 1.5, velocity: 71 },
+        ],
+        ...overrides,
+      };
+    }
+
+    it('lists the notes it holds, with their positions and velocities', () => {
+      placeAndSelect(customSegment());
+      render(<SegmentInspector />);
+
+      const rows = screen.getAllByTestId(/^custom-note-/);
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toHaveTextContent('C4');
+      expect(rows[0]).toHaveTextContent('88');
+      expect(rows[1]).toHaveTextContent('E4');
+      expect(rows[1]).toHaveTextContent('71');
+    });
+
+    it('names it as recorded rather than as a chord', () => {
+      placeAndSelect(customSegment());
+      render(<SegmentInspector />);
+
+      expect(screen.getByTestId('segment-inspector')).toHaveTextContent('Recorded');
+    });
+
+    it('offers no kind conversion — there is no degree to convert', () => {
+      placeAndSelect(customSegment());
+      render(<SegmentInspector />);
+
+      expect(screen.queryByTestId('segment-kind-select')).not.toBeInTheDocument();
+    });
+
+    it('offers no key or voicing controls', () => {
+      placeAndSelect(customSegment());
+      render(<SegmentInspector />);
+
+      expect(screen.queryByTestId('spacing-drop2')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('inversion-0')).not.toBeInTheDocument();
+      expect(screen.queryByLabelText(/scale root/i)).not.toBeInTheDocument();
+    });
+
+    it('keeps the kind dropdown away from a selection that includes one', () => {
+      // Converting the chord would be fine; converting the take alongside it is
+      // not, so the control is withheld rather than silently applied to half.
+      const chord = chordSegment();
+      const take = customSegment();
+      state().insertSegment(bars()[0].id, 0, chord, trackId());
+      state().insertSegment(bars()[1].id, 0, take, trackId());
+      selectionStore.getState().setSelectedSegments([chord.id, take.id]);
+
+      render(<SegmentInspector />);
+
+      expect(screen.queryByTestId('segment-kind-select')).not.toBeInTheDocument();
+    });
+  });
 });

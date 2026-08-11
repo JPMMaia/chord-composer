@@ -8,6 +8,7 @@ import {
   autoSaveToLocalStorage,
   loadFromLocalStorage,
   clearLocalStorage,
+  SCHEMA_VERSION,
 } from '@/engine/fileIO';
 import { Project, Bar, Track, Note, ChordSegment, TimeSignature } from '@/types/music';
 import { generateId } from '@/utils/id';
@@ -429,9 +430,9 @@ describe('fileIO', () => {
       });
     }
 
-    it('declares schema version 1.8', () => {
+    it('declares the current schema version', () => {
       const parsed = JSON.parse(serializeProject(createTestProject()));
-      expect(parsed.version).toBe('1.8');
+      expect(parsed.version).toBe(SCHEMA_VERSION);
     });
 
     describe('voicing', () => {
@@ -863,6 +864,132 @@ describe('fileIO', () => {
       });
 
       expect(soleContent(deserializeProject(json).bars[0]).chords[0].startBeat).toBeUndefined();
+    });
+  });
+
+  describe('schema 1.9 custom blocks and velocity', () => {
+    /** A project holding one recorded block: three notes, one of them late. */
+    function recordedProject(): Project {
+      return createTestProject({
+        bars: [
+          {
+            id: 'bar-a',
+            barIndex: 0,
+            content: fixtureContent([
+              {
+                id: 'take-1',
+                kind: 'custom',
+                startBeat: 0,
+                duration: 2,
+                customNotes: [
+                  { pitch: 60, startBeat: 0, duration: 2, velocity: 88 },
+                  { pitch: 64, startBeat: 0, duration: 2, velocity: 71 },
+                  { pitch: 67, startBeat: 0.5, duration: 1.5 },
+                ],
+              },
+            ], []),
+          },
+        ],
+      });
+    }
+
+    it('states the current schema version', () => {
+      expect(SCHEMA_VERSION).toBe('1.9');
+    });
+
+    it('round-trips a custom block and its notes', () => {
+      const restored = deserializeProject(serializeProject(recordedProject()));
+      const [segment] = restored.bars[0].content[FIXTURE_TRACK_ID].chords;
+
+      expect(segment.kind).toBe('custom');
+      expect(segment.customNotes).toEqual([
+        { pitch: 60, startBeat: 0, duration: 2, velocity: 88 },
+        { pitch: 64, startBeat: 0, duration: 2, velocity: 71 },
+        { pitch: 67, startBeat: 0.5, duration: 1.5, velocity: undefined },
+      ]);
+    });
+
+    it('round-trips a segment velocity', () => {
+      const project = createTestProject({
+        bars: [
+          {
+            id: 'bar-a',
+            barIndex: 0,
+            content: fixtureContent([
+              { id: 'c1', kind: 'chord', startBeat: 0, duration: 4, root: 'C', quality: 'major', velocity: 64 },
+            ], []),
+          },
+        ],
+      });
+
+      const restored = deserializeProject(serializeProject(project));
+      expect(restored.bars[0].content[FIXTURE_TRACK_ID].chords[0].velocity).toBe(64);
+    });
+
+    it('writes neither key for a project that has no recorded material', () => {
+      // A project nobody has recorded into must serialise exactly as it did under
+      // 1.8 — an absent key, not an explicit null or empty list.
+      const parsed = JSON.parse(serializeProject(createTestProject()));
+      const chord = parsed.bars[0].content[FIXTURE_TRACK_ID].chords[0];
+      expect('customNotes' in chord).toBe(false);
+      expect('velocity' in chord).toBe(false);
+    });
+
+    it('drops malformed notes rather than guessing at them', () => {
+      const json = JSON.stringify({
+        ...JSON.parse(serializeProject(createTestProject())),
+        bars: [
+          {
+            id: 'bar-a',
+            barIndex: 0,
+            content: fixtureContent([
+              {
+                id: 'take-1',
+                kind: 'custom',
+                startBeat: 0,
+                duration: 2,
+                customNotes: [
+                  { pitch: 60, startBeat: 0, duration: 1 },
+                  { pitch: 'sixty', startBeat: 0, duration: 1 },
+                  { startBeat: 0, duration: 1 },
+                  null,
+                ],
+              },
+            ], []),
+          },
+        ],
+      });
+
+      const segment = soleContent(deserializeProject(json).bars[0]).chords[0];
+      expect(segment.customNotes).toHaveLength(1);
+      expect(segment.customNotes?.[0].pitch).toBe(60);
+    });
+
+    it('reads a pre-1.9 file unchanged — no custom notes, no velocity', () => {
+      const legacy = JSON.stringify({
+        ...JSON.parse(serializeProject(createTestProject())),
+        version: '1.8',
+      });
+
+      const segment = deserializeProject(legacy).bars[0].content[FIXTURE_TRACK_ID].chords[0];
+      expect(segment.kind).toBe('chord');
+      expect(segment.customNotes).toBeUndefined();
+      expect(segment.velocity).toBeUndefined();
+    });
+
+    it('reads an unknown kind as a chord, as every version has', () => {
+      const json = JSON.stringify({
+        ...JSON.parse(serializeProject(createTestProject())),
+        bars: [
+          {
+            id: 'bar-a',
+            barIndex: 0,
+            content: fixtureContent([{ id: 'c1', kind: 'nonsense', duration: 1 }], []),
+          },
+        ],
+      });
+
+      expect(soleContent(deserializeProject(json).bars[0]).chords[0].kind).toBe('chord');
     });
   });
 

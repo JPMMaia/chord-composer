@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { Transport } from '@/components/Transport';
 
 describe('Transport', () => {
@@ -263,6 +263,57 @@ describe('Transport', () => {
       const redoIdx = children.indexOf(redoBtn);
       expect(undoIdx).toBeGreaterThan(loopIdx);
       expect(redoIdx).toBeGreaterThan(loopIdx);
+    });
+  });
+
+  describe('MIDI indicator', () => {
+    const midi = (props: Partial<Parameters<typeof Transport>[0]>) =>
+      render(<Transport {...defaultProps} {...props} />);
+
+    it('names the keyboard that is connected', () => {
+      midi({ midiStatus: { support: 'ok', inputs: ['Roland A-49'] } });
+      expect(screen.getByTestId('midi-indicator')).toHaveTextContent('MIDI');
+      expect(screen.getByTestId('midi-indicator')).toHaveAttribute(
+        'title',
+        'MIDI input: Roland A-49'
+      );
+    });
+
+    it('counts several keyboards rather than listing them all', () => {
+      midi({
+        midiStatus: { support: 'ok', inputs: ['Roland A-49', 'Launchkey', 'nanoKEY'] },
+      });
+      expect(screen.getByTestId('midi-indicator')).toHaveTextContent('MIDI 3');
+    });
+
+    it('says when nothing is plugged in', () => {
+      midi({ midiStatus: { support: 'ok', inputs: [] } });
+      expect(screen.getByTestId('midi-indicator')).toHaveAttribute(
+        'title',
+        'No MIDI input connected'
+      );
+    });
+
+    it('tells a refused permission apart from an absent one', () => {
+      // Two different dead ends calling for two different fixes: one is a browser
+      // that cannot do this at all, the other is one permission click away.
+      midi({ midiStatus: { support: 'denied', inputs: [] } });
+      expect(screen.getByTestId('midi-indicator')).toHaveAttribute(
+        'title',
+        'MIDI access was refused'
+      );
+
+      cleanup();
+      midi({ midiStatus: { support: 'unsupported', inputs: [] } });
+      expect(screen.getByTestId('midi-indicator')).toHaveAttribute(
+        'title',
+        'This browser has no MIDI support'
+      );
+    });
+
+    it('shows nothing at all when no status has been reported', () => {
+      midi({});
+      expect(screen.queryByTestId('midi-indicator')).not.toBeInTheDocument();
     });
   });
 });

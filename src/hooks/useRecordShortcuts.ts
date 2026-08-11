@@ -4,8 +4,8 @@ import { selectionStore } from '@/store/selectionStore';
 import { editorStore } from '@/store/editorStore';
 import { auditionSegment } from '@/engine/audition';
 import { getPaletteItems, paletteItemToSegment } from '@/engine/palette';
-import { songTimeToBeat } from '@/engine/scheduler';
-import { MIN_SEGMENT_BEATS, snapBeat } from '@/engine/timeline';
+import { recordBeat, recordFloor } from '@/engine/recording';
+import { MIN_SEGMENT_BEATS } from '@/engine/timeline';
 import type { InstrumentPool } from '@/engine/instrumentPool';
 import type { ChordSegment } from '@/types/music';
 
@@ -99,11 +99,8 @@ export function useRecordShortcuts({
     /** Where the playhead is now, in absolute beats, snapped as the user asked. */
     const beatNow = (): number => {
       const project = projectStore.getState().project;
-      const raw = songTimeToBeat(getSongTime(), project?.bpm ?? 120);
       const { recordQuantize, snapBeats } = editorStore.getState();
-      // Unquantized still lands on the 0.25 floor the engine works in; the choice is
-      // between the musical grid and the finest one, not between grid and chaos.
-      return snapBeat(raw, recordQuantize ? snapBeats : MIN_SEGMENT_BEATS);
+      return recordBeat(getSongTime(), project?.bpm ?? 120, { recordQuantize, snapBeats });
     };
 
     /**
@@ -121,7 +118,7 @@ export function useRecordShortcuts({
       if (!commit || take.pressBeat === null) return;
 
       const { recordQuantize, snapBeats } = editorStore.getState();
-      const floor = recordQuantize ? snapBeats : MIN_SEGMENT_BEATS;
+      const floor = recordFloor({ recordQuantize, snapBeats });
       const duration = Math.max(floor, beatNow() - take.pressBeat);
       recordSegment(take.trackId, take.pressBeat, { ...take.segment, duration });
     };

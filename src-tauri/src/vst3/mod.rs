@@ -29,6 +29,13 @@ use module::PluginInfo;
 pub struct Vst3State {
     catalog: Mutex<Option<Vec<PluginInfo>>>,
     engine: Mutex<Option<Engine>>,
+    /// The output endpoint the user picked, by name. `None` means the system
+    /// default.
+    ///
+    /// Kept here rather than only inside the engine because the engine may not
+    /// exist yet: a device can be chosen in a session that never loads a
+    /// plugin, and the choice has to survive until one is.
+    output_device: Mutex<Option<String>>,
 }
 
 impl Vst3State {
@@ -56,10 +63,40 @@ impl Vst3State {
     fn with_engine<T>(&self, f: impl FnOnce(&Engine) -> Result<T, String>) -> Result<T, String> {
         let mut guard = self.engine.lock().unwrap();
         if guard.is_none() {
-            *guard = Some(Engine::start()?);
+            let preferred = self.output_device.lock().unwrap().clone();
+            *guard = Some(Engine::start(preferred)?);
         }
         f(guard.as_ref().expect("just started"))
     }
+
+    /// Play plugins through the endpoint called `name`, or the system default.
+    ///
+    /// Remembered whether or not the engine is running, so a device chosen
+    /// before the first plugin is loaded is the one that plugin comes up on.
+    pub fn set_output_device(&self, name: Option<String>) -> Result<(), String> {
+        *self.output_device.lock().unwrap() = name.clone();
+
+        // Deliberately does not go through `with_engine`: choosing where sound
+        // would come out must not be what opens an audio device.
+        let guard = self.engine.lock().unwrap();
+        match guard.as_ref() {
+            Some(engine) => engine.set_output_device(name.as_deref()),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Play hosted plugins through a named output endpoint.
+///
+/// The webview's own sound is moved separately, with `AudioContext.setSinkId` —
+/// the two engines have entirely separate device handles, so one picker has to
+/// drive both. See `src/engine/audioOutput.ts`.
+#[tauri::command]
+pub fn vst3_set_output_device(
+    state: tauri::State<'_, Vst3State>,
+    name: Option<String>,
+) -> Result<(), String> {
+    state.set_output_device(name)
 }
 
 /// Every VST3 instrument installed on this machine.

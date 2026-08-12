@@ -18,6 +18,7 @@ import { describeMeter } from '@/engine/meterDisplay';
 import { paletteItemToSegment, type PaletteItem } from '@/engine/palette';
 import { PALETTE_DRAG_TYPE } from '@/components/ScalePalette';
 import { ChordSegmentBlock } from '@/components/ChordSegmentBlock';
+import { AutomationLane, AUTOMATION_LANE_HEIGHT } from '@/components/AutomationLane';
 import { BAR_LINE_WIDTH, PIANO_KEYS_WIDTH, PIXELS_PER_BEAT } from '@/utils/constants';
 
 /** Beats a freshly dropped block occupies before the user resizes it. */
@@ -141,6 +142,7 @@ export const ChordTimeline: React.FC = () => {
   const moveSegment = projectStore(s => s.moveSegment);
   const resizeSegmentDuration = projectStore(s => s.resizeSegmentDuration);
   const setBarTimeSignature = projectStore(s => s.setBarTimeSignature);
+  const clearVolumeAutomation = projectStore(s => s.clearVolumeAutomation);
   const setLoopRegion = projectStore(s => s.setLoopRegion);
 
   const moveSegments = projectStore(s => s.moveSegments);
@@ -161,6 +163,8 @@ export const ChordTimeline: React.FC = () => {
   const pixelsPerBeat = editorStore(s => s.pixelsPerBeat);
   const setSnapBeats = editorStore(s => s.setSnapBeats);
   const setPixelsPerBeat = editorStore(s => s.setPixelsPerBeat);
+  const showAutomation = editorStore(s => s.showAutomation);
+  const setShowAutomation = editorStore(s => s.setShowAutomation);
   const paletteScale = editorStore(s => s.paletteScale);
   const scrollX = editorStore(s => s.scrollX);
   const setScrollX = editorStore(s => s.setScrollX);
@@ -424,6 +428,8 @@ export const ChordTimeline: React.FC = () => {
   const { bars, timeSignature: projectTs } = project;
   const totalBeats = getTotalBeats(bars, projectTs);
   const selectedTrack = project.tracks.find(t => t.id === selectedTrackId);
+  /** Whether the selected instrument has a curve, and so something to clear. */
+  const hasAutomation = (selectedTrack?.volumeAutomation?.length ?? 0) > 0;
 
   /** The range to draw: the one being dragged if there is one, else the stored one. */
   const shownRange = rangeDrag
@@ -650,6 +656,21 @@ export const ChordTimeline: React.FC = () => {
           </select>
         </label>
 
+        <button
+          type="button"
+          aria-label="Volume automation"
+          aria-pressed={showAutomation}
+          onClick={() => setShowAutomation(!showAutomation)}
+          title="Show the volume curve for the selected instrument"
+          className={`px-1.5 rounded border ${
+            showAutomation
+              ? 'bg-indigo-600 border-indigo-500 text-white'
+              : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
+          }`}
+        >
+          Volume
+        </button>
+
         {/* Which instrument a drop will land on. The lanes show only this one's
             blocks, so without this the timeline going empty on an instrument
             switch reads as data loss. */}
@@ -671,8 +692,34 @@ export const ChordTimeline: React.FC = () => {
       <div
         data-testid="timeline-gutter"
         style={{ width: `${PIANO_KEYS_WIDTH}px` }}
-        className="shrink-0 bg-gray-800 border-r border-gray-700"
-      />
+        className="shrink-0 bg-gray-800 border-r border-gray-700 flex flex-col justify-end"
+      >
+        {/* Bottom-aligned so it lines up with the automation lane across the two
+            columns, both being the last row of the same stretched flex row. */}
+        {showAutomation && selectedTrack && (
+          <div
+            style={{ height: `${AUTOMATION_LANE_HEIGHT}px` }}
+            className="flex items-center justify-between gap-1 px-2 text-xs text-gray-400 border-t border-gray-700"
+          >
+            <span>Volume</span>
+
+            {/* Only once there is a curve to clear: an always-present button that
+                does nothing most of the time reads as broken, and dropping the last
+                point by hand is the only other way back to the fader. */}
+            {hasAutomation && (
+              <button
+                type="button"
+                aria-label={`Clear volume curve for ${selectedTrack.name}`}
+                title="Remove every point and go back to the instrument's fader"
+                onClick={() => clearVolumeAutomation(selectedTrack.id)}
+                className="px-1 rounded text-[11px] text-gray-500 hover:text-red-400 hover:bg-gray-700 transition-colors"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Still a scroll container, so wheel and trackpad work over the lanes, but
           it draws no bar of its own: the editor has one, under the piano roll. */}
@@ -879,6 +926,19 @@ export const ChordTimeline: React.FC = () => {
           );
         })}
         </div>
+
+        {/* Volume over time for the instrument being edited. Inside the scroll
+            container and after the bar row, so it rides the same beat axis, zoom
+            and scroll offset as everything above it with no plumbing of its own —
+            and one continuous strip, so a ramp crosses a bar line in one piece. */}
+        {showAutomation && selectedTrack && (
+          <AutomationLane
+            track={selectedTrack}
+            bars={bars}
+            projectTs={projectTs}
+            totalBeats={totalBeats}
+          />
+        )}
         </div>
       </div>
       </div>

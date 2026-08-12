@@ -1,5 +1,6 @@
 import type {
   ArpeggioPattern,
+  AutomationPoint,
   ChordQuality,
   ChordSegment,
   Note,
@@ -17,6 +18,7 @@ import type {
   TrackContent,
 } from '@/types/music';
 import { barChords, isValidTimeSignature } from '@/engine/timeline';
+import { normalizePoints } from '@/engine/volumeAutomation';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
 import { trackColorAt } from '@/utils/constants';
 
@@ -84,8 +86,14 @@ const LEGACY_TRACK_ID = 'track-legacy';
  * absent, so a project nobody has recorded into serialises byte for byte as it did
  * under 1.8, and a pre-1.9 file has no custom blocks and no velocities: its notes
  * sound at the fixed 100 they always did.
+ *
+ * 1.10 gave every instrument an optional volume curve: breakpoints in absolute
+ * beats with linear ramps between them, overriding the flat `volume` whenever it
+ * has any. The key is omitted when the curve is empty, so a project nobody has
+ * automated serialises exactly as it did under 1.9, and a pre-1.10 file has no
+ * curves at all — its instruments play at the one level they always did.
  */
-export const SCHEMA_VERSION = '1.9';
+export const SCHEMA_VERSION = '1.10';
 
 /**
  * Validation error returned by validateProject.
@@ -150,6 +158,10 @@ export function serializeProject(project: Project): string {
       name: t.name,
       instrument: t.instrument,
       volume: t.volume,
+      // Omitted when there is no curve, so an unautomated project gains no bytes
+      // and still round-trips byte for byte as it did under 1.9.
+      volumeAutomation:
+        t.volumeAutomation && t.volumeAutomation.length > 0 ? t.volumeAutomation : undefined,
       pan: t.pan,
       muted: t.muted,
       solo: t.solo,
@@ -347,6 +359,19 @@ function readCustomNotes(raw: unknown): SegmentNote[] | undefined {
 }
 
 /**
+ * Read a track's volume curve off a file.
+ *
+ * Absent when there is nothing usable, rather than an empty array: absent is what
+ * hands the instrument back to its flat `volume`, and an empty array would only be
+ * a longer way of saying the same thing.
+ */
+function parseAutomation(raw: unknown): AutomationPoint[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const points = normalizePoints(raw as AutomationPoint[]);
+  return points.length > 0 ? points : undefined;
+}
+
+/**
  * Deserialize a JSON string back to a Project.
  * Throws on invalid JSON or missing required fields.
  */
@@ -389,6 +414,11 @@ export function deserializeProject(json: string): Project {
             ? t.instrument
             : DEFAULT_INSTRUMENT_ID,
         volume: typeof t.volume === 'number' ? t.volume : 1.0,
+        // Normalised on read rather than trusted: it is the one field a hand-edited
+        // file can put out of order, and everything downstream assumes it is sorted.
+        // Anything malformed is dropped, which lands the track back on its flat
+        // volume rather than failing the whole load.
+        volumeAutomation: parseAutomation(t.volumeAutomation),
         pan: typeof t.pan === 'number' ? t.pan : 0,
         muted: t.muted === true,
         solo: t.solo === true,
@@ -611,6 +641,27 @@ export function validateProject(project: Project): ValidationResult {
     }
     if (typeof t.pan !== 'number' || t.pan < -1 || t.pan > 1) {
       errors.push(`Track ${i}: pan must be between -1 and 1.`);
+    }
+    if (t.volumeAutomation !== undefined) {
+      if (!Array.isArray(t.volumeAutomation)) {
+        errors.push(`Track ${i}: volume automation must be a list of points.`);
+      } else {
+        for (const point of t.volumeAutomation) {
+          if (typeof point?.beat !== 'number' || !Number.isFinite(point.beat) || point.beat < 0) {
+            errors.push(`Track ${i}: volume automation beat must be a number >= 0.`);
+            break;
+          }
+          if (
+            typeof point.value !== 'number' ||
+            !Number.isFinite(point.value) ||
+            point.value < 0 ||
+            point.value > 1
+          ) {
+            errors.push(`Track ${i}: volume automation value must be between 0 and 1.`);
+            break;
+          }
+        }
+      }
     }
   }
 

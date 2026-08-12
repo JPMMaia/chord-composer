@@ -1867,4 +1867,121 @@ describe('projectStore', () => {
       expect(barChords(targetBar, otherTrackId!).length).toBe(0);
     });
   });
+
+  describe('volume automation', () => {
+    const state = () => projectStore.getState();
+    const points = () => state().project!.tracks[0].volumeAutomation;
+
+    beforeEach(() => {
+      state().createProject();
+    });
+
+    it('starts with no curve, so the flat volume stands', () => {
+      expect(points()).toBeUndefined();
+    });
+
+    it('adds points in beat order however they arrive', () => {
+      state().addVolumePoint(trackId(), 8, 0);
+      state().addVolumePoint(trackId(), 4, 1);
+
+      expect(points()).toEqual([
+        { beat: 4, value: 1 },
+        { beat: 8, value: 0 },
+      ]);
+    });
+
+    it('replaces a point already on that beat', () => {
+      state().addVolumePoint(trackId(), 4, 1);
+      state().addVolumePoint(trackId(), 4, 0.25);
+
+      expect(points()).toEqual([{ beat: 4, value: 0.25 }]);
+    });
+
+    it('clamps rather than throwing, unlike setTrackVolume', () => {
+      // These come from a pointer drag: out of range means the gesture left the
+      // lane, which is not a programming error.
+      expect(() => state().addVolumePoint(trackId(), -5, 3)).not.toThrow();
+      expect(points()).toEqual([{ beat: 0, value: 1 }]);
+    });
+
+    it('ignores a non-finite position', () => {
+      state().addVolumePoint(trackId(), Number.NaN, 0.5);
+      expect(points()).toEqual([{ beat: 0, value: 0.5 }]);
+    });
+
+    it('moves a point and re-sorts', () => {
+      state().addVolumePoint(trackId(), 4, 1);
+      state().addVolumePoint(trackId(), 8, 0);
+      state().moveVolumePoint(trackId(), 0, 12, 0.5);
+
+      expect(points()).toEqual([
+        { beat: 8, value: 0 },
+        { beat: 12, value: 0.5 },
+      ]);
+    });
+
+    it('replaces the occupant when a move lands on another point', () => {
+      state().addVolumePoint(trackId(), 4, 1);
+      state().addVolumePoint(trackId(), 8, 0);
+      state().moveVolumePoint(trackId(), 0, 8, 0.5);
+
+      expect(points()).toEqual([{ beat: 8, value: 0.5 }]);
+    });
+
+    it('removes a point by index', () => {
+      state().addVolumePoint(trackId(), 4, 1);
+      state().addVolumePoint(trackId(), 8, 0);
+      state().removeVolumePoint(trackId(), 0);
+
+      expect(points()).toEqual([{ beat: 8, value: 0 }]);
+    });
+
+    it('drops the array entirely once the last point goes, so the fader takes over', () => {
+      state().addVolumePoint(trackId(), 4, 1);
+      state().removeVolumePoint(trackId(), 0);
+
+      expect(points()).toBeUndefined();
+    });
+
+    it('clears the whole curve', () => {
+      state().addVolumePoint(trackId(), 4, 1);
+      state().addVolumePoint(trackId(), 8, 0);
+      state().clearVolumeAutomation(trackId());
+
+      expect(points()).toBeUndefined();
+    });
+
+    it('leaves the project alone for an unknown instrument', () => {
+      const before = state().project;
+      state().addVolumePoint('no-such-track', 4, 1);
+      expect(state().project).toBe(before);
+    });
+
+    it('leaves the project alone for an index that is not there', () => {
+      state().addVolumePoint(trackId(), 4, 1);
+      const before = state().project;
+      state().moveVolumePoint(trackId(), 9, 1, 1);
+      state().removeVolumePoint(trackId(), 9);
+      expect(state().project).toBe(before);
+    });
+
+    it('touches only the instrument it is aimed at', () => {
+      const other = state().addTrack('Strings')!;
+      state().addVolumePoint(trackId(), 4, 0.5);
+
+      expect(state().project!.tracks.find(t => t.id === other)!.volumeAutomation).toBeUndefined();
+    });
+
+    it('is carried by duplicateTrack', () => {
+      state().addVolumePoint(trackId(), 4, 1);
+      state().addVolumePoint(trackId(), 8, 0);
+      state().duplicateTrack(trackId());
+
+      const copy = state().project!.tracks.find(t => t.name === 'Piano (copy)')!;
+      expect(copy.volumeAutomation).toEqual([
+        { beat: 4, value: 1 },
+        { beat: 8, value: 0 },
+      ]);
+    });
+  });
 });

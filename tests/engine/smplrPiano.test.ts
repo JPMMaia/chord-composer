@@ -36,8 +36,15 @@ interface MockNode {
   disconnect: ReturnType<typeof vi.fn>;
 }
 
+interface MockGainParam {
+  value: number;
+  cancelScheduledValues: ReturnType<typeof vi.fn>;
+  setValueAtTime: ReturnType<typeof vi.fn>;
+  linearRampToValueAtTime: ReturnType<typeof vi.fn>;
+}
+
 function createMockAudioContext() {
-  const gainNodes: Array<MockNode & { gain: { value: number } }> = [];
+  const gainNodes: Array<MockNode & { gain: MockGainParam }> = [];
   const compressorNodes: MockNode[] = [];
   const destination = { id: 'destination' };
 
@@ -45,7 +52,17 @@ function createMockAudioContext() {
     currentTime: 4.25,
     destination,
     createGain: vi.fn(() => {
-      const node = { gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() };
+      // `setValueAtTime` writes through to `value` so the assertions below can read
+      // the level off the node, the way they could when the bus assigned it directly.
+      const gain: MockGainParam = {
+        value: 1,
+        cancelScheduledValues: vi.fn(),
+        setValueAtTime: vi.fn((value: number) => {
+          gain.value = value;
+        }),
+        linearRampToValueAtTime: vi.fn(),
+      };
+      const node = { gain, connect: vi.fn(), disconnect: vi.fn() };
       gainNodes.push(node);
       return node;
     }),
@@ -206,6 +223,16 @@ describe('SmplrPianoInstrument', () => {
 
       piano.setVolume(-1);
       expect(mock.gainNodes[0].gain.value).toBe(0);
+    });
+  });
+
+  describe('rampVolume', () => {
+    it('schedules a ramp on the bus rather than jumping the level', () => {
+      piano.rampVolume(0.25, 9);
+      expect(mock.gainNodes[0].gain.linearRampToValueAtTime).toHaveBeenCalledWith(
+        0.25 * MASTER_GAIN,
+        9
+      );
     });
   });
 

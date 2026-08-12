@@ -195,6 +195,20 @@ export interface Note {
   velocity: number;
 }
 
+/**
+ * One breakpoint in a parameter's curve over time.
+ *
+ * Positioned in absolute beats rather than within a bar, like the play range and
+ * unlike a chord segment: a ramp is a shape drawn across the music rather than
+ * material belonging to one measure, and it has to be able to cross a bar line.
+ */
+export interface AutomationPoint {
+  /** Beats from the start of the project. */
+  beat: number;
+  /** Level, 0-1, on the same scale as `Track.volume`. */
+  value: number;
+}
+
 // Track — one instrument in the arrangement.
 export interface Track {
   id: string;
@@ -206,6 +220,15 @@ export interface Track {
    */
   instrument: string;
   volume: number;
+  /**
+   * Volume over time: breakpoints with linear ramps between them, sorted by beat
+   * and with no two on the same beat.
+   *
+   * Absent or empty means the flat `volume` above; one point or more overrides it
+   * entirely, so there is only ever one number in the audio path and no write/read
+   * mode to explain. Absent in every project written before automation existed.
+   */
+  volumeAutomation?: AutomationPoint[];
   pan: number;
   /**
    * Temporarily silenced. Its notes still draw in the piano roll — muting is

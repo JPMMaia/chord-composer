@@ -31,6 +31,15 @@ interface EditorState {
   zoomOut: () => void;
 
   /**
+   * Whether the volume automation lane is shown under the chord lanes.
+   *
+   * A view setting rather than part of the piece — the curve itself lives on the
+   * instrument and is saved with it — so this is not written to the project file.
+   */
+  showAutomation: boolean;
+  setShowAutomation: (shown: boolean) => void;
+
+  /**
    * The key being composed in: what the palette offers, what a dropped block is
    * stamped with, and what the piano roll shades.
    *
@@ -124,6 +133,12 @@ export const editorStore = create<EditorState>((set, get) => ({
   zoomOut: () => {
     const index = ZOOM_LEVELS.indexOf(get().pixelsPerBeat);
     get().setPixelsPerBeat(ZOOM_LEVELS[Math.max(0, index - 1)]);
+  },
+
+  showAutomation: true,
+
+  setShowAutomation: (shown: boolean) => {
+    set({ showAutomation: shown });
   },
 
   paletteScale: { root: 'C', type: 'major' },

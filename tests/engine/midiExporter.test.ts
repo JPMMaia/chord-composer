@@ -456,6 +456,120 @@ describe('midiExporter', () => {
       expect(onsets).toEqual([{ tick: 2 * PPQ, pitch: 60 }]);
     });
   });
+
+  describe('channel volume', () => {
+    const PPQ = 96;
+
+    /** The fixture with a curve on its one instrument. */
+    function withCurve(volumeAutomation: { beat: number; value: number }[]): Project {
+      const project = createTestProject();
+      return { ...project, tracks: [{ ...project.tracks[0], volumeAutomation }] };
+    }
+
+    it('states an unautomated instrument\'s flat volume once, at the top', () => {
+      // 0.8 of full scale. Before this the level was dropped entirely and every
+      // instrument arrived at whatever the receiving program defaulted to.
+      expect(scanVolumeEvents(projectToMidi(createTestProject()))).toEqual([
+        { tick: 0, value: 102 },
+      ]);
+    });
+
+    it('opens on the curve\'s first value, held back to tick 0', () => {
+      const events = scanVolumeEvents(projectToMidi(withCurve([{ beat: 2, value: 0.5 }])));
+
+      expect(events[0]).toEqual({ tick: 0, value: 64 });
+    });
+
+    it('collapses a curve that never moves to a single event', () => {
+      const events = scanVolumeEvents(
+        projectToMidi(
+          withCurve([
+            { beat: 0, value: 0.5 },
+            { beat: 4, value: 0.5 },
+          ])
+        )
+      );
+
+      expect(events).toEqual([
+        { tick: 0, value: 64 },
+        { tick: 4 * PPQ, value: 64 },
+      ]);
+    });
+
+    it('writes a descending run of values across a fade', () => {
+      const events = scanVolumeEvents(
+        projectToMidi(
+          withCurve([
+            { beat: 0, value: 1 },
+            { beat: 4, value: 0 },
+          ])
+        )
+      );
+
+      expect(events.length).toBeGreaterThan(4);
+      expect(events[0]).toEqual({ tick: 0, value: 127 });
+      expect(events.at(-1)).toEqual({ tick: 4 * PPQ, value: 0 });
+
+      // Monotonically down, and strictly so: a repeated value is not worth an event.
+      for (let i = 1; i < events.length; i++) {
+        expect(events[i].value).toBeLessThan(events[i - 1].value);
+        expect(events[i].tick).toBeGreaterThan(events[i - 1].tick);
+      }
+    });
+
+    it('lands exactly on each breakpoint\'s value at its own tick', () => {
+      const events = scanVolumeEvents(
+        projectToMidi(
+          withCurve([
+            { beat: 0, value: 1 },
+            { beat: 2, value: 0.25 },
+            { beat: 6, value: 1 },
+          ])
+        )
+      );
+
+      expect(events).toContainEqual({ tick: 2 * PPQ, value: 32 });
+      expect(events.at(-1)).toEqual({ tick: 6 * PPQ, value: 127 });
+    });
+
+    it('puts every level before the first note sounds', () => {
+      const midi = projectToMidi(
+        withCurve([
+          { beat: 0, value: 1 },
+          { beat: 4, value: 0 },
+        ])
+      );
+      const stream = scanTrack0(midi);
+
+      const firstNote = stream.findIndex(e => (e.status & 0xf0) === 0x90);
+      const firstVolume = stream.findIndex(e => (e.status & 0xf0) === 0xb0);
+
+      expect(firstVolume).toBeGreaterThanOrEqual(0);
+      expect(firstVolume).toBeLessThan(firstNote);
+    });
+
+    it('writes the level on each instrument\'s own channel', () => {
+      const project = createTestProject();
+      const midi = projectToMidi({
+        ...project,
+        tracks: [
+          { ...project.tracks[0], volumeAutomation: [{ beat: 0, value: 0.5 }] },
+          {
+            ...project.tracks[0],
+            id: OTHER_TRACK_ID,
+            name: 'Strings',
+            volumeAutomation: [{ beat: 0, value: 0.25 }],
+          },
+        ],
+      });
+
+      // Track 0's chunk is the only one `scanTrack0` walks, and it carries channel 0.
+      const events = scanTrack0(midi).filter(e => (e.status & 0xf0) === 0xb0);
+      expect(events).toHaveLength(1);
+      expect(events[0].status & 0x0f).toBe(0);
+      expect(events[0].body[1]).toBe(64);
+    });
+  });
 });
 
 /**
@@ -525,6 +639,13 @@ function scanClocksPerClick(data: Uint8Array): number[] {
   return scanTrack0(data)
     .filter(e => e.status === 0xff && e.metaType === 0x58)
     .map(e => e.body[2]);
+}
+
+/** Channel-volume (CC7) events of track 0, in stream order. */
+function scanVolumeEvents(data: Uint8Array): { tick: number; value: number }[] {
+  return scanTrack0(data)
+    .filter(e => (e.status & 0xf0) === 0xb0 && e.body[0] === 0x07)
+    .map(e => ({ tick: e.tick, value: e.body[1] }));
 }
 
 /** Note-on events of track 0, in stream order. */

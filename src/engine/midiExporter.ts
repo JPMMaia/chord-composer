@@ -8,6 +8,7 @@ import {
   timeSignatureBeats,
 } from '@/engine/timeline';
 import { gmInstrumentId, gmProgramNumber } from '@/engine/instrumentCatalog';
+import { normalizePoints } from '@/engine/volumeAutomation';
 import { trackColorAt } from '@/utils/constants';
 
 // ---------------------------------------------------------------------------
@@ -29,9 +30,21 @@ const NOTE_OFF = 0x80;
 const NOTE_ON = 0x90;
 /** Selects the General MIDI sound a channel plays. */
 const PROGRAM_CHANGE = 0xc0;
+const CONTROL_CHANGE = 0xb0;
+/** CC7, the channel's own level — where a volume curve is written. */
+const CC_CHANNEL_VOLUME = 0x07;
 
 /** Default ticks per quarter note (PPQ). */
 const DEFAULT_PPQ = 96;
+
+/**
+ * How finely a ramp between two breakpoints is sampled, in ticks — a 32nd note.
+ *
+ * Fine enough that a two-bar fade is smooth, coarse enough that it costs nothing;
+ * and repeated 0-127 values are dropped anyway, so a slow fade emits far fewer
+ * events than this rate suggests.
+ */
+const VOLUME_RAMP_TICKS = DEFAULT_PPQ / 8;
 
 /** MIDI channel reserved for percussion — skipped when assigning channels. */
 const DRUM_CHANNEL = 9;
@@ -174,6 +187,9 @@ export function projectToMidi(project: Project): Uint8Array<ArrayBuffer> {
         data: [PROGRAM_CHANGE | channel, gmProgramNumber(track.instrument) & 0x7f],
       });
 
+      // Level before any note sounds, for the same reason as the program change.
+      events.push(...volumeEvents(track, ppq, channel));
+
       events.push(
         ...noteEvents(project.bars, project.timeSignature, ppq, channel, track.id)
       );
@@ -239,6 +255,63 @@ function timeSignatureEvents(
       ],
     });
   });
+
+  return events;
+}
+
+/**
+ * Build the CC7 events carrying one instrument's level.
+ *
+ * An instrument with no curve gets a single event at tick 0 stating its flat
+ * volume — which also closes the old gap where a quiet instrument exported at full
+ * level, since nothing but note velocity used to survive the trip.
+ *
+ * A curve is walked breakpoint to breakpoint, sampling each ramp at
+ * `VOLUME_RAMP_TICKS` and dropping any sample repeating the previous 0-127 value,
+ * so a flat stretch collapses to nothing and only real movement costs events. The
+ * curve holds its first value before the first breakpoint and its last after the
+ * last, exactly as `valueAtBeat` does, so the file sounds like the app.
+ */
+function volumeEvents(track: Track, ppq: number, channel: number): AbsoluteEvent[] {
+  const points = normalizePoints(track.volumeAutomation ?? []);
+  const level = (value: number) => Math.min(127, Math.max(0, Math.round(value * 127)));
+  const event = (tick: number, value: number): AbsoluteEvent => ({
+    tick,
+    order: 2,
+    data: [CONTROL_CHANGE | channel, CC_CHANNEL_VOLUME, value],
+  });
+
+  if (points.length === 0) {
+    return [event(0, level(Number.isFinite(track.volume) ? track.volume : 1))];
+  }
+
+  // Opens at the curve's first value, held back to the start of the file.
+  const events: AbsoluteEvent[] = [event(0, level(points[0].value))];
+  let last = level(points[0].value);
+
+  for (let i = 1; i < points.length; i++) {
+    const from = points[i - 1];
+    const to = points[i];
+    const fromTick = Math.round(from.beat * ppq);
+    const toTick = Math.round(to.beat * ppq);
+
+    for (let tick = fromTick + VOLUME_RAMP_TICKS; tick < toTick; tick += VOLUME_RAMP_TICKS) {
+      const value = level(
+        from.value + ((to.value - from.value) * (tick - fromTick)) / (toTick - fromTick)
+      );
+      if (value === last) continue;
+      events.push(event(tick, value));
+      last = value;
+    }
+
+    // The breakpoint itself always lands, so the curve arrives exactly on its value
+    // at exactly its beat however the sampling above happened to fall.
+    const arrival = level(to.value);
+    if (arrival !== last || toTick !== fromTick) {
+      events.push(event(toTick, arrival));
+      last = arrival;
+    }
+  }
 
   return events;
 }

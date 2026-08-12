@@ -29,8 +29,22 @@ export function configureLimiter(limiter: DynamicsCompressorNode): DynamicsCompr
 export interface InstrumentBus {
   /** Node an instrument should render into. */
   readonly input: GainNode;
-  /** Set this instrument's level, 0-1, within the shared headroom. */
+  /**
+   * Set this instrument's level, 0-1, within the shared headroom, *now*.
+   *
+   * Cancels anything previously scheduled, which is what makes it the reset used
+   * at Play and Stop: a run must not inherit the level a fade in the last one
+   * happened to end on.
+   */
   setVolume(volume: number): void;
+  /**
+   * Ramp linearly to `volume`, arriving at `when` on the context clock.
+   *
+   * Deliberately writes no starting value: automation is scheduled breakpoint by
+   * breakpoint in order, so the previous event is already the anchor, and pinning
+   * one here would flatten every ramp into a step at its own arrival time.
+   */
+  rampVolume(volume: number, when: number): void;
   disconnect(): void;
 }
 
@@ -59,10 +73,26 @@ export function createInstrumentBus(
     input.connect(limiter);
   }
 
+  /** A level as a gain figure, or null when it is not a number at all. */
+  const gainFor = (volume: number): number | null =>
+    Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) * MASTER_GAIN : null;
+
   return {
     input,
     setVolume(volume: number) {
-      input.gain.value = Math.max(0, Math.min(1, volume)) * MASTER_GAIN;
+      const gain = gainFor(volume);
+      if (gain === null) return;
+
+      // Cancel first: a pending ramp scheduled past `now` would otherwise sail
+      // straight over the value being pinned here.
+      input.gain.cancelScheduledValues(ctx.currentTime);
+      input.gain.setValueAtTime(gain, ctx.currentTime);
+    },
+    rampVolume(volume: number, when: number) {
+      const gain = gainFor(volume);
+      if (gain === null || !Number.isFinite(when)) return;
+
+      input.gain.linearRampToValueAtTime(gain, when);
     },
     disconnect() {
       input.disconnect();

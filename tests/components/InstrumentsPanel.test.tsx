@@ -243,4 +243,51 @@ describe('InstrumentsPanel', () => {
 
     expect(tracks()[0].name).toBe('Drums');
   });
+
+  describe('volume', () => {
+    const fader = () => screen.getByLabelText('Volume Piano') as HTMLInputElement;
+
+    it('shows the instrument\'s level', () => {
+      projectStore.getState().setTrackVolume(firstId(), 0.4);
+      render(<InstrumentsPanel />);
+
+      expect(fader().value).toBe('0.4');
+      expect(within(row(firstId())).getByText('40')).toBeInTheDocument();
+    });
+
+    it('sets the level', () => {
+      render(<InstrumentsPanel />);
+
+      fireEvent.change(fader(), { target: { value: '0.25' } });
+
+      expect(tracks()[0].volume).toBe(0.25);
+    });
+
+    it('sets only the instrument it belongs to', () => {
+      projectStore.getState().addTrack('Strings');
+      render(<InstrumentsPanel />);
+
+      fireEvent.change(fader(), { target: { value: '0.25' } });
+
+      expect(tracks()[0].volume).toBe(0.25);
+      expect(tracks()[1].volume).toBe(1);
+    });
+
+    // A live fader that changed nothing would be more confusing than a dead one.
+    it('is disabled while a volume curve is driving the instrument', () => {
+      projectStore.getState().addVolumePoint(firstId(), 0, 0.5);
+      render(<InstrumentsPanel />);
+
+      expect(fader()).toBeDisabled();
+      expect(fader().title).toContain('volume curve');
+    });
+
+    it('is enabled again once the curve is gone', () => {
+      projectStore.getState().addVolumePoint(firstId(), 0, 0.5);
+      projectStore.getState().clearVolumeAutomation(firstId());
+      render(<InstrumentsPanel />);
+
+      expect(fader()).toBeEnabled();
+    });
+  });
 });

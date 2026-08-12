@@ -61,8 +61,19 @@ export interface Instrument {
   /** Cut everything sounding or pending, immediately. */
   stopAll(): void;
 
-  /** Master volume, 0-1. */
+  /** Master volume, 0-1, applied immediately and cancelling any pending ramp. */
   setVolume(volume: number): void;
+
+  /**
+   * Ramp the master volume so it reads `volume` at `when` on this instrument's
+   * clock — the same domain as `ScheduledNote.when`.
+   *
+   * Optional, like `sustain` and for the same kind of reason: a backend whose level
+   * is set through something other than an audio graph has no way to promise a
+   * value at a time. A caller without it steps `setVolume` once per scheduling
+   * pass instead, which is coarser but never silent.
+   */
+  rampVolume?(volume: number, when: number): void;
 
   /** Release resources. The instrument is unusable afterwards. */
   dispose(): void;

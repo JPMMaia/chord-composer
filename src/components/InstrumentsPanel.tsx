@@ -136,6 +136,7 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
   const removeTrack = projectStore(s => s.removeTrack);
   const renameTrack = projectStore(s => s.renameTrack);
   const setTrackInstrument = projectStore(s => s.setTrackInstrument);
+  const setTrackVolume = projectStore(s => s.setTrackVolume);
   const toggleTrackMute = projectStore(s => s.toggleTrackMute);
   const toggleTrackSolo = projectStore(s => s.toggleTrackSolo);
   const toggleTrackVisible = projectStore(s => s.toggleTrackVisible);
@@ -174,6 +175,8 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
   // flag — shows its notes rather than silently disappearing from the roll.
   const isVisible = track.visible !== false;
   const color = track.color ?? trackColorAt(index);
+  /** Whether a volume curve is driving this instrument instead of the fader. */
+  const automated = (track.volumeAutomation?.length ?? 0) > 0;
 
   const vst3Options = vst3.plugins.map(vst3Option);
   const sfzOptions = sfz.instruments.map(sfzOption);
@@ -416,6 +419,33 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
           </optgroup>
         ))}
       </select>
+
+      {/* The instrument's level. Disabled once a curve exists, because the curve
+          overrides it outright — leaving a live fader that changed nothing would be
+          the more confusing of the two. */}
+      <div className="mt-1 flex items-center gap-1.5">
+        <span className="text-[10px] text-gray-500 w-6 shrink-0">Vol</span>
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={track.volume}
+          disabled={automated}
+          aria-label={`Volume ${track.name}`}
+          title={
+            automated
+              ? 'This instrument follows its volume curve; clear the curve to use this'
+              : 'Instrument volume'
+          }
+          onPointerDown={e => e.stopPropagation()}
+          onChange={e => setTrackVolume(track.id, Number(e.target.value))}
+          className="flex-1 h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed"
+        />
+        <span className="text-[10px] text-gray-500 w-7 text-right shrink-0 tabular-nums">
+          {Math.round(track.volume * 100)}
+        </span>
+      </div>
     </div>
   );
 };

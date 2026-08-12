@@ -18,16 +18,42 @@ interface Scheduled {
   duration: number;
 }
 
+/** A level change asked of the instrument: pinned now, or ramped to arrive at `when`. */
+interface VolumeCall {
+  kind: 'set' | 'ramp';
+  volume: number;
+  when?: number;
+}
+
 const scheduled: Scheduled[] = [];
+const volumeCalls: VolumeCall[] = [];
 const stopAll = vi.fn();
 let loadResolve: () => void;
 let loadPromise: Promise<void>;
 let clock = 0;
+/**
+ * Whether the instrument built for the next run can schedule a ramp.
+ *
+ * Read at construction, so a test sets it before Play. False is the VST3 shape:
+ * `Instrument.rampVolume` is optional, and that backend does not implement it.
+ */
+let supportsRamp = true;
 
 vi.mock('@/engine/smplrPiano', () => {
   class MockPiano {
     readonly name = 'Test Piano';
     private loaded = false;
+
+    constructor() {
+      if (supportsRamp) {
+        (this as unknown as { rampVolume: (v: number, w: number) => void }).rampVolume = (
+          volume,
+          when
+        ) => {
+          volumeCalls.push({ kind: 'ramp', volume, when });
+        };
+      }
+    }
 
     now() {
       return clock;
@@ -46,7 +72,9 @@ vi.mock('@/engine/smplrPiano', () => {
     stopAll() {
       stopAll();
     }
-    setVolume() {}
+    setVolume(volume: number) {
+      volumeCalls.push({ kind: 'set', volume });
+    }
     dispose() {}
   }
 
@@ -112,6 +140,8 @@ describe('usePlayback', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     scheduled.length = 0;
+    volumeCalls.length = 0;
+    supportsRamp = true;
     stopAll.mockClear();
     clock = 0;
     loadPromise = new Promise<void>(resolve => {
@@ -506,6 +536,182 @@ describe('usePlayback', () => {
       });
 
       expect(scheduled.map(n => n.midiNote)).toEqual([67]);
+    });
+  });
+
+  describe('volume automation', () => {
+    /** A fade from full to silence across beats 1–3, i.e. seconds 1–3 at 60 BPM. */
+    const fading: PlaybackConfig = {
+      ...config,
+      tracks: [
+        {
+          ...testTrack,
+          volume: 0.8,
+          volumeAutomation: [
+            { beat: 1, value: 1 },
+            { beat: 3, value: 0 },
+          ],
+        },
+      ],
+    };
+
+    const ramps = () => volumeCalls.filter(c => c.kind === 'ramp');
+
+    it('does not touch the level at all when there is no curve', async () => {
+      const { result } = renderHook(() => usePlayback(config));
+      await startPlayback(result);
+      await advance(3);
+
+      // The pool applied the static volume when it built the instrument; nothing
+      // after that has any business moving it.
+      expect(ramps()).toHaveLength(0);
+      expect(volumeCalls.filter(c => c.kind === 'set')).toHaveLength(1);
+    });
+
+    it('schedules one ramp per breakpoint, at its own clock time', async () => {
+      const { result } = renderHook(() => usePlayback(fading));
+      await startPlayback(result);
+      await advance(4);
+
+      expect(ramps()).toEqual([
+        { kind: 'ramp', volume: 1, when: 1 },
+        { kind: 'ramp', volume: 0, when: 3 },
+      ]);
+    });
+
+    it('does not re-schedule a breakpoint it has already handed over', async () => {
+      const { result } = renderHook(() => usePlayback(fading));
+      await startPlayback(result);
+      // Many passes cross each breakpoint's look-ahead window; each must be sent once.
+      await advance(3.9);
+
+      expect(ramps().filter(c => c.volume === 1)).toHaveLength(1);
+      expect(ramps().filter(c => c.volume === 0)).toHaveLength(1);
+    });
+
+    it('schedules no further ahead than the look-ahead window', async () => {
+      const { result } = renderHook(() => usePlayback(fading));
+      await startPlayback(result);
+
+      // The first pass sits at clock 0 and the first breakpoint is a whole second
+      // out, well past the horizon.
+      expect(ramps()).toHaveLength(0);
+    });
+
+    it('pins the interpolated level when a run starts mid-fade', async () => {
+      // Beats 2-6 of a two-bar project, i.e. the middle of the 1→3 fade.
+      const twoBars = [
+        makeBar(0, [makeNote(60, 0)]),
+        makeBar(1, [makeNote(67, 0)]),
+      ];
+      const { result } = renderHook(() =>
+        usePlayback({ ...fading, bars: twoBars, loopStart: 2, loopEnd: 6 })
+      );
+      await startPlayback(result);
+
+      // Half way through a 1→0 fade running from beat 1 to beat 3.
+      expect(volumeCalls.filter(c => c.kind === 'set').at(-1)?.volume).toBeCloseTo(0.5, 5);
+    });
+
+    it('restores the flat volume on stop, so the next run does not inherit the fade', async () => {
+      const { result } = renderHook(() => usePlayback(fading));
+      await startPlayback(result);
+      await advance(2);
+
+      volumeCalls.length = 0;
+      act(() => result.current.stop());
+
+      expect(volumeCalls).toEqual([{ kind: 'set', volume: 0.8 }]);
+    });
+
+    it('restores the flat volume on pause', async () => {
+      const { result } = renderHook(() => usePlayback(fading));
+      await startPlayback(result);
+      await advance(2);
+
+      volumeCalls.length = 0;
+      act(() => result.current.pause());
+
+      expect(volumeCalls).toEqual([{ kind: 'set', volume: 0.8 }]);
+    });
+
+    it('re-pins at the loop start on a wrap rather than gliding across the seam', async () => {
+      const { result } = renderHook(() =>
+        usePlayback({ ...fading, loopStart: 0, loopEnd: 4, loopEnabled: true })
+      );
+      await startPlayback(result);
+      // Far enough to clear the seam at 4s and cross the whole fade a second time.
+      await advance(7.5);
+
+      // Past the seam the level is pinned back to where the curve opens — the value
+      // it holds before its first breakpoint — instead of ramping up from silence.
+      const pins = volumeCalls.filter(c => c.kind === 'set');
+      expect(pins.length).toBeGreaterThan(1);
+      expect(pins.at(-1)?.volume).toBe(1);
+      // And the curve is scheduled again for the second pass.
+      expect(ramps().filter(c => c.volume === 0).length).toBeGreaterThan(1);
+    });
+
+    it('picks up a curve edited while playing', async () => {
+      const { result, rerender } = renderHook(({ cfg }) => usePlayback(cfg), {
+        initialProps: { cfg: fading },
+      });
+      await startPlayback(result);
+      await advance(0.5);
+
+      rerender({
+        cfg: {
+          ...fading,
+          tracks: [
+            {
+              ...fading.tracks[0],
+              volumeAutomation: [
+                { beat: 1, value: 1 },
+                { beat: 3, value: 0.25 },
+              ],
+            },
+          ],
+        },
+      });
+
+      await advance(3);
+      expect(ramps().at(-1)).toEqual({ kind: 'ramp', volume: 0.25, when: 3 });
+    });
+
+    describe('a backend that cannot schedule a ramp', () => {
+      beforeEach(() => {
+        supportsRamp = false;
+      });
+
+      it('steps the level per scheduling pass instead', async () => {
+        const { result } = renderHook(() => usePlayback(fading));
+        await startPlayback(result);
+        await advance(3);
+
+        expect(ramps()).toHaveLength(0);
+
+        // Stepped down through the fade rather than jumping at the end of it.
+        const levels = volumeCalls.map(c => c.volume);
+        expect(levels.filter(v => v > 0.2 && v < 0.8).length).toBeGreaterThan(5);
+        expect(levels.at(-1)).toBeCloseTo(0, 2);
+      });
+
+      it('says nothing while the level is not moving', async () => {
+        const flat: PlaybackConfig = {
+          ...fading,
+          tracks: [{ ...fading.tracks[0], volumeAutomation: [{ beat: 1, value: 0.5 }] }],
+        };
+        const { result } = renderHook(() => usePlayback(flat));
+        await startPlayback(result);
+        await advance(3);
+
+        // One from the pool building the instrument, one pinning the curve's level.
+        // Sixty passes over a flat curve must not be sixty commands.
+        expect(volumeCalls).toEqual([
+          { kind: 'set', volume: 0.8 },
+          { kind: 'set', volume: 0.5 },
+        ]);
+      });
     });
   });
 

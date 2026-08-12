@@ -894,7 +894,7 @@ describe('fileIO', () => {
     }
 
     it('states the current schema version', () => {
-      expect(SCHEMA_VERSION).toBe('1.9');
+      expect(SCHEMA_VERSION).toBe('1.10');
     });
 
     it('round-trips a custom block and its notes', () => {
@@ -990,6 +990,121 @@ describe('fileIO', () => {
       });
 
       expect(soleContent(deserializeProject(json).bars[0]).chords[0].kind).toBe('chord');
+    });
+  });
+
+  describe('schema 1.10 — volume automation', () => {
+    /** A project whose one instrument fades away across its first two bars. */
+    function automatedProject(): Project {
+      const project = createTestProject();
+      return {
+        ...project,
+        tracks: [
+          {
+            ...project.tracks[0],
+            volumeAutomation: [
+              { beat: 0, value: 1 },
+              { beat: 8, value: 0.2 },
+            ],
+          },
+        ],
+      };
+    }
+
+    it('round-trips a curve', () => {
+      const restored = deserializeProject(serializeProject(automatedProject()));
+
+      expect(restored.tracks[0].volumeAutomation).toEqual([
+        { beat: 0, value: 1 },
+        { beat: 8, value: 0.2 },
+      ]);
+    });
+
+    it('writes nothing at all for an instrument with no curve', () => {
+      const json = JSON.parse(serializeProject(createTestProject()));
+
+      expect(json.tracks[0]).not.toHaveProperty('volumeAutomation');
+    });
+
+    it('writes nothing for an empty curve, which means the same as none', () => {
+      const project = createTestProject();
+      const json = JSON.parse(
+        serializeProject({
+          ...project,
+          tracks: [{ ...project.tracks[0], volumeAutomation: [] }],
+        })
+      );
+
+      expect(json.tracks[0].volumeAutomation).toBeUndefined();
+    });
+
+    it('opens a pre-1.10 file with no curve, so it plays at its flat volume', () => {
+      const json = serializeProject(createTestProject());
+      const restored = deserializeProject(JSON.stringify({ ...JSON.parse(json), version: '1.9' }));
+
+      expect(restored.tracks[0].volumeAutomation).toBeUndefined();
+      expect(restored.tracks[0].volume).toBe(0.8);
+    });
+
+    it('sorts a hand-edited file rather than trusting its order', () => {
+      const project = automatedProject();
+      const json = JSON.parse(serializeProject(project));
+      json.tracks[0].volumeAutomation = [
+        { beat: 8, value: 0.2 },
+        { beat: 0, value: 1 },
+      ];
+
+      expect(deserializeProject(JSON.stringify(json)).tracks[0].volumeAutomation).toEqual([
+        { beat: 0, value: 1 },
+        { beat: 8, value: 0.2 },
+      ]);
+    });
+
+    it('drops malformed points rather than failing the load', () => {
+      const json = JSON.parse(serializeProject(automatedProject()));
+      json.tracks[0].volumeAutomation = [
+        { beat: 'nonsense', value: 1 },
+        { beat: 4, value: 5 },
+        { beat: 8, value: 0.2 },
+      ];
+
+      const restored = deserializeProject(JSON.stringify(json));
+      expect(restored.tracks[0].volumeAutomation).toEqual([{ beat: 8, value: 0.2 }]);
+    });
+
+    it('reads a curve that is not a list at all as no curve', () => {
+      const json = JSON.parse(serializeProject(automatedProject()));
+      json.tracks[0].volumeAutomation = 'loud';
+
+      expect(deserializeProject(JSON.stringify(json)).tracks[0].volumeAutomation).toBeUndefined();
+    });
+
+    describe('validateProject', () => {
+      it('accepts a well-formed curve', () => {
+        expect(validateProject(automatedProject()).valid).toBe(true);
+      });
+
+      it('rejects a level outside 0-1', () => {
+        const project = automatedProject();
+        const result = validateProject({
+          ...project,
+          tracks: [{ ...project.tracks[0], volumeAutomation: [{ beat: 0, value: 2 }] }],
+        });
+
+        expect(result.valid).toBe(false);
+        expect(result.errors.join(' ')).toContain('volume automation value');
+      });
+
+      it('rejects a point before the start of the project', () => {
+        const project = automatedProject();
+        const result = validateProject({
+          ...project,
+          tracks: [{ ...project.tracks[0], volumeAutomation: [{ beat: -1, value: 1 }] }],
+        });
+
+        expect(result.valid).toBe(false);
+        expect(result.errors.join(' ')).toContain('volume automation beat');
+      });
     });
   });
 

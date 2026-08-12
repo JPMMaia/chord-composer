@@ -96,6 +96,10 @@ export class SmplrPianoInstrument implements Instrument {
     this.bus.setVolume(volume);
   }
 
+  rampVolume(volume: number, when: number): void {
+    this.bus.rampVolume(volume, when);
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;

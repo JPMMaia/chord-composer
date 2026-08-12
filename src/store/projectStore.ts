@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type {
+  AutomationPoint,
   Bar,
   ChordSegment,
   NoteName,
@@ -13,6 +14,7 @@ import type {
 import type { CopiedSegment } from './clipboardStore';
 import { clearLocalStorage } from '@/engine/fileIO';
 import { generateId } from '@/utils/id';
+import { movePoint, normalizePoints, withPoint, withoutPoint } from '@/engine/volumeAutomation';
 import {
   barChords,
   clampStartToBar,
@@ -110,6 +112,13 @@ interface ProjectState {
   renameTrack: (trackId: string, name: string) => void;
   setTrackInstrument: (trackId: string, instrument: string) => void;
   setTrackVolume: (trackId: string, volume: number) => void;
+  // Volume over time. Positions are absolute beats and levels are 0-1; both are
+  // clamped rather than rejected, because these come from a drag in the lane where
+  // going past an edge is the gesture, not a bad argument.
+  addVolumePoint: (trackId: string, beat: number, value: number) => void;
+  moveVolumePoint: (trackId: string, index: number, beat: number, value: number) => void;
+  removeVolumePoint: (trackId: string, index: number) => void;
+  clearVolumeAutomation: (trackId: string) => void;
   setTrackPan: (trackId: string, pan: number) => void;
   toggleTrackMute: (trackId: string) => void;
   toggleTrackSolo: (trackId: string) => void;
@@ -371,6 +380,41 @@ function updateTrack(
       updatedAt: new Date(),
     },
   });
+}
+
+/**
+ * Rewrite one instrument's volume curve.
+ *
+ * Every automation edit goes through here so two rules hold in one place: the
+ * stored array is always what `normalizePoints` would produce, and a curve that
+ * has lost its last point is *dropped* rather than left as an empty array — an
+ * empty curve and no curve mean the same thing to playback, and only the absent
+ * form hands control back to the flat `volume` and its fader.
+ *
+ * A no-op edit returns the project untouched, so a stray move never lands an
+ * entry on the undo stack.
+ */
+function updateVolumeAutomation(
+  get: () => ProjectState,
+  set: (partial: Partial<ProjectState>) => void,
+  trackId: string,
+  edit: (points: AutomationPoint[]) => AutomationPoint[]
+): void {
+  const track = get().project?.tracks.find(t => t.id === trackId);
+  if (!track) return;
+
+  const current = track.volumeAutomation ?? [];
+  const next = normalizePoints(edit(current));
+  if (
+    next.length === current.length &&
+    next.every((p, i) => p.beat === current[i].beat && p.value === current[i].value)
+  ) {
+    return;
+  }
+
+  updateTrack(get, set, trackId, () => ({
+    volumeAutomation: next.length > 0 ? next : undefined,
+  }));
 }
 
 export const projectStore = create<ProjectState>((set, get) => ({
@@ -952,6 +996,26 @@ export const projectStore = create<ProjectState>((set, get) => ({
     updateTrack(get, set, trackId, () => ({ pan }));
   },
 
+  addVolumePoint: (trackId: string, beat: number, value: number) => {
+    updateVolumeAutomation(get, set, trackId, points =>
+      withPoint(points, { beat, value })
+    );
+  },
+
+  moveVolumePoint: (trackId: string, index: number, beat: number, value: number) => {
+    updateVolumeAutomation(get, set, trackId, points =>
+      movePoint(points, index, { beat, value })
+    );
+  },
+
+  removeVolumePoint: (trackId: string, index: number) => {
+    updateVolumeAutomation(get, set, trackId, points => withoutPoint(points, index));
+  },
+
+  clearVolumeAutomation: (trackId: string) => {
+    updateVolumeAutomation(get, set, trackId, () => []);
+  },
+
   toggleTrackMute: (trackId: string) => {
     updateTrack(get, set, trackId, t => ({ muted: !t.muted }));
   },
@@ -979,6 +1043,7 @@ export const projectStore = create<ProjectState>((set, get) => ({
       name: `${source.name} (copy)`,
       instrument: source.instrument,
       volume: source.volume,
+      volumeAutomation: source.volumeAutomation,
       pan: source.pan,
       muted: source.muted,
       solo: source.solo,

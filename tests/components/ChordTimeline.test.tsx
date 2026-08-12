@@ -38,9 +38,13 @@ function bars() {
   return projectStore.getState().project!.bars;
 }
 
+function tracks() {
+  return projectStore.getState().project!.tracks;
+}
+
 /** The instrument the timeline is editing — the Piano every project starts with. */
 function trackId(): string {
-  return projectStore.getState().project!.tracks[0].id;
+  return tracks()[0].id;
 }
 
 function segments(): ChordSegment[] {
@@ -121,6 +125,7 @@ describe('ChordTimeline', () => {
       scrollX: 0,
       maxScrollX: 0,
       viewportWidth: 0,
+      showAutomation: true,
     });
     projectStore.getState().createProject();
     projectStore.getState().addBar();
@@ -971,5 +976,109 @@ describe('ChordTimeline', () => {
     expect(screen.queryByText(/add chord/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/auto-fill/i)).not.toBeInTheDocument();
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  describe('volume automation lane', () => {
+    it('shows the lane under the bars by default', () => {
+      render(<ChordTimeline />);
+
+      expect(screen.getByTestId('automation-lane')).toBeInTheDocument();
+      // Labelled in the gutter, which is outside the scroll container so the label
+      // stays put while the lane beside it scrolls.
+      expect(within(screen.getByTestId('timeline-gutter')).getByText('Volume')).toBeInTheDocument();
+    });
+
+    it('hides the lane, and its gutter label, when toggled off', () => {
+      render(<ChordTimeline />);
+
+      fireEvent.click(screen.getByLabelText('Volume automation'));
+
+      expect(screen.queryByTestId('automation-lane')).not.toBeInTheDocument();
+      expect(within(screen.getByTestId('timeline-gutter')).queryByText('Volume')).toBeNull();
+    });
+
+    it('reports its state on the toggle, so it reads as pressed', () => {
+      render(<ChordTimeline />);
+      const toggle = screen.getByLabelText('Volume automation');
+
+      expect(toggle).toHaveAttribute('aria-pressed', 'true');
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    });
+
+    it('spans the whole project, on the same axis as the ruler', () => {
+      render(<ChordTimeline />);
+
+      const width = `${8 * PIXELS_PER_BEAT}px`;
+      expect(screen.getByTestId('timeline-ruler')).toHaveStyle({ width });
+      expect(screen.getByTestId('automation-lane')).toHaveStyle({ width });
+    });
+
+    describe('clearing the curve', () => {
+      const clearLabel = () => `Clear volume curve for ${tracks()[0].name}`;
+
+      it('offers nothing to clear until there is a curve', () => {
+        render(<ChordTimeline />);
+
+        expect(screen.queryByLabelText(clearLabel())).not.toBeInTheDocument();
+      });
+
+      it('offers a Clear once a point exists', () => {
+        projectStore.getState().addVolumePoint(trackId(), 2, 0.5);
+        render(<ChordTimeline />);
+
+        expect(screen.getByLabelText(clearLabel())).toBeInTheDocument();
+      });
+
+      it('removes every point, handing the instrument back to its fader', () => {
+        projectStore.getState().addVolumePoint(trackId(), 2, 0.5);
+        projectStore.getState().addVolumePoint(trackId(), 6, 0.2);
+        render(<ChordTimeline />);
+
+        fireEvent.click(screen.getByLabelText(clearLabel()));
+
+        expect(tracks()[0].volumeAutomation).toBeUndefined();
+        expect(screen.getByTestId('automation-flat-line')).toBeInTheDocument();
+        expect(screen.queryByTestId('automation-curve')).not.toBeInTheDocument();
+      });
+
+      it('takes itself away once there is nothing left to clear', () => {
+        projectStore.getState().addVolumePoint(trackId(), 2, 0.5);
+        render(<ChordTimeline />);
+
+        fireEvent.click(screen.getByLabelText(clearLabel()));
+
+        expect(screen.queryByLabelText(clearLabel())).not.toBeInTheDocument();
+      });
+
+      it('clears only the selected instrument', () => {
+        const other = projectStore.getState().addTrack('Strings')!;
+        projectStore.getState().addVolumePoint(other, 2, 0.5);
+        projectStore.getState().addVolumePoint(trackId(), 4, 0.25);
+        render(<ChordTimeline />);
+
+        fireEvent.click(screen.getByLabelText(clearLabel()));
+
+        expect(tracks()[0].volumeAutomation).toBeUndefined();
+        expect(tracks().find(t => t.id === other)!.volumeAutomation).toEqual([
+          { beat: 2, value: 0.5 },
+        ]);
+      });
+
+    });
+
+    // The timeline edits one instrument at a time, and the curve belongs to that one.
+    it('follows the selected instrument', () => {
+      const first = trackId();
+      projectStore.getState().addVolumePoint(first, 2, 0.5);
+      const second = projectStore.getState().addTrack('Strings')!;
+
+      render(<ChordTimeline />);
+      expect(screen.getByTestId('automation-point-0')).toBeInTheDocument();
+
+      act(() => selectionStore.getState().selectTrack(second));
+      expect(screen.queryByTestId('automation-point-0')).not.toBeInTheDocument();
+      expect(screen.getByTestId('automation-flat-line')).toBeInTheDocument();
+    });
   });
 });

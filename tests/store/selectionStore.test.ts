@@ -76,6 +76,76 @@ describe('selectionStore', () => {
     expect(state().selectedSegmentIds).toEqual([]);
   });
 
+  describe('volume point selection', () => {
+    it('starts with no point selected', () => {
+      expect(state().selectedVolumePointIndex).toBeNull();
+    });
+
+    it('selects and releases a point', () => {
+      state().selectVolumePoint(2);
+      expect(state().selectedVolumePointIndex).toBe(2);
+
+      state().selectVolumePoint(null);
+      expect(state().selectedVolumePointIndex).toBeNull();
+    });
+
+    // Blocks and points are two answers to one question — what does Delete act on.
+    it('drops the block selection when a point is picked', () => {
+      state().selectSegment('seg-1');
+      state().selectVolumePoint(0);
+
+      expect(state().selectedSegmentIds).toEqual([]);
+      expect(state().anchorSegmentId).toBeNull();
+      expect(state().selectedVolumePointIndex).toBe(0);
+    });
+
+    it('drops the point when a block is picked', () => {
+      state().selectVolumePoint(0);
+      state().selectSegment('seg-1');
+
+      expect(state().selectedVolumePointIndex).toBeNull();
+      expect(state().selectedSegmentIds).toEqual(['seg-1']);
+    });
+
+    it('drops the point when blocks are set as a group', () => {
+      state().selectVolumePoint(0);
+      state().setSelectedSegments(['seg-1', 'seg-2']);
+
+      expect(state().selectedVolumePointIndex).toBeNull();
+    });
+
+    it('drops the point when a block is toggled in', () => {
+      state().selectVolumePoint(0);
+      state().toggleSegment('seg-1');
+
+      expect(state().selectedVolumePointIndex).toBeNull();
+    });
+
+    // Releasing a point must not also wipe a block selection made since.
+    it('leaves the block selection alone when the point is merely released', () => {
+      state().selectSegment('seg-1');
+      state().selectVolumePoint(null);
+
+      expect(state().selectedSegmentIds).toEqual(['seg-1']);
+      expect(state().anchorSegmentId).toBe('seg-1');
+    });
+
+    it('drops the point when the instrument changes, its curve going with it', () => {
+      state().selectTrack('track-1');
+      state().selectVolumePoint(1);
+      state().selectTrack('track-2');
+
+      expect(state().selectedVolumePointIndex).toBeNull();
+    });
+
+    it('drops the point on a full clear', () => {
+      state().selectVolumePoint(1);
+      state().clearSelection();
+
+      expect(state().selectedVolumePointIndex).toBeNull();
+    });
+  });
+
   it('reports a sole selection only when exactly one segment is selected', () => {
     expect(soleSelectedSegmentId(state())).toBeNull();
 

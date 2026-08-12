@@ -304,6 +304,13 @@ export class Vst3Instrument implements Instrument {
     invoke('vst3_stop', { trackId: this.trackId }).catch(() => {});
   }
 
+  /**
+   * Deliberately the only level control this backend offers: there is no
+   * `rampVolume` here because the level goes over IPC to a plugin rendering on its
+   * own device, and the command carries no time. Volume automation therefore steps
+   * this once per scheduling pass rather than scheduling a ramp — coarser than the
+   * samplers get, and the reason `Instrument.rampVolume` is optional.
+   */
   setVolume(volume: number): void {
     if (this.disposed) return;
 

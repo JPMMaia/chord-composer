@@ -2,14 +2,16 @@ import { useRef, useCallback, useEffect, useState } from 'react';
 import { InstrumentPool, isTrackAudible } from '@/engine/instrumentPool';
 import { createTimingCache, getLoopDuration } from '@/engine/playback';
 import type { NoteTiming, PlaybackConfig } from '@/engine/playback';
-import type { Bar } from '@/types/music';
+import type { AutomationPoint, Bar } from '@/types/music';
 import {
   LOOKAHEAD_SECONDS,
   TICK_MS,
   beatToSongTime,
   notesInWindow,
+  songTimeToBeat,
   toClockTime,
 } from '@/engine/scheduler';
+import { firstPointAtOrAfter, valueAtBeat } from '@/engine/volumeAutomation';
 import { syncVst3Clock } from '@/engine/vst3Instrument';
 import { registerAudioContext } from '@/engine/audioOutput';
 import {
@@ -31,6 +33,28 @@ function rangeStart(config: PlaybackConfig): number {
   return config.loopStart === null || config.loopEnd === null
     ? 0
     : beatToSongTime(config.loopStart, config.bpm);
+}
+
+/**
+ * Smallest level change worth sending to a backend that has to be stepped rather
+ * than ramped. Twenty passes a second over a flat stretch of curve would otherwise
+ * be twenty commands a second saying nothing.
+ */
+const VOLUME_STEP_EPSILON = 0.005;
+
+/**
+ * How far through one instrument's curve the scheduler has got in this run.
+ *
+ * `points` is the array the cursor was counted against, not a copy: a mid-playback
+ * edit replaces it, and that change of identity is what invalidates the cursor —
+ * the same trick `createTimingCache` uses on the bars.
+ */
+interface AutomationCursor {
+  /** Index of the next breakpoint not yet handed to the instrument. */
+  index: number;
+  points: AutomationPoint[];
+  /** Last level sent, for backends stepped per pass rather than ramped. */
+  lastValue: number;
 }
 
 /**
@@ -90,6 +114,8 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
 
   /** Memoised `calculateNoteTiming` for this run. Null while stopped. */
   const timingsRef = useRef<((bars: Bar[]) => NoteTiming[]) | null>(null);
+  /** How far through each instrument's volume curve this run has got, by track id. */
+  const automationRef = useRef(new Map<string, AutomationCursor>());
   /** Whether the click queue has been built for the current playback run. */
   const clickQueueBuiltRef = useRef(false);
 
@@ -105,6 +131,93 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
     resetClickQueue();
     clickQueueBuiltRef.current = true;
   }, []);
+
+  /**
+   * Put every instrument back on its flat `Track.volume` and forget the curves.
+   *
+   * Used at Play, Pause and Stop. Without it a run that ended mid-fade would leave
+   * the gain node sitting whereever the fade reached, and the next Play would open
+   * at that level — a project that gets quieter every time you press Play.
+   *
+   * Deliberately not `pool.ensure`, which would also reconcile instruments and so
+   * could start a sample download from a Stop handler.
+   */
+  const resetAutomation = useCallback(() => {
+    automationRef.current.clear();
+
+    const pool = poolRef.current;
+    if (!pool) return;
+    for (const track of configRef.current.tracks) {
+      pool.get(track.id)?.setVolume(track.volume);
+    }
+  }, []);
+
+  /**
+   * Hand each instrument the part of its volume curve falling inside this pass's
+   * look-ahead window.
+   *
+   * Scheduled breakpoint by breakpoint rather than window by window: a ramp arrives
+   * at the *next* breakpoint, which may be many windows out, so slicing the curve by
+   * window would stair-step every long fade into a series of 50 ms steps.
+   */
+  const scheduleAutomation = useCallback(
+    (cfg: PlaybackConfig, pool: InstrumentPool, elapsed: number, horizon: number) => {
+      const elapsedBeat = songTimeToBeat(elapsed, cfg.bpm);
+
+      for (const track of cfg.tracks) {
+        const instrument = pool.get(track.id);
+        if (!instrument) continue;
+
+        const points = track.volumeAutomation ?? [];
+        if (points.length === 0) {
+          // No curve: the flat volume the pool applied when it built the instrument
+          // still stands, and a cursor left from a curve just deleted must not.
+          automationRef.current.delete(track.id);
+          continue;
+        }
+
+        let cursor = automationRef.current.get(track.id);
+        if (!cursor || cursor.points !== points) {
+          // A fresh run, a loop wrap, or an edit made while playing. Pinning cancels
+          // whatever was scheduled against the old curve and states the level here,
+          // which is also what makes a Play from the middle of a fade start at the
+          // level the fade had reached rather than at its opening.
+          const value = valueAtBeat(points, elapsedBeat, track.volume);
+          instrument.setVolume(value);
+          cursor = {
+            index: firstPointAtOrAfter(points, elapsedBeat),
+            points,
+            lastValue: value,
+          };
+          automationRef.current.set(track.id, cursor);
+        }
+
+        if (!instrument.rampVolume) {
+          // Stepped instead of ramped, for a backend whose level is set through
+          // something with no notion of time. Only on a real change: a flat stretch
+          // of curve is not twenty commands a second.
+          const value = valueAtBeat(points, elapsedBeat, track.volume);
+          if (Math.abs(value - cursor.lastValue) > VOLUME_STEP_EPSILON) {
+            instrument.setVolume(value);
+            cursor.lastValue = value;
+          }
+          continue;
+        }
+
+        while (cursor.index < points.length) {
+          const songTime = beatToSongTime(points[cursor.index].beat, cfg.bpm);
+          if (songTime >= horizon) break;
+
+          instrument.rampVolume(
+            points[cursor.index].value,
+            toClockTime(songTime, songStartClockRef.current)
+          );
+          cursor.index++;
+        }
+      }
+    },
+    []
+  );
 
   const clearTimer = useCallback(() => {
     if (timerRef.current !== null) {
@@ -170,7 +283,12 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
         duration: note.duration,
       });
     }
-  
+
+    // Levels after notes, on the same horizon: a fade is scheduled onto the gain
+    // node rather than baked into the notes, so it is heard *through* a held chord
+    // instead of only at the next note boundary.
+    scheduleAutomation(cfg, pool, elapsed, Math.min(horizon, endSong));
+
     scheduledUpToRef.current = Math.max(scheduledUpToRef.current, horizon);
   
     // Reaching the end either wraps the loop or ends playback. Wrapping shifts the
@@ -180,6 +298,10 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
       if (cfg.loopEnabled) {
         songStartClockRef.current += loopDuration;
         scheduledUpToRef.current = loopFrom;
+        // Forgetting the cursors makes the next pass re-pin each level at the top of
+        // the range, so a repeat opens where the curve opens instead of gliding back
+        // up from wherever the last pass ended.
+        automationRef.current.clear();
         // Re-label the clicks already scheduled past the seam into the new frame.
         // Inferring the wrap from song time moving backward would not do: it fails
         // when the range starts at the top of the song and the wrap lands on the
@@ -191,6 +313,7 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
   
       clearTimer();
       pool.stopAll();
+      resetAutomation();
       setIsPlaying(false);
       // Back to the start of the range rather than of the song, so pressing Play
       // again repeats what was just heard.
@@ -200,7 +323,7 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
     }
 
     setCurrentTime(Math.max(0, Math.min(elapsed, endSong)));
-  }, [clearTimer, buildClicks]);
+  }, [clearTimer, buildClicks, scheduleAutomation, resetAutomation]);
 
   /**
    * Bring the audio graph up: context, instrument pool, samples loaded.
@@ -286,6 +409,11 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
         configRef.current.timeSignature
       );
 
+      // Forget the last run's curves so this one re-pins from its own resume
+      // position. The levels themselves need no restoring here: `ensureAudio` has
+      // just been through `pool.ensure`, which re-applies every static volume.
+      automationRef.current.clear();
+
       // Pre-build the metronome click queue for this playback run.
       clickQueueBuiltRef.current = false;
       if (metronomeEnabledRef.current) {
@@ -316,6 +444,7 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
   const pause = useCallback(() => {
     clearTimer();
     poolRef.current?.stopAll();
+    resetAutomation();
     resetMetronome();
     clickQueueBuiltRef.current = false;
 
@@ -326,11 +455,12 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
 
     setIsPaused(true);
     setIsPlaying(false);
-  }, [clearTimer]);
+  }, [clearTimer, resetAutomation]);
 
   const stop = useCallback(() => {
     clearTimer();
     poolRef.current?.stopAll();
+    resetAutomation();
     resetMetronome();
     clickQueueBuiltRef.current = false;
 
@@ -339,7 +469,7 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
     setIsPlaying(false);
     setIsPaused(false);
     setCurrentTime(0);
-  }, [clearTimer]);
+  }, [clearTimer, resetAutomation]);
 
   /**
    * The live song position in seconds, read straight off the audio clock.

@@ -557,6 +557,142 @@ describe('projectStore', () => {
     });
   });
 
+  describe('convertCustomSegments', () => {
+    const state = () => projectStore.getState();
+
+    beforeEach(() => {
+      state().createProject();
+      state().addBar();
+    });
+
+    /** A recorded block, as `recordSegment` commits one. */
+    const take = (
+      customNotes: ChordSegment['customNotes'],
+      overrides: Partial<ChordSegment> = {}
+    ): ChordSegment => ({
+      id: 'take',
+      kind: 'custom',
+      duration: 2,
+      customNotes,
+      ...overrides,
+    });
+
+    const record = (segment: ChordSegment, atBeat = 0) =>
+      state().recordSegment(trackId(), atBeat, segment);
+
+    it('turns a held chord into one chord segment where the take sat', () => {
+      record(
+        take([
+          { pitch: 60, startBeat: 0, duration: 2 },
+          { pitch: 64, startBeat: 0, duration: 2 },
+          { pitch: 67, startBeat: 0, duration: 2 },
+        ]),
+        1
+      );
+
+      const produced = state().convertCustomSegments(['take']);
+
+      const chords = barChords(state().project!.bars[0], trackId());
+      expect(chords).toHaveLength(1);
+      expect(chords[0]).toMatchObject({ kind: 'chord', root: 'C', quality: 'major', startBeat: 1 });
+      expect(produced).toEqual([chords[0].id]);
+    });
+
+    it('leaves the piano roll sounding what was played', () => {
+      record(
+        take([
+          { pitch: 60, startBeat: 0, duration: 2 },
+          { pitch: 64, startBeat: 0, duration: 2 },
+          { pitch: 67, startBeat: 0, duration: 2 },
+        ])
+      );
+      const before = barNotes(state().project!.bars[0], trackId())
+        .map(n => n.pitch)
+        .sort((a, b) => a - b);
+
+      state().convertCustomSegments(['take']);
+
+      const after = barNotes(state().project!.bars[0], trackId())
+        .map(n => n.pitch)
+        .sort((a, b) => a - b);
+      expect(after).toEqual(before);
+    });
+
+    it('splits a melodic take into one segment per note, and regenerates its notes', () => {
+      record(
+        take(
+          [
+            { pitch: 60, startBeat: 0, duration: 1 },
+            { pitch: 62, startBeat: 1, duration: 1 },
+            { pitch: 64, startBeat: 2, duration: 1 },
+          ],
+          { duration: 3 }
+        )
+      );
+
+      const produced = state().convertCustomSegments(['take']);
+
+      const chords = barChords(state().project!.bars[0], trackId());
+      expect(chords).toHaveLength(3);
+      expect(chords.map(c => c.startBeat)).toEqual([0, 1, 2]);
+      expect(chords.every(c => c.kind === 'note')).toBe(true);
+      expect(produced).toHaveLength(3);
+      expect(barNotes(state().project!.bars[0], trackId()).map(n => n.pitch)).toEqual([60, 62, 64]);
+    });
+
+    it('leaves the neighbours where they are', () => {
+      state().insertSegment(state().project!.bars[0].id, 3, chordSegment({ id: 'after' }), trackId());
+      record(
+        take([
+          { pitch: 60, startBeat: 0, duration: 1 },
+          { pitch: 62, startBeat: 1, duration: 1 },
+        ]),
+        0
+      );
+
+      state().convertCustomSegments(['take']);
+
+      expect(barChords(state().project!.bars[0], trackId()).find(c => c.id === 'after')).toMatchObject(
+        { startBeat: 3 }
+      );
+    });
+
+    it('leaves a block it cannot name untouched, and says so by producing nothing', () => {
+      record(
+        take([
+          { pitch: 60, startBeat: 0, duration: 2 },
+          { pitch: 62, startBeat: 0, duration: 2 },
+          { pitch: 64, startBeat: 0, duration: 2 },
+        ])
+      );
+
+      expect(state().convertCustomSegments(['take'])).toEqual([]);
+      expect(barChords(state().project!.bars[0], trackId())[0].kind).toBe('custom');
+    });
+
+    it('ignores ids that name nothing, and segments that are not recordings', () => {
+      state().insertSegment(state().project!.bars[0].id, 0, chordSegment({ id: 'a' }), trackId());
+      const before = state().project;
+
+      expect(state().convertCustomSegments(['a', 'nope'])).toEqual([]);
+      // Untouched down to the object identity: nothing was written at all.
+      expect(state().project).toBe(before);
+    });
+
+    it('converts a whole selection in one write, so one undo takes it back', () => {
+      record(take([{ pitch: 60, startBeat: 0, duration: 1 }], { id: 'one' }), 0);
+      record(take([{ pitch: 62, startBeat: 0, duration: 1 }], { id: 'two' }), 2);
+
+      let writes = 0;
+      const unsubscribe = projectStore.subscribe(() => writes++);
+      state().convertCustomSegments(['one', 'two']);
+      unsubscribe();
+
+      expect(writes).toBe(1);
+      expect(barChords(state().project!.bars[0], trackId()).every(c => c.kind === 'note')).toBe(true);
+    });
+  });
+
   describe('removeSegment', () => {
     beforeEach(() => {
       projectStore.getState().createProject();

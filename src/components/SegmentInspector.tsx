@@ -1,8 +1,8 @@
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { findSegment } from '@/engine/timeline';
-import { currentKind, resolveSegmentChord } from '@/engine/chordOperations';
-import type { SegmentKindTarget } from '@/engine/chordOperations';
+import { convertCustomSegment, currentKind, resolveSegmentChord } from '@/engine/chordOperations';
+import type { CustomConversion, SegmentKindTarget } from '@/engine/chordOperations';
 import { projectScale, segmentScale } from '@/engine/scales';
 import { ScaleSelect } from '@/components/ScaleSelect';
 import { DEFAULT_VELOCITY, voicedPitches } from '@/engine/voicing';
@@ -133,7 +133,9 @@ export function SegmentInspector() {
   const setSegmentsBreak = projectStore(s => s.setSegmentsBreak);
   const clearSegmentsVoicing = projectStore(s => s.clearSegmentsVoicing);
   const convertSegmentsKind = projectStore(s => s.convertSegmentsKind);
+  const convertCustomSegments = projectStore(s => s.convertCustomSegments);
   const setSegmentsScale = projectStore(s => s.setSegmentsScale);
+  const setSelectedSegments = selectionStore(s => s.setSelectedSegments);
 
   const located = project
     ? selectedSegmentIds
@@ -231,6 +233,15 @@ export function SegmentInspector() {
           is the one kind whose notes cannot be read off its name. */}
       {segments.length === 1 && first.segment.kind === 'custom' && (
         <CustomNotes segment={first.segment} />
+      )}
+
+      {/* Offered only when the whole selection is recordings, matching how the
+          controls above are withheld from a mixed one. */}
+      {segments.length > 0 && segments.every(s => s.kind === 'custom') && (
+        <ConvertCustom
+          conversions={segments.map(s => convertCustomSegment(s, scaleOf(s)))}
+          onConvert={() => setSelectedSegments(convertCustomSegments(ids))}
+        />
       )}
 
       {chords.length === 0 ? (
@@ -452,6 +463,57 @@ function CustomNotes({ segment }: { segment: ChordSegment }) {
         ))}
       </ul>
     </Section>
+  );
+}
+
+/**
+ * The one way out of a recording: turn it into the material it spells.
+ *
+ * A take is otherwise a dead end — nothing about it can be transposed by degree,
+ * inverted or retuned, because it names no harmony. Converting it is lossy on
+ * purpose: what comes back is the *named* chord or line, close-voiced in the
+ * register it sounded, not the exact spacing and micro-timing that were played.
+ *
+ * A block that spells neither one chord nor one line is refused rather than
+ * approximated, and the button says why. Two segments cannot share a beat in one
+ * lane, so splitting such a block would ripple its notes apart and rewrite the
+ * timing it was played with — which is precisely what a recording is for.
+ */
+function ConvertCustom({
+  conversions,
+  onConvert,
+}: {
+  conversions: CustomConversion[];
+  onConvert: () => void;
+}) {
+  const blocked = conversions.find(c => c.kind === 'blocked');
+  const label =
+    conversions.length > 1
+      ? `Convert ${conversions.length} blocks`
+      : conversions[0]?.kind === 'chord'
+        ? 'Convert to chord'
+        : 'Convert to notes';
+
+  return (
+    <div className="space-y-1">
+      <button
+        type="button"
+        data-testid="convert-custom"
+        disabled={blocked !== undefined}
+        title={blocked?.reason}
+        onClick={onConvert}
+        className="w-full px-3 py-1.5 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-gray-700"
+      >
+        {label}
+      </button>
+      {/* Said in the panel as well as in the tooltip: a `title` is invisible on a
+          touch screen, and this is a refusal the user is owed an answer for. */}
+      {blocked && (
+        <p data-testid="convert-custom-reason" className="text-xs text-gray-500">
+          {blocked.reason}
+        </p>
+      )}
+    </div>
   );
 }
 

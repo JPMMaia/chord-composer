@@ -35,6 +35,7 @@ import {
   withStartBeats,
 } from '@/engine/timeline';
 import {
+  convertCustomSegment,
   convertSegmentKind,
   cycleSegmentInversion,
   generateNotesFromSegments,
@@ -145,6 +146,14 @@ interface ProjectState {
     segmentIds: string[],
     target: import('@/engine/chordOperations').SegmentKindTarget
   ) => void;
+  /**
+   * Turn recorded blocks into the named material they spell — a chord, or a line
+   * of notes.
+   *
+   * @returns the ids of the segments produced, so the caller can keep them
+   *   selected; empty when nothing could be converted.
+   */
+  convertCustomSegments: (segmentIds: string[]) => string[];
   setLoopRegion: (start: number | null, end: number | null) => void;
   /** Clone an instrument and all its chord segments. Returns the new instrument's id. */
   duplicateTrack: (sourceTrackId: string) => string | null;
@@ -901,6 +910,49 @@ export const projectStore = create<ProjectState>((set, get) => ({
       convertSegmentKind(segment, scale, target)
     );
     if (next) set({ project: next });
+  },
+
+  /**
+   * Convert recorded blocks into named material: a chord when the take spells one,
+   * a run of note segments when it was played one note at a time.
+   *
+   * One block can become several segments, which is why this cannot go through
+   * `withTransformedSegments` like every other segment edit — it splices a list in
+   * where a single block was. Blocks that spell neither are skipped rather than
+   * mangled; `convertCustomSegment` is also what the inspector asks in order to
+   * explain the refusal before the user presses anything.
+   */
+  convertCustomSegments: (segmentIds: string[]) => {
+    const project = get().project;
+    if (!project) return [];
+
+    const fallback = keyScale(project);
+    const produced: string[] = [];
+    let bars = project.bars;
+
+    for (const segmentId of segmentIds) {
+      // Re-located each time round, because the bars are rebuilt as we go.
+      const located = findSegment(bars, segmentId);
+      if (!located) continue;
+
+      const result = convertCustomSegment(
+        located.segment,
+        segmentScale(located.segment, fallback)
+      );
+      if (result.kind === 'blocked') continue;
+
+      produced.push(...result.segments.map(s => s.id));
+      bars = mapBar(bars, located.bar.id, located.trackId, chords =>
+        chords.flatMap(c => (c.id === segmentId ? result.segments : [c]))
+      );
+    }
+
+    if (produced.length === 0) return [];
+
+    // One write for the whole selection, so however many blocks were converted it
+    // is one visual step and one history entry.
+    set({ project: applyBars(project, bars) });
+    return produced;
   },
 
   // The single-segment forms, kept because plenty of callers only ever have one.

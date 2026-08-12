@@ -10,6 +10,7 @@ import {
   shiftSegmentOctave,
   cycleSegmentInversion,
   convertSegmentKind,
+  convertCustomSegment,
   currentKind,
 } from "@/engine/chordOperations";
 import { Bar, Scale, ChordSegment, Note, SegmentNote, TimeSignature } from "@/types/music";
@@ -1513,6 +1514,209 @@ describe("chordOperations", () => {
       const first = custom(triadNotes);
       const second = custom([{ pitch: 65, startBeat: 0, duration: 2 }]);
       expect(mergeAdjacentChords([first, second])).toHaveLength(2);
+    });
+
+    describe("convertCustomSegment", () => {
+      it("names a held chord, keeping where the block sat and how long it ran", () => {
+        const segment = custom(triadNotes, { startBeat: 1, duration: 2 });
+        const result = convertCustomSegment(segment, C_MAJOR);
+
+        expect(result.kind).toBe("chord");
+        if (result.kind !== "chord") return;
+        expect(result.segments).toHaveLength(1);
+        expect(result.segments[0]).toMatchObject({
+          id: segment.id,
+          kind: "chord",
+          startBeat: 1,
+          duration: 2,
+          root: "C",
+          quality: "major",
+          inversion: 0,
+          octave: 4,
+          chordSymbol: "C",
+          romanNumeral: "I",
+          scale: C_MAJOR,
+        });
+        expect(result.segments[0].customNotes).toBeUndefined();
+      });
+
+      it("regenerates the pitches that were played", () => {
+        const segment = custom(triadNotes);
+        const result = convertCustomSegment(segment, C_MAJOR);
+        if (result.kind !== "chord") throw new Error("expected a chord");
+
+        const converted = result.segments[0];
+        const notes = generateNotesFromSegments(
+          [converted],
+          barWith([converted]),
+          C_MAJOR,
+          TS_4_4
+        );
+        expect(notes.map(n => n.pitch).sort((a, b) => a - b)).toEqual([60, 64, 67]);
+      });
+
+      it("keeps an inversion in the register it was played in", () => {
+        // E3 G3 C4 — first inversion, an octave below where a root-position C
+        // would sit if the register were guessed rather than measured.
+        const segment = custom([
+          { pitch: 52, startBeat: 0, duration: 2 },
+          { pitch: 55, startBeat: 0, duration: 2 },
+          { pitch: 60, startBeat: 0, duration: 2 },
+        ]);
+        const result = convertCustomSegment(segment, C_MAJOR);
+        if (result.kind !== "chord") throw new Error("expected a chord");
+
+        expect(result.segments[0]).toMatchObject({ root: "C", inversion: 1, octave: 3 });
+      });
+
+      it("hears a raggedly-played chord as one chord", () => {
+        // Onsets a few thousandths of a beat apart, as an unquantised take lands.
+        const segment = custom([
+          { pitch: 60, startBeat: 0, duration: 2 },
+          { pitch: 64, startBeat: 0.02, duration: 1.98 },
+          { pitch: 67, startBeat: 0.05, duration: 1.95 },
+        ]);
+        expect(convertCustomSegment(segment, C_MAJOR).kind).toBe("chord");
+      });
+
+      it("leaves a chromatic chord unnumbered but still named", () => {
+        // D# major has no degree in C major, so there is no numeral to give it.
+        const segment = custom([
+          { pitch: 63, startBeat: 0, duration: 2 },
+          { pitch: 67, startBeat: 0, duration: 2 },
+          { pitch: 70, startBeat: 0, duration: 2 },
+        ]);
+        const result = convertCustomSegment(segment, C_MAJOR);
+        if (result.kind !== "chord") throw new Error("expected a chord");
+
+        expect(result.segments[0]).toMatchObject({ root: "D#", chordSymbol: "D#" });
+        expect(result.segments[0].romanNumeral).toBeUndefined();
+      });
+
+      it("averages the velocities the chord was played with", () => {
+        const segment = custom([
+          { pitch: 60, startBeat: 0, duration: 2, velocity: 80 },
+          { pitch: 64, startBeat: 0, duration: 2, velocity: 90 },
+          { pitch: 67, startBeat: 0, duration: 2, velocity: 100 },
+        ]);
+        const result = convertCustomSegment(segment, C_MAJOR);
+        if (result.kind !== "chord") throw new Error("expected a chord");
+
+        expect(result.segments[0].velocity).toBe(90);
+      });
+
+      it("splits a melody into one note segment per note, where each was played", () => {
+        const segment = custom(
+          [
+            { pitch: 60, startBeat: 0, duration: 1 },
+            { pitch: 62, startBeat: 1, duration: 0.5 },
+            { pitch: 64, startBeat: 2, duration: 2 },
+          ],
+          { startBeat: 1, duration: 4 }
+        );
+        const result = convertCustomSegment(segment, C_MAJOR);
+
+        expect(result.kind).toBe("notes");
+        if (result.kind !== "notes") return;
+        expect(result.segments).toHaveLength(3);
+        // Onsets are relative to the block, so they gain the block's own position.
+        expect(result.segments.map(s => s.startBeat)).toEqual([1, 2, 3]);
+        expect(result.segments.map(s => s.duration)).toEqual([1, 0.5, 2]);
+        expect(result.segments.map(s => s.pitch)).toEqual([60, 62, 64]);
+        expect(result.segments.every(s => s.kind === "note")).toBe(true);
+        // The first keeps the block's id, so a selection survives the conversion.
+        expect(result.segments[0].id).toBe(segment.id);
+        expect(new Set(result.segments.map(s => s.id)).size).toBe(3);
+      });
+
+      it("names the degree each note lands on", () => {
+        const segment = custom([
+          { pitch: 60, startBeat: 0, duration: 1 },
+          { pitch: 62, startBeat: 1, duration: 1 },
+        ]);
+        const result = convertCustomSegment(segment, C_MAJOR);
+        if (result.kind !== "notes") throw new Error("expected notes");
+
+        expect(result.segments[0]).toMatchObject({ root: "C", romanNumeral: "I" });
+        expect(result.segments[1]).toMatchObject({ root: "D", romanNumeral: "ii" });
+      });
+
+      it("leaves a chromatic note named but unnumbered", () => {
+        const segment = custom([{ pitch: 61, startBeat: 0, duration: 1 }]);
+        const result = convertCustomSegment(segment, C_MAJOR);
+        if (result.kind !== "notes") throw new Error("expected notes");
+
+        expect(result.segments[0]).toMatchObject({ root: "C#" });
+        expect(result.segments[0].romanNumeral).toBeUndefined();
+      });
+
+      it("trims a legato note back to the next onset so the two cannot collide", () => {
+        const segment = custom([
+          { pitch: 60, startBeat: 0, duration: 1.5 },
+          { pitch: 62, startBeat: 1, duration: 1 },
+        ]);
+        const result = convertCustomSegment(segment, C_MAJOR);
+        if (result.kind !== "notes") throw new Error("expected notes");
+
+        expect(result.segments[0].duration).toBe(1);
+        // The last note has nothing to run into, so it keeps its full length.
+        expect(result.segments[1].duration).toBe(1);
+      });
+
+      it("carries each note's own velocity, falling back to the block's", () => {
+        const segment = custom(
+          [
+            { pitch: 60, startBeat: 0, duration: 1, velocity: 70 },
+            { pitch: 62, startBeat: 1, duration: 1 },
+          ],
+          { velocity: 55 }
+        );
+        const result = convertCustomSegment(segment, C_MAJOR);
+        if (result.kind !== "notes") throw new Error("expected notes");
+
+        expect(result.segments[0].velocity).toBe(70);
+        expect(result.segments[1].velocity).toBe(55);
+      });
+
+      it("converts a single played note", () => {
+        const segment = custom([{ pitch: 67, startBeat: 0, duration: 2 }]);
+        const result = convertCustomSegment(segment, C_MAJOR);
+
+        expect(result.kind).toBe("notes");
+        if (result.kind !== "notes") return;
+        expect(result.segments).toHaveLength(1);
+        expect(result.segments[0]).toMatchObject({ kind: "note", pitch: 67 });
+      });
+
+      it("refuses a cluster that spells no chord", () => {
+        const segment = custom([
+          { pitch: 60, startBeat: 0, duration: 2 },
+          { pitch: 62, startBeat: 0, duration: 2 },
+          { pitch: 64, startBeat: 0, duration: 2 },
+        ]);
+        const result = convertCustomSegment(segment, C_MAJOR);
+
+        expect(result.kind).toBe("blocked");
+        if (result.kind !== "blocked") return;
+        expect(result.reason).toBeTruthy();
+      });
+
+      it("refuses a block that mixes a chord with a melody", () => {
+        const segment = custom([
+          ...triadNotes,
+          { pitch: 69, startBeat: 2, duration: 1 },
+        ]);
+        expect(convertCustomSegment(segment, C_MAJOR).kind).toBe("blocked");
+      });
+
+      it("refuses an empty block", () => {
+        expect(convertCustomSegment(custom([]), C_MAJOR).kind).toBe("blocked");
+      });
+
+      it("refuses anything that is not a recorded block", () => {
+        const chord = makeChord("I", 2, "C");
+        expect(convertCustomSegment(chord, C_MAJOR).kind).toBe("blocked");
+      });
     });
   });
 });

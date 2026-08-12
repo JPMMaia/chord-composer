@@ -5,11 +5,14 @@ import type {
   Note,
   NoteName,
   Scale,
+  SegmentNote,
   TimeSignature,
 } from '@/types/music';
 import { generateId } from '@/utils/id';
+import type { DetectedChord } from '@/engine/chords';
 import {
   CHORD_INTERVALS,
+  detectChord,
   getDiatonicChords,
   getDiatonicSevenths,
   SEMITONE_TO_NOTE,
@@ -564,6 +567,185 @@ function buildNewChordSegment(
   };
 }
 
+
+/* ------------------------------------------------------------------------ */
+/* Recorded blocks → named material                                          */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * What converting a recorded block would produce, or why it cannot be converted.
+ *
+ * A three-way answer rather than a nullable list because the UI has to explain a
+ * refusal: `reason` is what the disabled button says.
+ */
+export type CustomConversion =
+  | { kind: 'chord'; segments: ChordSegment[] }
+  | { kind: 'notes'; segments: ChordSegment[] }
+  | { kind: 'blocked'; reason: string };
+
+/**
+ * How far apart two onsets may be and still count as struck together.
+ *
+ * Recording quantises onsets by default, but a take captured with quantise off is
+ * a few thousandths of a beat ragged — ten fingers never land at once — and a
+ * chord played by hand must still read as a chord. A 32nd note is short enough
+ * that nothing anyone would hear as two events falls inside it.
+ */
+const CHORD_ONSET_TOLERANCE = MIN_SEGMENT_BEATS;
+
+/** Notes grouped by onset, each group struck together, in time order. */
+function groupByOnset(notes: SegmentNote[]): SegmentNote[][] {
+  const sorted = [...notes].sort((a, b) => a.startBeat - b.startBeat || a.pitch - b.pitch);
+  const groups: SegmentNote[][] = [];
+
+  for (const note of sorted) {
+    const current = groups[groups.length - 1];
+    // Measured against the group's *first* onset rather than the previous note's,
+    // so a slow roll cannot chain one tolerance onto the next indefinitely.
+    if (current && note.startBeat - current[0].startBeat <= CHORD_ONSET_TOLERANCE) {
+      current.push(note);
+    } else {
+      groups.push([note]);
+    }
+  }
+
+  return groups;
+}
+
+/**
+ * Converts a recorded block into the named material it spells: one chord segment
+ * when its notes were struck together and name a chord, or one note segment per
+ * note when they were played one at a time.
+ *
+ * Deliberately lossy, and deliberately narrow. A chord comes back voiced in close
+ * position in the register it sounded, not with the exact spacing ten fingers
+ * produced — that is what makes it a *named* chord, transposable and invertible,
+ * rather than the recording it started as. Anything that is neither one chord nor
+ * one line — a cluster that names nothing, a chord with a melody over it — is
+ * refused rather than mangled: two segments cannot share a beat in one lane, so
+ * splitting such a block would ripple its notes apart and rewrite the timing that
+ * was played.
+ *
+ * @param segment - The recorded block to read.
+ * @param scale - The key to number the result's degrees in.
+ */
+export function convertCustomSegment(segment: ChordSegment, scale: Scale): CustomConversion {
+  if (segment.kind !== 'custom') {
+    return { kind: 'blocked', reason: 'Only a recorded block can be converted.' };
+  }
+
+  const played = segment.customNotes ?? [];
+  if (played.length === 0) {
+    return { kind: 'blocked', reason: 'This block holds no notes.' };
+  }
+
+  const groups = groupByOnset(played);
+  const start = segment.startBeat ?? 0;
+
+  // Struck together: one chord, if these pitches name one.
+  if (groups.length === 1 && new Set(groups[0].map(n => n.pitch)).size > 1) {
+    const detected = detectChord(groups[0].map(n => n.pitch));
+    if (!detected) {
+      return {
+        kind: 'blocked',
+        reason: "These notes don't spell a chord that can be named.",
+      };
+    }
+    return { kind: 'chord', segments: [chordFromPlayed(segment, groups[0], detected, scale)] };
+  }
+
+  // One note at a time: a line, one segment per note.
+  if (groups.every(group => new Set(group.map(n => n.pitch)).size === 1)) {
+    return {
+      kind: 'notes',
+      segments: groups.map((group, index) => {
+        const note = group[0];
+        // Trimmed to the next onset so a legato take cannot hand two segments the
+        // same beat — the one thing a lane cannot hold.
+        const next = groups[index + 1]?.[0].startBeat;
+        const duration =
+          next === undefined
+            ? note.duration
+            : Math.max(MIN_SEGMENT_BEATS, Math.min(note.duration, next - note.startBeat));
+
+        return noteFromPlayed(segment, note, start + note.startBeat, duration, scale, index === 0);
+      }),
+    };
+  }
+
+  return {
+    kind: 'blocked',
+    reason:
+      "A block that mixes chords with single notes can't be converted — record one chord, " +
+      'or one note at a time.',
+  };
+}
+
+/** The named chord a struck group spells, in the register it sounded. */
+function chordFromPlayed(
+  segment: ChordSegment,
+  group: SegmentNote[],
+  detected: DetectedChord,
+  scale: Scale
+): ChordSegment {
+  const velocities = group.map(n => n.velocity ?? segment.velocity ?? DEFAULT_VELOCITY);
+  const diatonic = getDiatonicChords(scale)
+    .concat(getDiatonicSevenths(scale))
+    .find(c => c.root === detected.root && c.quality === detected.quality);
+
+  return {
+    ...segment,
+    // The id survives so a selection, and anything else holding onto it, follows
+    // the block through the conversion.
+    id: segment.id,
+    kind: 'chord',
+    root: detected.root,
+    quality: detected.quality,
+    inversion: detected.inversion,
+    octave: detected.octave,
+    chordSymbol: formatChordSymbol(detected.root, detected.quality),
+    // A chord the key does not contain names no degree, and labelling it with one
+    // would be a lie — `retuneSegmentsToScale` reads the absence as chromatic.
+    romanNumeral: diatonic?.romanNumeral,
+    scale,
+    velocity: Math.round(velocities.reduce((a, b) => a + b, 0) / velocities.length),
+    customNotes: undefined,
+    pitch: undefined,
+    voicing: undefined,
+  };
+}
+
+/** One played note as a note segment, named by the degree it lands on. */
+function noteFromPlayed(
+  segment: ChordSegment,
+  note: SegmentNote,
+  startBeat: number,
+  duration: number,
+  scale: Scale,
+  keepId: boolean
+): ChordSegment {
+  const pitchClass = ((note.pitch % 12) + 12) % 12;
+  const degree = getScalePitches(scale.root, scale.type).indexOf(pitchClass);
+
+  return {
+    ...segment,
+    id: keepId ? segment.id : generateId(),
+    kind: 'note',
+    pitch: note.pitch,
+    startBeat,
+    duration,
+    velocity: note.velocity ?? segment.velocity ?? DEFAULT_VELOCITY,
+    root: SEMITONE_TO_NOTE[pitchClass],
+    romanNumeral: degree === -1 ? undefined : getDiatonicChords(scale)[degree]?.romanNumeral,
+    scale,
+    customNotes: undefined,
+    quality: undefined,
+    octave: undefined,
+    chordSymbol: undefined,
+    inversion: undefined,
+    voicing: undefined,
+  };
+}
 
 /**
  * Which degree of `scale` a chord segment sits on, or -1.

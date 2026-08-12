@@ -462,6 +462,119 @@ describe('SegmentInspector', () => {
       expect(screen.queryByLabelText(/scale root/i)).not.toBeInTheDocument();
     });
 
+    /** Three notes struck together — what holding a chord records. */
+    const heldChord = () =>
+      customSegment({
+        customNotes: [
+          { pitch: 60, startBeat: 0, duration: 2 },
+          { pitch: 64, startBeat: 0, duration: 2 },
+          { pitch: 67, startBeat: 0, duration: 2 },
+        ],
+      });
+
+    it('offers to convert a held chord into a chord', () => {
+      placeAndSelect(heldChord());
+      render(<SegmentInspector />);
+
+      const button = screen.getByTestId('convert-custom');
+      expect(button).toHaveTextContent('Convert to chord');
+      expect(button).toBeEnabled();
+    });
+
+    it('offers to convert a played line into notes', () => {
+      placeAndSelect(customSegment());
+      render(<SegmentInspector />);
+
+      expect(screen.getByTestId('convert-custom')).toHaveTextContent('Convert to notes');
+    });
+
+    it('converts on click, and leaves the result selected and editable', () => {
+      const take = heldChord();
+      placeAndSelect(take);
+      render(<SegmentInspector />);
+
+      fireEvent.click(screen.getByTestId('convert-custom'));
+
+      expect(segmentOf(take.id).kind).toBe('chord');
+      expect(selectionStore.getState().selectedSegmentIds).toEqual([take.id]);
+      // The panel now speaks for a chord: the controls a recording withholds.
+      expect(screen.getByTestId('segment-kind-select')).toBeInTheDocument();
+      expect(screen.getByTestId('inversion-0')).toBeInTheDocument();
+      expect(screen.queryByTestId('convert-custom')).not.toBeInTheDocument();
+    });
+
+    it('selects every note a converted line produced', () => {
+      const take = customSegment();
+      placeAndSelect(take);
+      render(<SegmentInspector />);
+
+      fireEvent.click(screen.getByTestId('convert-custom'));
+
+      expect(selectionStore.getState().selectedSegmentIds).toHaveLength(2);
+      expect(screen.getByTestId('segment-inspector')).toHaveTextContent('2 segments selected');
+    });
+
+    it('refuses a block it cannot name, and says why in the panel and the tooltip', () => {
+      placeAndSelect(
+        customSegment({
+          customNotes: [
+            { pitch: 60, startBeat: 0, duration: 2 },
+            { pitch: 62, startBeat: 0, duration: 2 },
+            { pitch: 64, startBeat: 0, duration: 2 },
+          ],
+        })
+      );
+      render(<SegmentInspector />);
+
+      const button = screen.getByTestId('convert-custom');
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute('title', expect.stringContaining("don't spell a chord"));
+      // Stated in the panel too — a tooltip alone is invisible on a touch screen.
+      expect(screen.getByTestId('convert-custom-reason')).toHaveTextContent("don't spell a chord");
+    });
+
+    it('offers nothing for a chord segment', () => {
+      placeAndSelect(chordSegment());
+      render(<SegmentInspector />);
+
+      expect(screen.queryByTestId('convert-custom')).not.toBeInTheDocument();
+    });
+
+    it('converts a whole selection of recordings at once', () => {
+      const first = heldChord();
+      const second = customSegment();
+      state().insertSegment(bars()[0].id, 0, first, trackId());
+      state().insertSegment(bars()[1].id, 0, second, trackId());
+      selectionStore.getState().setSelectedSegments([first.id, second.id]);
+
+      render(<SegmentInspector />);
+      expect(screen.getByTestId('convert-custom')).toHaveTextContent('Convert 2 blocks');
+      fireEvent.click(screen.getByTestId('convert-custom'));
+
+      expect(segmentOf(first.id).kind).toBe('chord');
+      expect(segmentOf(second.id).kind).toBe('note');
+    });
+
+    it('withholds the button when one of the selected blocks cannot be converted', () => {
+      // All or nothing, like every other control here: half a conversion would
+      // leave the selection in two different states with one press.
+      const good = heldChord();
+      const bad = customSegment({
+        customNotes: [
+          { pitch: 60, startBeat: 0, duration: 2 },
+          { pitch: 62, startBeat: 0, duration: 2 },
+          { pitch: 64, startBeat: 0, duration: 2 },
+        ],
+      });
+      state().insertSegment(bars()[0].id, 0, good, trackId());
+      state().insertSegment(bars()[1].id, 0, bad, trackId());
+      selectionStore.getState().setSelectedSegments([good.id, bad.id]);
+
+      render(<SegmentInspector />);
+
+      expect(screen.getByTestId('convert-custom')).toBeDisabled();
+    });
+
     it('keeps the kind dropdown away from a selection that includes one', () => {
       // Converting the chord would be fine; converting the take alongside it is
       // not, so the control is withheld rather than silently applied to half.

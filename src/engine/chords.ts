@@ -1,4 +1,5 @@
 import type { NoteName, Scale, ChordQuality } from '@/types/music';
+import { MAX_SEGMENT_OCTAVE, MIN_SEGMENT_OCTAVE } from '@/utils/constants';
 import { getScalePitches } from './scales';
 
 /** Internal representation of a chord with intervals. */
@@ -168,6 +169,65 @@ export function buildStackedChord(
 export function classifyIntervals(intervals: number[]): ChordQuality | undefined {
   const qualities = Object.keys(CHORD_INTERVALS) as ChordQuality[];
   return qualities.find(quality => intervalsEqual(intervals, CHORD_INTERVALS[quality]));
+}
+
+/** A chord read back off the notes that sound it. */
+export interface DetectedChord {
+  root: NoteName;
+  quality: ChordQuality;
+  /** Which chord tone is in the bass, as `voicedPitches` means it. */
+  inversion: number;
+  /** Register of the *root*, chosen so re-voicing lands the bass back where it sounded. */
+  octave: number;
+}
+
+/**
+ * Names the chord a set of sounding pitches spells, or undefined when they spell
+ * none.
+ *
+ * The inverse of `chordToNotes`, and the one thing standing between a recorded take
+ * and a named chord segment. Octave doublings and voicing order are ignored — what
+ * decides the chord is its pitch classes — but the *bass* is not thrown away: it
+ * picks the root of an otherwise ambiguous set and it fixes the register the chord
+ * comes back in.
+ *
+ * @param pitches - MIDI notes sounding together, in any order.
+ */
+export function detectChord(pitches: number[]): DetectedChord | undefined {
+  if (pitches.length === 0) return undefined;
+
+  const bass = Math.min(...pitches);
+  const bassClass = ((bass % 12) + 12) % 12;
+  const classes = [...new Set(pitches.map(p => ((p % 12) + 12) % 12))].sort((a, b) => a - b);
+
+  // Every quality is three or four notes; anything else spells no chord this app
+  // can name, and guessing at a subset would name a chord nobody played.
+  if (classes.length < 3 || classes.length > 4) return undefined;
+
+  // The bass first, so a symmetric set — a dim7, whose four notes are each as good
+  // a root as the others — resolves to the chord its bass implies.
+  const candidates = [bassClass, ...classes.filter(c => c !== bassClass)];
+
+  for (const root of candidates) {
+    const intervals = classes
+      .map(c => ((c - root) % 12 + 12) % 12)
+      .sort((a, b) => a - b);
+    const quality = classifyIntervals(intervals);
+    if (!quality) continue;
+
+    const inversion = CHORD_INTERVALS[quality].indexOf(((bassClass - root) % 12 + 12) % 12);
+    // The bass sounds at `baseMidi + intervals[inversion]`, so working back from it
+    // is what puts the chord in the register it was played in.
+    const baseMidi = bass - CHORD_INTERVALS[quality][inversion];
+    const octave = Math.min(
+      Math.max(midiToOctave(baseMidi), MIN_SEGMENT_OCTAVE),
+      MAX_SEGMENT_OCTAVE
+    );
+
+    return { root: SEMITONE_TO_NOTE[root], quality, inversion, octave };
+  }
+
+  return undefined;
 }
 
 /**

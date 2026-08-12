@@ -26,8 +26,8 @@ const LOAD_SFZ_VALUE = '__load-sfz__';
  *
  * Selecting an instrument here is what the chord timeline edits — it shows only
  * the selected instrument's blocks. The toggles are deliberately separate
- * concerns: mute and solo are about what you *hear*, the eye is about what you
- * *see* on the piano roll, and a hidden instrument still sounds.
+ * concerns: mute is about what you *hear*, the eye is about what you *see* on
+ * the piano roll, and a hidden instrument still sounds.
  */
 export const InstrumentsPanel: React.FC = () => {
   const tracks = projectStore(s => s.project?.tracks);
@@ -43,10 +43,6 @@ export const InstrumentsPanel: React.FC = () => {
   // Held at the panel for a different reason: loading a file in one row has to appear
   // in every other row's picker, and one piece of state is what makes that automatic.
   const sfz = useSfzInstruments();
-
-  // Solo is a project-wide mode, not a per-row one — see `isTrackAudible` — so
-  // whether anything is soloed has to be decided here, where every row is known.
-  const anySoloed = tracks?.some(t => t.solo) ?? false;
 
   if (!tracks) return null;
 
@@ -79,7 +75,6 @@ export const InstrumentsPanel: React.FC = () => {
           index={index}
           isSelected={track.id === selectedTrackId}
           onSelect={(id?: string) => selectTrack(id ?? track.id)}
-          silencedBySolo={anySoloed && !track.solo}
           vst3={vst3}
           sfz={sfz}
         />
@@ -115,8 +110,6 @@ interface InstrumentRowProps {
   index: number;
   isSelected: boolean;
   onSelect: (trackId?: string) => void;
-  /** Another instrument is soloed, so this one — though unmuted — is not heard. */
-  silencedBySolo: boolean;
   /** Empty in a browser build, and until the native scan finishes. */
   vst3: Vst3PluginsState;
   /** The sample sets this machine has been shown. Empty in a browser build. */
@@ -128,7 +121,6 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
   index,
   isSelected,
   onSelect,
-  silencedBySolo,
   vst3,
   sfz,
 }) => {
@@ -138,7 +130,6 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
   const setTrackInstrument = projectStore(s => s.setTrackInstrument);
   const setTrackVolume = projectStore(s => s.setTrackVolume);
   const toggleTrackMute = projectStore(s => s.toggleTrackMute);
-  const toggleTrackSolo = projectStore(s => s.toggleTrackSolo);
   const toggleTrackVisible = projectStore(s => s.toggleTrackVisible);
 
   const [isEditing, setIsEditing] = useState(false);
@@ -301,29 +292,6 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
           }`}
         >
           M
-        </button>
-
-        <button
-          onPointerDown={e => e.stopPropagation()}
-          onClick={() => toggleTrackSolo(track.id)}
-          title={
-            track.solo
-              ? 'Unsolo'
-              : 'Solo — silence every instrument that is not soloed'
-          }
-          aria-label={`${track.solo ? 'Unsolo' : 'Solo'} ${track.name}`}
-          aria-pressed={track.solo}
-          className={`px-1.5 text-xs font-semibold rounded transition-colors ${
-            track.solo
-              ? 'bg-yellow-500 text-gray-900'
-              // Dimmed to say *why* it is silent: something else is soloed, so
-              // this instrument is not being heard even though it is unmuted.
-              : silencedBySolo
-                ? 'text-yellow-600/70 hover:text-yellow-400'
-                : 'text-gray-400 hover:text-gray-200'
-          }`}
-        >
-          S
         </button>
 
         <button

@@ -2,34 +2,9 @@ import { useEffect } from 'react';
 import { clipboardStore } from '@/store/clipboardStore';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
-import { getBarBeats, getTotalBeats, snapBeat } from '@/engine/timeline';
+import { getTotalBeats, resolveBeatPosition, snapBeat } from '@/engine/timeline';
 import { editorStore } from '@/store/editorStore';
 import { isTextEntry } from '@/utils/keyboard';
-
-/**
- * Convert an absolute beat position into a paste target:
- * the bar index and the offset within that bar.
- *
- * Returns null when there is no project data yet.
- */
-function resolvePasteTarget(
-  absoluteBeat: number,
-  bars: import('@/types/music').Bar[],
-  projectTs: import('@/types/music').TimeSignature
-): { barIndex: number; startBeat: number } | null {
-  if (!bars.length) return null;
-
-  let accumulatedBeat = 0;
-  for (let i = 0; i < bars.length; i++) {
-    const barBeats = getBarBeats(bars[i], projectTs);
-    if (absoluteBeat < accumulatedBeat + barBeats) {
-      return { barIndex: i, startBeat: absoluteBeat - accumulatedBeat };
-    }
-    accumulatedBeat += barBeats;
-  }
-  // Beat falls after the last bar — paste at the start of the last bar.
-  return { barIndex: bars.length - 1, startBeat: 0 };
-}
 
 /**
  * Track the current mouse position globally so paste can compute the anchor
@@ -117,7 +92,7 @@ export function useSegmentCopyPaste(): void {
           Math.min(snapBeat(mouseBeat, snapBeats), totalBeats)
         );
 
-        const target = resolvePasteTarget(
+        const target = resolveBeatPosition(
           clampedBeat,
           project.bars,
           project.timeSignature

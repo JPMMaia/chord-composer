@@ -14,9 +14,29 @@ import { selectionStore } from '@/store/selectionStore';
 import { editorStore } from '@/store/editorStore';
 import { getPaletteItems } from '@/engine/palette';
 import type { PaletteItem } from '@/engine/palette';
+import { type MelodicFormula } from '@/engine/formulas';
+import { emptyLibrary, serializeLibrary, withGroup } from '@/engine/formulaLibrary';
+import { formulaLibraryStore } from '@/store/formulaLibraryStore';
 import type { ChordSegment } from '@/types/music';
 import { barChords, barNotes, DEFAULT_SNAP_BEATS } from '@/engine/timeline';
 import { PIANO_KEYS_WIDTH, PIXELS_PER_BEAT } from '@/utils/constants';
+
+/** Two formulas to drag, written here rather than fetched from a library. */
+const TORCULUS: MelodicFormula = {
+  id: 'torculus',
+  name: 'Torculus',
+  steps: [
+    { degree: 0, beats: 1 },
+    { degree: 1, beats: 1 },
+    { degree: 0, beats: 1 },
+  ],
+};
+
+const ARCH: MelodicFormula = {
+  id: 'arch',
+  name: 'Arch',
+  steps: [0, 1, 2, 3, 2, 1, 0].map(degree => ({ degree, beats: 1 })),
+};
 
 /** Minimal stand-in for the DataTransfer jsdom does not implement. */
 function makeDataTransfer(item: PaletteItem) {
@@ -85,6 +105,28 @@ function dropAt(barId: string, item: PaletteItem, beat: number, lane = 0) {
   fireDrag(target, 'drop', dataTransfer, beat * PIXELS_PER_BEAT);
 }
 
+/** The dragged-formula counterpart of `makeDataTransfer`. */
+function makeFormulaDataTransfer(formula: MelodicFormula) {
+  const data: Record<string, string> = {
+    'application/x-melodic-formula': JSON.stringify(formula),
+    'text/plain': formula.id,
+  };
+  return {
+    setData: vi.fn(),
+    getData: (type: string) => data[type] ?? '',
+    types: Object.keys(data),
+    dropEffect: 'none',
+  };
+}
+
+/** Drop a whole formula into a bar's lane at `beat` beats from that bar's start. */
+function dropFormulaAt(barId: string, formula: MelodicFormula, beat: number, lane = 0) {
+  const target = laneEl(barId, lane);
+  const dataTransfer = makeFormulaDataTransfer(formula);
+  fireDrag(target, 'dragOver', dataTransfer, beat * PIXELS_PER_BEAT);
+  fireDrag(target, 'drop', dataTransfer, beat * PIXELS_PER_BEAT);
+}
+
 /**
  * Drag a block from `fromBeat` to `toBeat` with the pointer.
  *
@@ -137,6 +179,10 @@ describe('ChordTimeline', () => {
       maxScrollX: 0,
       viewportWidth: 0,
       showAutomation: true,
+      paletteScale: { root: 'C', type: 'major' },
+      paletteOctave: 4,
+      formulaStartDegree: 0,
+      draggingFormulaId: null,
     });
     projectStore.getState().createProject();
     projectStore.getState().addBar();
@@ -392,6 +438,140 @@ describe('ChordTimeline', () => {
       render(<ChordTimeline />);
       dropAt(bars()[0].id, cMajorChords()[0], 9);
       expect(segments()[0].startBeat).toBe(3.875);
+    });
+  });
+
+  describe('dropping a melodic formula', () => {
+    /** `pitch@bar:start` per block, in project order. */
+    function phrase(): string[] {
+      return bars().flatMap((bar, index) =>
+        barChords(bar, trackId()).map(c => `${c.pitch}@${index}:${c.startBeat}`)
+      );
+    }
+
+    it('creates one note block per step of the formula', () => {
+      render(<ChordTimeline />);
+      dropFormulaAt(bars()[0].id, TORCULUS, 0);
+
+      expect(segments()).toHaveLength(3);
+      expect(segments().every(s => s.kind === 'note')).toBe(true);
+      expect(phrase()).toEqual(['60@0:0', '62@0:1', '60@0:2']);
+    });
+
+    it('realizes the phrase in the palette’s key and register', () => {
+      editorStore.setState({
+        paletteScale: { root: 'A', type: 'naturalMinor' },
+        paletteOctave: 5,
+      });
+      render(<ChordTimeline />);
+      dropFormulaAt(bars()[0].id, TORCULUS, 0);
+
+      expect(segments().map(s => s.pitch)).toEqual([81, 83, 81]);
+      expect(segments()[0].scale).toEqual({ root: 'A', type: 'naturalMinor' });
+    });
+
+    it('moves the whole shape when the start degree moves', () => {
+      editorStore.setState({ formulaStartDegree: 4 });
+      render(<ChordTimeline />);
+      dropFormulaAt(bars()[0].id, TORCULUS, 0);
+
+      expect(segments().map(s => s.pitch)).toEqual([67, 69, 67]);
+    });
+
+    it('spills a phrase longer than the bar into the bars that follow', () => {
+      render(<ChordTimeline />);
+      // Seven beats of arch dropped on beat 2 of a 4/4 bar: two notes fit, the
+      // rest belong to the bars after it.
+      dropFormulaAt(bars()[0].id, ARCH, 2);
+
+      expect(segments()).toHaveLength(7);
+      expect(phrase()).toEqual([
+        '60@0:2',
+        '62@0:3',
+        '64@1:0',
+        '65@1:1',
+        '64@1:2',
+        '62@1:3',
+        '60@2:0',
+      ]);
+    });
+
+    it('appends the bars a phrase running off the end of the project needs', () => {
+      render(<ChordTimeline />);
+      const barsBefore = bars().length;
+      dropFormulaAt(bars()[barsBefore - 1].id, ARCH, 2);
+
+      // Two beats fit in the bar that caught it; the remaining five need two more.
+      expect(bars()).toHaveLength(barsBefore + 2);
+      expect(segments()).toHaveLength(7);
+      expect(phrase()[6]).toBe(`60@${barsBefore + 1}:0`);
+    });
+
+    it('puts the whole phrase in the lane it was dropped on', () => {
+      projectStore.getState().setTrackLaneCount(trackId(), 2);
+      render(<ChordTimeline />);
+      dropFormulaAt(bars()[0].id, TORCULUS, 0, 1);
+
+      expect(segments().map(s => s.lane)).toEqual([1, 1, 1]);
+    });
+
+    it('selects the phrase it just dropped', () => {
+      render(<ChordTimeline />);
+      dropFormulaAt(bars()[0].id, TORCULUS, 0);
+
+      expect(selectionStore.getState().selectedSegmentIds).toEqual(
+        segments().map(s => s.id)
+      );
+    });
+
+    it('writes the project once, so the phrase is a single undo step', () => {
+      render(<ChordTimeline />);
+      let writes = 0;
+      const unsubscribe = projectStore.subscribe(() => {
+        writes += 1;
+      });
+      dropFormulaAt(bars()[0].id, ARCH, 0);
+      unsubscribe();
+
+      expect(writes).toBe(1);
+    });
+
+    it('sizes the drop caret to the length of the phrase being dragged', () => {
+      // The payload is unreadable during a dragover, so the caret measures the
+      // formula by id — which means it has to be in an open library.
+      const library = withGroup(emptyLibrary('Test'), {
+        id: 'g1',
+        name: 'Test group',
+        formulas: [ARCH],
+      });
+      formulaLibraryStore.setState({
+        libraries: [{ id: 'l1', library, ref: null, savedText: serializeLibrary(library) }],
+        selectedLibraryId: 'l1',
+        selectedGroupId: 'g1',
+      });
+      editorStore.setState({ draggingFormulaId: 'arch' });
+      render(<ChordTimeline />);
+      const target = laneEl(bars()[0].id);
+      fireDrag(target, 'dragOver', makeFormulaDataTransfer(ARCH), 0);
+
+      expect(screen.getByTestId('drop-indicator')).toHaveStyle({
+        width: `${7 * PIXELS_PER_BEAT}px`,
+      });
+    });
+
+    it('ignores a malformed formula payload rather than corrupting the timeline', () => {
+      render(<ChordTimeline />);
+      const target = laneEl(bars()[0].id);
+      const dataTransfer = {
+        setData: vi.fn(),
+        getData: (type: string) =>
+          type === 'application/x-melodic-formula' ? 'not json' : '',
+        types: ['application/x-melodic-formula'],
+        dropEffect: 'none',
+      };
+      fireDrag(target, 'drop', dataTransfer, 0);
+
+      expect(segments()).toHaveLength(0);
     });
   });
 

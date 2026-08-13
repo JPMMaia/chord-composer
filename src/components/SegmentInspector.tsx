@@ -25,6 +25,19 @@ const INVERSION_NAMES = ['Root', '1st', '2nd', '3rd'];
 /** Chord tone names by index, matching how `CHORD_INTERVALS` stacks them. */
 const TONE_NAMES = ['Root', '3rd', '5th', '7th'];
 
+/**
+ * Alterations a note may be given, by semitones off its degree.
+ *
+ * A semitone either way, where a formula file may also name a double accidental: an
+ * accidental typed by hand is a leading tone or a borrowed flat, and a control wide
+ * enough for 𝄪 mostly offers ways to mistype one.
+ */
+const ALTERATIONS = [
+  { value: -1, label: '♭', name: 'Flatten' },
+  { value: 0, label: '♮', name: 'Natural' },
+  { value: 1, label: '♯', name: 'Raise' },
+];
+
 const SPACING_PRESETS: { value: SpacingPreset; label: string }[] = [
   { value: 'close', label: 'Close' },
   { value: 'open', label: 'Open' },
@@ -133,6 +146,7 @@ export function SegmentInspector() {
   const setSegmentsBreak = projectStore(s => s.setSegmentsBreak);
   const clearSegmentsVoicing = projectStore(s => s.clearSegmentsVoicing);
   const setSegmentsVelocity = projectStore(s => s.setSegmentsVelocity);
+  const setSegmentsAlter = projectStore(s => s.setSegmentsAlter);
   const withRecording = projectStore(s => s.withRecording);
   const convertSegmentsKind = projectStore(s => s.convertSegmentsKind);
   const setSegmentsScale = projectStore(s => s.setSegmentsScale);
@@ -214,6 +228,26 @@ export function SegmentInspector() {
           onChange={patch => setSegmentsScale(ids, patch)}
         />
       </Section>
+
+      {/* Notes only, and the only way to write one the scale does not contain: the
+          piano roll refuses off-scale pitches, so without this a chromatic note could
+          only arrive from a formula or a recording. */}
+      {chords.length === 0 && (
+        <Section label="Alteration">
+          <div className="flex gap-1" role="group" aria-label="Alteration">
+            {ALTERATIONS.map(({ value, label, name }) => (
+              <ToggleButton
+                key={value}
+                testId={`alter-${value}`}
+                label={label}
+                title={name}
+                active={sharedValue(segments.map(s => s.alter ?? 0)) === value}
+                onClick={() => setSegmentsAlter(ids, value)}
+              />
+            ))}
+          </div>
+        </Section>
+      )}
 
       {/* Offered for every kind, unlike the voicing controls below: a note sounds at
           some velocity too, but only a chord has tones to voice. */}

@@ -12,6 +12,7 @@ import { FileMenu } from '@/components/FileMenu';
 import { AudioSettings } from '@/components/AudioSettings';
 import { InstrumentsPanel } from '@/components/InstrumentsPanel';
 import { ScalePalette } from '@/components/ScalePalette';
+import { FormulaPalette } from '@/components/FormulaPalette';
 import { ChordTimeline } from '@/components/ChordTimeline';
 import { PianoRoll } from '@/components/PianoRoll';
 import { HorizontalScrollbar } from '@/components/HorizontalScrollbar';
@@ -26,6 +27,8 @@ import { useFollowPlayhead } from '@/hooks/useFollowPlayhead';
 import { useFileIO } from '@/hooks/useFileIO';
 import { useFileShortcuts } from '@/hooks/useFileShortcuts';
 import { FileIOContext } from '@/context/fileIOContext';
+import { useFormulaLibraries } from '@/hooks/useFormulaLibraries';
+import { FormulaLibraryContext } from '@/context/formulaLibraryContext';
 import { editorStore } from '@/store/editorStore';
 import { songTimeToBeat } from '@/engine/scheduler';
 import {
@@ -202,6 +205,11 @@ function App() {
   // Ctrl+S / Ctrl+Shift+S / Ctrl+O.
   useFileShortcuts(fileIO);
 
+  // The formula libraries, opened and saved on their own — they outlive the project.
+  // Here for `useFileIO`'s reason: this owns the start-up restore, and a second
+  // instance would reopen every remembered library file twice.
+  const formulaLibraries = useFormulaLibraries();
+
   // Gated recording: the key-down call is wrapped so it skips history;
   // the key-up call (in useRecordShortcuts) uses the plain recordSegment,
   // which is captured by the subscribe → one history entry per take.
@@ -320,6 +328,7 @@ function App() {
   return (
     <UndoRedoContext.Provider value={undoRedoValue}>
     <FileIOContext.Provider value={fileIO}>
+    <FormulaLibraryContext.Provider value={formulaLibraries}>
     <div className="flex flex-col h-screen bg-gray-900 text-gray-100">
       {/* File Menu */}
       <div className="px-4 py-2 bg-gray-800 border-b border-gray-700 flex items-center gap-3">
@@ -369,6 +378,10 @@ function App() {
           {/* Ungated by the bar cursor: the palette carries its own key, so it has
               material to offer whether or not a bar is selected. */}
           <ScalePalette />
+
+          {/* Under the palette because it composes with it: a formula is realized
+              in the key and register the strip above is set to. */}
+          <FormulaPalette />
 
           <ChordTimeline />
 
@@ -443,6 +456,7 @@ function App() {
         </div>
       </div>
     </div>
+    </FormulaLibraryContext.Provider>
     </FileIOContext.Provider>
     </UndoRedoContext.Provider>
   );

@@ -1409,6 +1409,45 @@ describe('projectStore', () => {
         expect(state().project).toBe(before);
       });
 
+      describe('alteration', () => {
+        it('raises a note, relabels it, and sounds the pitch it now names', () => {
+          const note: ChordSegment = { id: 'note-alt', kind: 'note', pitch: 60, duration: 1 };
+          appendSegment(note);
+
+          state().setSegmentsAlter([note.id], 1);
+
+          expect(segmentOf(note.id)).toMatchObject({
+            pitch: 61,
+            alter: 1,
+            chordSymbol: 'C#4',
+          });
+          // The derived notes are what reaches the sampler, so the edit is only
+          // real once they have moved too.
+          expect(pitchesOf(note.id)).toEqual([61]);
+        });
+
+        it('puts it back on its degree, leaving no alteration behind', () => {
+          const note: ChordSegment = { id: 'note-nat', kind: 'note', pitch: 60, duration: 1 };
+          appendSegment(note);
+
+          state().setSegmentsAlter([note.id], 1);
+          state().setSegmentsAlter([note.id], 0);
+
+          expect(segmentOf(note.id).pitch).toBe(60);
+          expect(segmentOf(note.id).alter).toBeUndefined();
+        });
+
+        it('leaves a chord alone — there is no one note to bend', () => {
+          const chord = chordSegment({ octave: 4 });
+          appendSegment(chord);
+          const before = pitchesOf(chord.id);
+
+          state().setSegmentsAlter([chord.id], 1);
+
+          expect(pitchesOf(chord.id)).toEqual(before);
+        });
+      });
+
       describe('velocity', () => {
         const velocitiesOf = (id: string) =>
           barNotes(barOf(id)!, trackId()).map(n => n.velocity);

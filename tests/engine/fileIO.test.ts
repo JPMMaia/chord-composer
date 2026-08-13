@@ -867,10 +867,48 @@ describe('fileIO', () => {
     });
   });
 
-  describe('schema 1.9 velocity', () => {
+  describe('schema 1.12 alterations', () => {
     it('states the current schema version', () => {
-      expect(SCHEMA_VERSION).toBe('1.11');
+      expect(SCHEMA_VERSION).toBe('1.12');
     });
+
+    const withNote = (alter?: number) =>
+      createTestProject({
+        bars: [
+          {
+            id: 'bar-a',
+            barIndex: 0,
+            content: fixtureContent(
+              [{ id: 'c1', kind: 'note', startBeat: 0, duration: 1, pitch: 61, alter }],
+              []
+            ),
+          },
+        ],
+      });
+
+    it('round-trips which degree an off-scale note means', () => {
+      const restored = deserializeProject(serializeProject(withNote(1)));
+      expect(restored.bars[0].content[FIXTURE_TRACK_ID].chords[0].alter).toBe(1);
+    });
+
+    it('writes nothing for a piece with no accidentals in it', () => {
+      const parsed = JSON.parse(serializeProject(withNote()));
+      expect('alter' in parsed.bars[0].content[FIXTURE_TRACK_ID].chords[0]).toBe(false);
+    });
+
+    it('reads a pre-1.12 note as the diatonic one it was', () => {
+      const restored = deserializeProject(serializeProject(withNote()));
+      expect(restored.bars[0].content[FIXTURE_TRACK_ID].chords[0].alter).toBeUndefined();
+    });
+
+    it('clamps an alteration no accidental could spell', () => {
+      const project = withNote(9);
+      const restored = deserializeProject(serializeProject(project));
+      expect(restored.bars[0].content[FIXTURE_TRACK_ID].chords[0].alter).toBe(2);
+    });
+  });
+
+  describe('schema 1.9 velocity', () => {
 
     it('round-trips a segment velocity', () => {
       const project = createTestProject({

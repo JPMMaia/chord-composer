@@ -12,12 +12,21 @@ import {
   getTotalBeats,
   laneOf,
   MIN_SEGMENT_BEATS,
+  resolveBeatPosition,
   snapBeat,
   SNAP_OPTIONS,
   trackLaneCount,
 } from '@/engine/timeline';
 import { describeMeter } from '@/engine/meterDisplay';
 import { paletteItemToSegment, type PaletteItem } from '@/engine/palette';
+import {
+  FORMULA_DRAG_TYPE,
+  formulaLengthBeats,
+  realizeFormula,
+  type MelodicFormula,
+} from '@/engine/formulas';
+import { findLoadedFormula } from '@/store/formulaLibraryStore';
+import type { CopiedSegment } from '@/store/clipboardStore';
 import { PALETTE_DRAG_TYPE } from '@/components/ScalePalette';
 import { ChordSegmentBlock } from '@/components/ChordSegmentBlock';
 import { AutomationLane, AUTOMATION_LANE_HEIGHT } from '@/components/AutomationLane';
@@ -154,6 +163,7 @@ function sublaneOfElement(lane: Element): number {
 export const ChordTimeline: React.FC = () => {
   const project = projectStore(s => s.project);
   const insertSegment = projectStore(s => s.insertSegment);
+  const pasteSegments = projectStore(s => s.pasteSegments);
   const removeSegment = projectStore(s => s.removeSegment);
   const moveSegment = projectStore(s => s.moveSegment);
   const resizeSegmentDuration = projectStore(s => s.resizeSegmentDuration);
@@ -183,6 +193,10 @@ export const ChordTimeline: React.FC = () => {
   const showAutomation = editorStore(s => s.showAutomation);
   const setShowAutomation = editorStore(s => s.setShowAutomation);
   const paletteScale = editorStore(s => s.paletteScale);
+  const paletteOctave = editorStore(s => s.paletteOctave);
+  const formulaStartDegree = editorStore(s => s.formulaStartDegree);
+  const draggingFormulaId = editorStore(s => s.draggingFormulaId);
+  const setDraggingFormulaId = editorStore(s => s.setDraggingFormulaId);
   const scrollX = editorStore(s => s.scrollX);
   const setScrollX = editorStore(s => s.setScrollX);
   const setTimelineMouseBeat = editorStore(s => s.setTimelineMouseBeat);
@@ -516,6 +530,17 @@ export const ChordTimeline: React.FC = () => {
     });
   };
 
+  /**
+   * Length of the formula being dragged, in beats, or null when the drag is a
+   * single palette block. The caret is sized from this so a phrase shows how much
+   * room it will take before it is committed.
+   */
+  const draggedFormulaBeats = (() => {
+    if (!draggingFormulaId) return null;
+    const formula = findLoadedFormula(draggingFormulaId);
+    return formula ? formulaLengthBeats(formula) : null;
+  })();
+
   /** Beats from the start of a lane to the pointer. */
   const beatAt = (e: React.DragEvent<HTMLDivElement>): number => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -532,9 +557,54 @@ export const ChordTimeline: React.FC = () => {
     setDropIndicator({ barId: bar.id, lane, beat: snapBeat(beatAt(e), snapBeats) });
   };
 
+  /**
+   * Drop a whole melodic formula: every note it names, in one gesture.
+   *
+   * Routed through `pasteSegments` rather than a run of `insertSegment` calls,
+   * because a phrase is exactly what paste already knows how to place — it appends
+   * the bars a long formula needs, keeps the spacing between the notes, and writes
+   * the project once, so the whole phrase is a single undo step.
+   */
+  const dropFormula = (formula: MelodicFormula, bar: Bar, lane: number, dropBeat: number) => {
+    const phraseStart = getBarStartBeat(bars, bar.barIndex, projectTs) + dropBeat;
+
+    const placed = realizeFormula(
+      formula,
+      paletteScale,
+      paletteOctave,
+      formulaStartDegree
+    ).flatMap<CopiedSegment>(({ segment, offsetBeats }) => {
+      // `extend` so a phrase running off the end of the project names the bars it
+      // needs rather than piling up on the last one — paste creates them.
+      const at = resolveBeatPosition(phraseStart + offsetBeats, bars, projectTs, true);
+      return at ? [{ segment: { ...segment, lane }, ...at, baseStartBeat: 0 }] : [];
+    });
+
+    if (placed.length === 0) return;
+
+    // The anchor is the first note's own position, which makes paste's offset
+    // arithmetic the identity: the positions resolved above are used verbatim.
+    placed[0].baseStartBeat = placed[0].startBeat;
+    const ids = pasteSegments(placed, selectedTrackId, placed[0].barIndex, placed[0].startBeat);
+
+    selectBar(bar.id);
+    if (ids && ids.length > 0) setSelectedSegments(ids);
+  };
+
   const handleDrop = (e: React.DragEvent<HTMLDivElement>, bar: Bar, lane: number) => {
     e.preventDefault();
     setDropIndicator(null);
+    setDraggingFormulaId(null);
+
+    const formulaRaw = e.dataTransfer.getData(FORMULA_DRAG_TYPE);
+    if (formulaRaw) {
+      try {
+        dropFormula(JSON.parse(formulaRaw) as MelodicFormula, bar, lane, snapBeat(beatAt(e), snapBeats));
+      } catch {
+        // A malformed payload landed here; ignore it rather than corrupting the timeline.
+      }
+      return;
+    }
 
     const raw = e.dataTransfer.getData(PALETTE_DRAG_TYPE);
     if (!raw) return;
@@ -1010,12 +1080,22 @@ export const ChordTimeline: React.FC = () => {
                     />
                   ))}
 
-                  {/* Insertion caret */}
+                  {/* Insertion caret — a hairline for a single block, and the width
+                      of the phrase when a formula is what is being dragged. */}
                   {dropIndicator?.barId === bar.id && dropIndicator.lane === lane && (
                     <div
                       data-testid="drop-indicator"
-                      style={{ left: `${dropIndicator.beat * pixelsPerBeat}px` }}
-                      className="absolute top-0 bottom-0 w-0.5 bg-indigo-400 pointer-events-none"
+                      style={{
+                        left: `${dropIndicator.beat * pixelsPerBeat}px`,
+                        ...(draggedFormulaBeats !== null && {
+                          width: `${draggedFormulaBeats * pixelsPerBeat}px`,
+                        }),
+                      }}
+                      className={`absolute top-0 bottom-0 pointer-events-none ${
+                        draggedFormulaBeats !== null
+                          ? 'border-l-2 border-r-2 border-purple-400 bg-purple-500/20'
+                          : 'w-0.5 bg-indigo-400'
+                      }`}
                     />
                   )}
 

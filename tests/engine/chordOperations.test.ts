@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  alterSegment,
   splitBarIntoChords,
   reorderChords,
   generateNotesFromSegments,
@@ -559,6 +560,34 @@ describe("chordOperations", () => {
       expect(segment.pitch).toBe(73);
     });
 
+    it("carries an altered note's accidental into the new key", () => {
+      // A raised seventh of C major (B4 sharpened to C5). In D major the seventh
+      // degree is C#5, and raising that gives D5 — the leading tone stays raised.
+      const raised: ChordSegment = {
+        id: generateId(),
+        kind: "note",
+        pitch: 72,
+        alter: 1,
+        duration: 1,
+      };
+      const [segment] = retuneSegmentsToScale([raised], C_MAJOR, D_MAJOR);
+      expect(segment.pitch).toBe(74);
+      expect(segment.alter).toBe(1);
+      expect(segment.chordSymbol).toBe("D5");
+    });
+
+    it("moves a chromatic note with the degree it sits nearest", () => {
+      // C#4 with nothing stamped on it: a raised C in C major, and a raised D in D.
+      const chromatic: ChordSegment = {
+        id: generateId(),
+        kind: "note",
+        pitch: 61,
+        duration: 1,
+      };
+      const [segment] = retuneSegmentsToScale([chromatic], C_MAJOR, D_MAJOR);
+      expect(segment.pitch).toBe(63);
+    });
+
     it("leaves a chromatic segment with no roman numeral untouched", () => {
       const chromatic = diatonic({ romanNumeral: undefined, root: "Ab", chordSymbol: "Ab" });
       const [segment] = retuneSegmentsToScale([chromatic], C_MAJOR, D_MAJOR);
@@ -652,6 +681,7 @@ describe("chordOperations", () => {
   describe("stepSegmentInScale", () => {
     const C_MAJOR: Scale = { root: "C", type: "major" };
     const A_MINOR: Scale = { root: "A", type: "naturalMinor" };
+    const D_DORIAN: Scale = { root: "D", type: "dorian" };
 
     /** A note segment sitting on `pitch`, labelled as the palette would label it. */
     const note = (pitch: number, romanNumeral?: string): ChordSegment => ({
@@ -694,9 +724,50 @@ describe("chordOperations", () => {
       expect(stepped.romanNumeral).toBe("ii");
     });
 
-    it("snaps an off-scale note onto the scale rather than sticking", () => {
-      // C#4 is not in C major; stepping up lands on the next scale note, D4.
-      expect(stepSegmentInScale(note(61), C_MAJOR, 1).pitch).toBe(62);
+    it("keeps an off-scale note's offset rather than snapping it onto the scale", () => {
+      // C#4 is a raised C in C major, so stepping up gives a raised D — a recorded
+      // chromatic line moves as a line instead of collapsing into the key.
+      expect(stepSegmentInScale(note(61), C_MAJOR, 1).pitch).toBe(63);
+      expect(stepSegmentInScale(note(61), C_MAJOR, -1).pitch).toBe(60);
+    });
+
+    it("steps the degree under a stamped alteration, keeping the accidental", () => {
+      // In D dorian a C4 can be either the seventh degree or a raised sixth, and the
+      // two are the same MIDI number — only the stamp tells them apart.
+      const raisedSixth: ChordSegment = { ...note(60), alter: 1, scale: D_DORIAN };
+      const seventh = { ...note(60), scale: D_DORIAN };
+
+      expect(stepSegmentInScale(raisedSixth, D_DORIAN, 1).pitch).toBe(61); // C#4
+      expect(stepSegmentInScale(seventh, D_DORIAN, 1).pitch).toBe(62); // D4
+    });
+
+    it("carries the alteration back down again", () => {
+      const raisedSixth: ChordSegment = { ...note(60), alter: 1, scale: D_DORIAN };
+      const down = stepSegmentInScale(raisedSixth, D_DORIAN, -1);
+      // A3 raised (58): the degree below B, still sharpened — not a semitone down.
+      expect(down.pitch).toBe(58);
+      expect(down.alter).toBe(1);
+      expect(stepSegmentInScale(down, D_DORIAN, 1)).toMatchObject({ pitch: 60, alter: 1 });
+    });
+
+    it("relabels a stepped note completely, accidental included", () => {
+      // C#4 — the first degree of C major, raised.
+      const stepped = stepSegmentInScale(
+        { ...note(61, "I"), chordSymbol: "C#4", alter: 1 },
+        C_MAJOR,
+        1
+      );
+      // The label used to be left behind, naming the pitch the note had before.
+      expect(stepped.chordSymbol).toBe("D#4");
+      expect(stepped.root).toBe("D#");
+      expect(stepped.octave).toBe(4);
+      expect(stepped.romanNumeral).toBe("♯ii");
+    });
+
+    it("drops the alteration when a note is put back on its degree", () => {
+      const stepped = stepSegmentInScale({ ...note(61), alter: 1 }, C_MAJOR, 1);
+      expect(stepped.alter).toBe(1);
+      expect(stepSegmentInScale({ ...note(60) }, C_MAJOR, 1).alter).toBeUndefined();
     });
 
     it("refuses to step a note past the ends of the roll", () => {
@@ -793,6 +864,44 @@ describe("chordOperations", () => {
     });
   });
 
+  describe("alterSegment", () => {
+    const C_MAJOR: Scale = { root: "C", type: "major" };
+    const note = (pitch: number, alter?: number): ChordSegment => ({
+      id: generateId(),
+      kind: "note",
+      pitch,
+      alter,
+      duration: 1,
+    });
+
+    it("raises and flattens a note without moving the degree it names", () => {
+      expect(alterSegment(note(60), C_MAJOR, 1)).toMatchObject({
+        pitch: 61,
+        alter: 1,
+        chordSymbol: "C#4",
+        romanNumeral: "♯I",
+      });
+      expect(alterSegment(note(60), C_MAJOR, -1)).toMatchObject({ pitch: 59, alter: -1 });
+    });
+
+    it("puts an altered note back on its degree", () => {
+      const raised = alterSegment(note(60), C_MAJOR, 1);
+      const natural = alterSegment(raised, C_MAJOR, 0);
+      expect(natural.pitch).toBe(60);
+      expect(natural.alter).toBeUndefined();
+      expect(natural.romanNumeral).toBe("I");
+    });
+
+    it("replaces an alteration rather than compounding it", () => {
+      expect(alterSegment(note(61, 1), C_MAJOR, -1).pitch).toBe(59);
+    });
+
+    it("leaves a chord alone — it names a stack, not one note", () => {
+      const chord: ChordSegment = { id: generateId(), kind: "chord", root: "C", duration: 1 };
+      expect(alterSegment(chord, C_MAJOR, 1)).toEqual(chord);
+    });
+  });
+
   describe("shiftSegmentOctave", () => {
     const note = (pitch: number): ChordSegment => ({
       id: generateId(),
@@ -812,6 +921,11 @@ describe("chordOperations", () => {
     it("moves a note a full octave", () => {
       expect(shiftSegmentOctave(note(60), 1).pitch).toBe(72);
       expect(shiftSegmentOctave(note(60), -1).pitch).toBe(48);
+    });
+
+    it("leaves an accidental alone: the same degree, an octave up", () => {
+      const raised: ChordSegment = { ...note(61), alter: 1 };
+      expect(shiftSegmentOctave(raised, 1)).toMatchObject({ pitch: 73, alter: 1 });
     });
 
     it("moves a chord's register by one", () => {

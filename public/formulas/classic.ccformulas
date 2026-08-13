@@ -1,0 +1,413 @@
+{
+  "version": "1.0",
+  "name": "Classic Formulas",
+  "groups": [
+    {
+      "id": "medieval",
+      "name": "Medieval neumes",
+      "formulas": [
+        {
+          "id": "medieval-podatus",
+          "name": "Podatus",
+          "description": "Rising pair",
+          "steps": [
+            {
+              "degree": 0,
+              "beats": 1
+            },
+            {
+              "degree": 1,
+              "beats": 1
+            }
+          ]
+        },
+        {
+          "id": "medieval-clivis",
+          "name": "Clivis",
+          "description": "Falling pair",
+          "steps": [
+            {
+              "degree": 0,
+              "beats": 1
+            },
+            {
+              "degree": -1,
+              "beats": 1
+            }
+          ]
+        },
+        {
+          "id": "medieval-torculus",
+          "name": "Torculus",
+          "description": "Up then back down",
+          "steps": [
+            {
+              "degree": 0,
+              "beats": 1
+            },
+            {
+              "degree": 1,
+              "beats": 1
+            },
+            {
+              "degree": 0,
+              "beats": 1
+            }
+          ]
+        },
+        {
+          "id": "medieval-porrectus",
+          "name": "Porrectus",
+          "description": "Down then back up",
+          "steps": [
+            {
+              "degree": 0,
+              "beats": 1
+            },
+            {
+              "degree": -1,
+              "beats": 1
+            },
+            {
+              "degree": 0,
+              "beats": 1
+            }
+          ]
+        },
+        {
+          "id": "medieval-scandicus",
+          "name": "Scandicus",
+          "description": "Three rising",
+          "steps": [
+            {
+              "degree": 0,
+              "beats": 1
+            },
+            {
+              "degree": 1,
+              "beats": 1
+            },
+            {
+              "degree": 2,
+              "beats": 1
+            }
+          ]
+        },
+        {
+          "id": "medieval-climacus",
+          "name": "Climacus",
+          "description": "Three falling",
+          "steps": [
+            {
+              "degree": 0,
+              "beats": 1
+            },
+            {
+              "degree": -1,
+              "beats": 1
+            },
+            {
+              "degree": -2,
+              "beats": 1
+            }
+          ]
+        },
+        {
+          "id": "medieval-arch",
+          "name": "Arch",
+          "description": "Up a fourth and back",
+          "steps": [
+            {
+              "degree": 0,
+              "beats": 1
+            },
+            {
+              "degree": 1,
+              "beats": 1
+            },
+            {
+              "degree": 2,
+              "beats": 1
+            },
+            {
+              "degree": 3,
+              "beats": 1
+            },
+            {
+              "degree": 2,
+              "beats": 1
+            },
+            {
+              "degree": 1,
+              "beats": 1
+            },
+            {
+              "degree": 0,
+              "beats": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cadential",
+      "name": "Cadential",
+      "formulas": [
+        {
+          "id": "cadential-clausula-vera",
+          "name": "Clausula vera",
+          "description": "Stepwise onto the tonic",
+          "steps": [
+            {
+              "degree": 2,
+              "beats": 1
+            },
+            {
+              "degree": 1,
+              "beats": 1
+            },
+            {
+              "degree": 0,
+              "beats": 1
+            }
+          ]
+        },
+        {
+          "id": "cadential-landini",
+          "name": "Landini",
+          "description": "Under-third escape onto the tonic",
+          "steps": [
+            {
+              "degree": 2,
+              "beats": 1
+            },
+            {
+              "degree": 1,
+              "beats": 1
+            },
+            {
+              "degree": -1,
+              "beats": 1
+            },
+            {
+              "degree": 0,
+              "beats": 1
+            }
+          ]
+        },
+        {
+          "id": "cadential-double-neighbour",
+          "name": "Double neighbour",
+          "description": "Above, below, home",
+          "steps": [
+            {
+              "degree": 0,
+              "beats": 1
+            },
+            {
+              "degree": 1,
+              "beats": 1
+            },
+            {
+              "degree": -1,
+              "beats": 1
+            },
+            {
+              "degree": 0,
+              "beats": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ornaments",
+      "name": "Ornaments",
+      "formulas": [
+        {
+          "id": "ornament-upper-mordent",
+          "name": "Upper mordent",
+          "description": "Quick flick above",
+          "steps": [
+            {
+              "degree": 0,
+              "beats": 0.5
+            },
+            {
+              "degree": 1,
+              "beats": 0.5
+            },
+            {
+              "degree": 0,
+              "beats": 0.5
+            }
+          ]
+        },
+        {
+          "id": "ornament-lower-mordent",
+          "name": "Lower mordent",
+          "description": "Quick flick below",
+          "steps": [
+            {
+              "degree": 0,
+              "beats": 0.5
+            },
+            {
+              "degree": -1,
+              "beats": 0.5
+            },
+            {
+              "degree": 0,
+              "beats": 0.5
+            }
+          ]
+        },
+        {
+          "id": "ornament-turn",
+          "name": "Turn",
+          "description": "Around the note",
+          "steps": [
+            {
+              "degree": 1,
+              "beats": 0.5
+            },
+            {
+              "degree": 0,
+              "beats": 0.5
+            },
+            {
+              "degree": -1,
+              "beats": 0.5
+            },
+            {
+              "degree": 0,
+              "beats": 0.5
+            }
+          ]
+        },
+        {
+          "id": "ornament-appoggiatura",
+          "name": "Appoggiatura",
+          "description": "Leaning note resolving down",
+          "steps": [
+            {
+              "degree": 1,
+              "beats": 0.5
+            },
+            {
+              "degree": 0,
+              "beats": 1.5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "shapes",
+      "name": "Shapes",
+      "formulas": [
+        {
+          "id": "shape-ascending-run",
+          "name": "Ascending run",
+          "description": "Five steps up",
+          "steps": [
+            {
+              "degree": 0,
+              "beats": 1
+            },
+            {
+              "degree": 1,
+              "beats": 1
+            },
+            {
+              "degree": 2,
+              "beats": 1
+            },
+            {
+              "degree": 3,
+              "beats": 1
+            },
+            {
+              "degree": 4,
+              "beats": 1
+            }
+          ]
+        },
+        {
+          "id": "shape-descending-run",
+          "name": "Descending run",
+          "description": "Five steps down",
+          "steps": [
+            {
+              "degree": 0,
+              "beats": 1
+            },
+            {
+              "degree": -1,
+              "beats": 1
+            },
+            {
+              "degree": -2,
+              "beats": 1
+            },
+            {
+              "degree": -3,
+              "beats": 1
+            },
+            {
+              "degree": -4,
+              "beats": 1
+            }
+          ]
+        },
+        {
+          "id": "shape-octave-leap",
+          "name": "Octave leap",
+          "description": "Up an octave and back",
+          "steps": [
+            {
+              "degree": 0,
+              "beats": 1
+            },
+            {
+              "degree": 7,
+              "beats": 1
+            },
+            {
+              "degree": 0,
+              "beats": 1
+            }
+          ]
+        },
+        {
+          "id": "shape-inverted-arch",
+          "name": "Inverted arch",
+          "description": "Down a third and back",
+          "steps": [
+            {
+              "degree": 0,
+              "beats": 1
+            },
+            {
+              "degree": -1,
+              "beats": 1
+            },
+            {
+              "degree": -2,
+              "beats": 1
+            },
+            {
+              "degree": -1,
+              "beats": 1
+            },
+            {
+              "degree": 0,
+              "beats": 1
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "createdAt": "2026-08-13T00:00:00.000Z"
+}

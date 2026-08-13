@@ -38,6 +38,7 @@ import {
   withStartBeats,
 } from '@/engine/timeline';
 import {
+  alterSegment,
   convertSegmentKind,
   cycleSegmentInversion,
   generateNotesFromSegments,
@@ -178,6 +179,13 @@ interface ProjectState {
    * velocity just as a chord does.
    */
   setSegmentsVelocity: (segmentIds: string[], velocity: number) => void;
+  /**
+   * Raise or flatten each note against the degree it names, in semitones.
+   *
+   * Note segments only: a chord names a stack of degrees, so there is no one note in
+   * it an accidental could belong to.
+   */
+  setSegmentsAlter: (segmentIds: string[], alter: number) => void;
   clearSegmentsVoicing: (segmentIds: string[]) => void;
   convertSegmentsKind: (
     segmentIds: string[],
@@ -982,6 +990,16 @@ export const projectStore = create<ProjectState>((set, get) => ({
     if (!project) return;
     const next = withTransformedSegments(project, segmentIds, segment =>
       withVelocity(segment, velocity)
+    );
+    if (next) set({ project: next });
+  },
+
+  /** Raise or flatten each note against the degree it names — the inspector's ♭ ♮ ♯. */
+  setSegmentsAlter: (segmentIds: string[], alter: number) => {
+    const project = get().project;
+    if (!project) return;
+    const next = withTransformedSegments(project, segmentIds, (segment, scale) =>
+      alterSegment(segment, scale, alter)
     );
     if (next) set({ project: next });
   },

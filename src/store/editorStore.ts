@@ -62,6 +62,30 @@ interface EditorState {
   setPaletteOctave: (octave: number) => void;
 
   /**
+   * The formula strip: which scale degree its phrases start on, and whether it is
+   * unfolded.
+   *
+   * Alongside the palette's own settings rather than inside `FormulaPalette`, for
+   * the same reason: the timeline reads the start degree when a formula is dropped,
+   * and the drop caret reads the formula being dragged to size itself. Which *group*
+   * the strip is showing lives in `formulaLibraryStore` instead, with the libraries
+   * it has to be a valid position in.
+   */
+  formulaStartDegree: number;
+  setFormulaStartDegree: (degree: number) => void;
+  formulasExpanded: boolean;
+  setFormulasExpanded: (expanded: boolean) => void;
+  /**
+   * Id of the formula currently under the pointer in a drag, or null.
+   *
+   * The dragged payload is deliberately unreadable during `dragover` — browsers
+   * withhold it until the drop — so the caret cannot measure the phrase from the
+   * event. This is how it finds out how wide to draw.
+   */
+  draggingFormulaId: string | null;
+  setDraggingFormulaId: (formulaId: string | null) => void;
+
+  /**
    * Whether the number keys write to the timeline. Recording only actually happens
    * while armed *and* playing; armed on its own is a readiness, which is what makes
    * arming before pressing Play the natural order.
@@ -162,6 +186,25 @@ export const editorStore = create<EditorState>((set, get) => ({
     set({
       paletteOctave: Math.min(MAX_SEGMENT_OCTAVE, Math.max(MIN_SEGMENT_OCTAVE, Math.round(octave))),
     });
+  },
+
+  formulaStartDegree: 0,
+
+  setFormulaStartDegree: (degree: number) => {
+    if (!Number.isFinite(degree)) return;
+    set({ formulaStartDegree: Math.round(degree) });
+  },
+
+  formulasExpanded: true,
+
+  setFormulasExpanded: (expanded: boolean) => {
+    set({ formulasExpanded: expanded });
+  },
+
+  draggingFormulaId: null,
+
+  setDraggingFormulaId: (formulaId: string | null) => {
+    set({ draggingFormulaId: formulaId });
   },
 
   recordArmed: false,

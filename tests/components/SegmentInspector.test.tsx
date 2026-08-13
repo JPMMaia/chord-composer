@@ -451,6 +451,51 @@ describe('SegmentInspector', () => {
     });
   });
 
+  describe('alteration', () => {
+    const noteSegment = (overrides: Partial<ChordSegment> = {}): ChordSegment => ({
+      id: generateId(),
+      kind: 'note',
+      pitch: 60,
+      duration: 1,
+      ...overrides,
+    });
+
+    it('raises the selected note and follows it in the panel', () => {
+      const note = placeAndSelect(noteSegment());
+      render(<SegmentInspector />);
+
+      fireEvent.click(screen.getByTestId('alter-1'));
+
+      expect(segmentOf(note.id)).toMatchObject({ pitch: 61, alter: 1 });
+      expect(pitchesOf(note.id)).toEqual([61]);
+    });
+
+    it('shows which alteration is in force', () => {
+      placeAndSelect(noteSegment({ pitch: 59, alter: -1 }));
+      render(<SegmentInspector />);
+
+      // The active button is the one the panel paints as chosen.
+      expect(screen.getByTestId('alter--1').className).toContain('bg-indigo-600');
+      expect(screen.getByTestId('alter-0').className).not.toContain('bg-indigo-600');
+    });
+
+    it('puts a note back on its degree', () => {
+      const note = placeAndSelect(noteSegment({ pitch: 61, alter: 1 }));
+      render(<SegmentInspector />);
+
+      fireEvent.click(screen.getByTestId('alter-0'));
+
+      expect(segmentOf(note.id).pitch).toBe(60);
+      expect(segmentOf(note.id).alter).toBeUndefined();
+    });
+
+    it('is not offered for a chord, which names a stack rather than a note', () => {
+      placeAndSelect(chordSegment());
+      render(<SegmentInspector />);
+      expect(screen.queryByTestId('alter-1')).not.toBeInTheDocument();
+    });
+  });
+
   it('offers no voicing controls for a single note', () => {
     const note: ChordSegment = { id: generateId(), kind: 'note', pitch: 60, duration: 1 };
     placeAndSelect(note);

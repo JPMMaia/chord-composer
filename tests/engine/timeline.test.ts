@@ -4,6 +4,7 @@ import {
   getBarStartBeat,
   getMeterPulse,
   getTotalBeats,
+  resolveBeatPosition,
   timeSignatureBeats,
   flattenSegments,
   removeSegmentById,
@@ -150,6 +151,52 @@ describe("timeline", () => {
       expect(getBarStartBeat(bars, 0, TS_4_4)).toBe(0);
       expect(getBarStartBeat(bars, 1, TS_4_4)).toBe(4);
       expect(getBarStartBeat(bars, 2, TS_4_4)).toBe(7);
+    });
+  });
+
+  describe("resolveBeatPosition", () => {
+    const three = () => [makeBar(0), makeBar(1), makeBar(2)];
+
+    it("returns null when there are no bars", () => {
+      expect(resolveBeatPosition(0, [], TS_4_4)).toBeNull();
+    });
+
+    it("finds the bar a beat falls in, and the offset within it", () => {
+      expect(resolveBeatPosition(0, three(), TS_4_4)).toEqual({ barIndex: 0, startBeat: 0 });
+      expect(resolveBeatPosition(5.5, three(), TS_4_4)).toEqual({ barIndex: 1, startBeat: 1.5 });
+    });
+
+    it("gives a beat on a bar line to the bar it opens", () => {
+      expect(resolveBeatPosition(4, three(), TS_4_4)).toEqual({ barIndex: 1, startBeat: 0 });
+    });
+
+    it("walks mixed meters rather than dividing", () => {
+      // 4/4 | 3/4 | 4/4  ->  bars start at 0, 4, 7
+      const bars = [makeBar(0, [], TS_4_4), makeBar(1, [], TS_3_4), makeBar(2, [], TS_4_4)];
+      expect(resolveBeatPosition(6, bars, TS_4_4)).toEqual({ barIndex: 1, startBeat: 2 });
+      expect(resolveBeatPosition(8, bars, TS_4_4)).toEqual({ barIndex: 2, startBeat: 1 });
+    });
+
+    it("pins a beat past the end to the last bar by default", () => {
+      expect(resolveBeatPosition(99, three(), TS_4_4)).toEqual({ barIndex: 2, startBeat: 0 });
+    });
+
+    it("names the bars past the end when asked to extend", () => {
+      // The last bar's meter is what an appended bar would inherit, so counting
+      // continues in bars of its length.
+      expect(resolveBeatPosition(12, three(), TS_4_4, true)).toEqual({
+        barIndex: 3,
+        startBeat: 0,
+      });
+      expect(resolveBeatPosition(21, three(), TS_4_4, true)).toEqual({
+        barIndex: 5,
+        startBeat: 1,
+      });
+    });
+
+    it("extends on the last bar's own meter, not the project's", () => {
+      const bars = [makeBar(0, [], TS_4_4), makeBar(1, [], TS_3_4)];
+      expect(resolveBeatPosition(10, bars, TS_4_4, true)).toEqual({ barIndex: 3, startBeat: 0 });
     });
   });
 

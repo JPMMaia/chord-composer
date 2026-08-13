@@ -103,8 +103,15 @@ const LEGACY_TRACK_ID = 'track-legacy';
  * recording directly, as named notes, so nothing needs the opaque form any more.
  * A `custom` segment in an older file is unrecognised and, like every unrecognised
  * kind, reads back as a chord.
+ *
+ * 1.12 let a note sit off the scale: an `alter` on a segment, in semitones, saying
+ * which degree an off-scale note means. Nothing else can say it — a raised seventh and
+ * the tonic above it are the same MIDI number — and without it the arrow keys and a
+ * change of key would both flatten the accidental out. Omitted at 0, so a piece with no
+ * accidentals in it serialises byte for byte as it did under 1.11, and a pre-1.12 file
+ * reads back as the wholly diatonic piece it was.
  */
-export const SCHEMA_VERSION = '1.11';
+export const SCHEMA_VERSION = '1.12';
 
 /**
  * Validation error returned by validateProject.
@@ -207,6 +214,10 @@ export function serializeProject(project: Project): string {
               chordSymbol: c.chordSymbol,
               duration: c.duration,
               pitch: c.pitch,
+              // Which degree an off-scale note means, as semitones off it. Absent on
+              // every unaltered note, so a piece with no accidentals in it serialises
+              // exactly as it did under 1.11.
+              alter: c.alter,
               octave: c.octave,
               root: c.root,
               inversion: c.inversion,
@@ -494,6 +505,13 @@ export function deserializeProject(json: string): Project {
           chordSymbol: typeof c.chordSymbol === 'string' ? c.chordSymbol : undefined,
           duration: typeof c.duration === 'number' ? c.duration : 4,
           pitch: typeof c.pitch === 'number' ? c.pitch : undefined,
+          // Schema 1.11 and earlier had no accidentals; an absent alteration is a note
+          // sitting on its degree, which is all those files could write. Clamped like
+          // the formula reader does — nothing can spell more than a double accidental.
+          alter:
+            typeof c.alter === 'number' && Number.isFinite(c.alter)
+              ? Math.max(-2, Math.min(2, Math.round(c.alter))) || undefined
+              : undefined,
           // Schema 1.2 and earlier had no register; note generation reads an
           // absent octave as 4, which is the only one those files could mean.
           octave: typeof c.octave === 'number' ? c.octave : undefined,

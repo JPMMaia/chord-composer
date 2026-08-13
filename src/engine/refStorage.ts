@@ -1,5 +1,6 @@
 /**
- * Remembering which file the app had open, across reloads and restarts.
+ * Remembering which files the app had open — the project, and the formula libraries
+ * beside it — across reloads and restarts.
  *
  * IndexedDB rather than localStorage because of what is being stored: in the browser
  * a reference holds a live `FileSystemFileHandle`, which is an object the browser
@@ -19,6 +20,7 @@ import type { ProjectFileRef } from '@/engine/projectFile';
 const DB_NAME = 'chord-composer';
 const STORE_NAME = 'files';
 const CURRENT_KEY = 'current';
+const LIBRARIES_KEY = 'formula-libraries';
 
 function openDatabase(): Promise<IDBDatabase | null> {
   return new Promise(resolve => {
@@ -84,6 +86,60 @@ export async function loadCurrentRef(): Promise<ProjectFileRef | null> {
     return isRef(value) ? value : null;
   } catch {
     return null;
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Store the files the open formula libraries came from, in the order they are shown.
+ *
+ * The libraries' *contents* are deliberately not stored: a library is its file, and
+ * caching a copy here would let the two drift apart with no way to tell which is the
+ * one the user has been editing. `download` refs drop out for `storeCurrentRef`'s
+ * reason — they name a file that can never be read again.
+ */
+export async function storeLibraryRefs(refs: ProjectFileRef[]): Promise<void> {
+  const db = await openDatabase();
+  if (!db) return;
+  try {
+    const keep = refs.filter(ref => ref.kind !== 'download');
+    const transaction = db.transaction(STORE_NAME, 'readwrite');
+    const store = transaction.objectStore(STORE_NAME);
+    if (keep.length > 0) store.put(keep, LIBRARIES_KEY);
+    else store.delete(LIBRARIES_KEY);
+    await new Promise<void>(resolve => {
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => resolve();
+      transaction.onabort = () => resolve();
+    });
+  } catch {
+    // Storage may be unavailable or a handle unclonable; the libraries are still open.
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * The remembered library files, or an empty list when there are none.
+ *
+ * Guarded per entry rather than wholesale, so a record an older build wrote
+ * differently — or one a single unclonable handle spoiled — still yields the
+ * libraries that survive rather than none of them.
+ */
+export async function loadLibraryRefs(): Promise<ProjectFileRef[]> {
+  const db = await openDatabase();
+  if (!db) return [];
+  try {
+    const store = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME);
+    const request = store.get(LIBRARIES_KEY);
+    const value = await new Promise<unknown>(resolve => {
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+    });
+    return Array.isArray(value) ? value.filter(isRef) : [];
+  } catch {
+    return [];
   } finally {
     db.close();
   }

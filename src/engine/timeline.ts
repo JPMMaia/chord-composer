@@ -647,6 +647,55 @@ export function getBarIndexAtBeat(
   return Math.max(0, bars.length - 1);
 }
 
+/** A position on the timeline, as the bar holding it and the offset within that bar. */
+export interface BeatPosition {
+  barIndex: number;
+  startBeat: number;
+}
+
+/**
+ * Convert an absolute beat into the bar holding it and the offset within that bar.
+ *
+ * Bars may carry their own meter, so this walks rather than divides.
+ *
+ * @param absoluteBeat - Beats from the start of the project.
+ * @param bars - The project's bars.
+ * @param projectTs - Meter for bars carrying none of their own.
+ * @param extend - What to do with a beat falling past the last bar. False — the
+ *   default, and what paste wants — pins it to the start of the last bar. True
+ *   continues counting on the last bar's meter and returns a bar index past the end,
+ *   for callers that go on to create the bars it names.
+ * @returns The position, or null when there are no bars at all.
+ */
+export function resolveBeatPosition(
+  absoluteBeat: number,
+  bars: Bar[],
+  projectTs: TimeSignature,
+  extend = false
+): BeatPosition | null {
+  if (!bars.length) return null;
+
+  let accumulated = 0;
+  for (let i = 0; i < bars.length; i++) {
+    const barBeats = getBarBeats(bars[i], projectTs);
+    if (absoluteBeat < accumulated + barBeats) {
+      return { barIndex: i, startBeat: absoluteBeat - accumulated };
+    }
+    accumulated += barBeats;
+  }
+
+  if (!extend) return { barIndex: bars.length - 1, startBeat: 0 };
+
+  // Past the end: keep counting in bars the length of the last one, which is the
+  // meter any bar appended after it would inherit.
+  const lastBeats = getBarBeats(bars[bars.length - 1], projectTs);
+  const past = absoluteBeat - accumulated;
+  return {
+    barIndex: bars.length + Math.floor(past / lastBeats),
+    startBeat: past % lastBeats,
+  };
+}
+
 /**
  * Concatenate one instrument's segments across every bar into one ordered list.
  *

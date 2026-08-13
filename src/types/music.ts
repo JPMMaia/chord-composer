@@ -130,6 +130,15 @@ export interface ChordSegment {
   /** MIDI pitch — only meaningful when kind === 'note'. */
   pitch?: number;
   /**
+   * Semitones this note sits off the scale degree it names. Note segments only.
+   *
+   * The pitch alone cannot say which degree a note *means*: a raised seventh of D
+   * dorian and its tonic are both MIDI 60, and without this the arrow keys would step
+   * them to the same place. Absent means the note is the degree the scale spells,
+   * which is every note written before formulas could name an accidental.
+   */
+  alter?: number;
+  /**
    * MIDI velocity for everything this block sounds, 0-127. Absent reads as 100 —
    * the fixed velocity every note carried before recording could capture one — so
    * projects written before this sound identical.

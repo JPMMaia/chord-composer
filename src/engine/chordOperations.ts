@@ -12,6 +12,8 @@ import {
   CHORD_INTERVALS,
   getDiatonicChords,
   getDiatonicSevenths,
+  midiToNoteLabel,
+  midiToOctave,
   SEMITONE_TO_NOTE,
 } from '@/engine/chords';
 import {
@@ -20,6 +22,13 @@ import {
   octaveForDegree,
   segmentScale,
 } from '@/engine/scales';
+import {
+  accidentalLabel,
+  degreeAlterationPitch,
+  pitchDegree,
+  pitchDegreeAlteration,
+  type DegreeAlteration,
+} from '@/engine/formulas';
 import { breakChord, DEFAULT_VELOCITY, voicedPitches } from '@/engine/voicing';
 import { getBarBeats, laneOf, MIN_SEGMENT_BEATS, withStartBeats } from '@/engine/timeline';
 import { formatChordSymbol } from '@/engine/palette';
@@ -354,7 +363,13 @@ function retuneNote(
   const fromPitches = getScalePitches(fromScale.root, fromScale.type);
   const toPitches = getScalePitches(toScale.root, toScale.type);
 
-  const pitchClass = ((segment.pitch % 12) + 12) % 12;
+  // The degree is looked up underneath the alteration: it is the degree that belongs
+  // to the old key and has to be found in the new one, while the accidental on top of
+  // it is the player's and rides along unchanged.
+  const alter = noteDegreeAlteration(segment, fromScale).alter;
+  const plain = segment.pitch - alter;
+
+  const pitchClass = ((plain % 12) + 12) % 12;
   const degree = fromPitches.indexOf(pitchClass);
   if (degree === -1 || toPitches[degree] === undefined) return segment;
 
@@ -363,10 +378,16 @@ function retuneNote(
   let delta = ((toPitches[degree] - pitchClass) % 12 + 12) % 12;
   if (delta > 6) delta -= 12;
 
+  const pitch = plain + delta + alter;
   return {
     ...segment,
-    pitch: segment.pitch + delta,
-    root: SEMITONE_TO_NOTE[toPitches[degree]],
+    pitch,
+    alter: alter || undefined,
+    root: SEMITONE_TO_NOTE[((pitch % 12) + 12) % 12],
+    // Relabelled with what it now sounds: a block that kept saying "C4" in the new
+    // key would name a note that is no longer there.
+    chordSymbol: midiToNoteLabel(pitch),
+    octave: midiToOctave(pitch),
   };
 }
 
@@ -567,21 +588,55 @@ function degreeOfChord(segment: ChordSegment, scale: Scale): number {
  * @param direction - 1 for up, -1 for down.
  */
 /**
- * The next pitch in the given direction that lies on the scale.
+ * Where a note sits in a scale: the degree it names, and how far off that degree.
  *
- * Walks semitone by semitone rather than by degree: that is what makes B4 step to
- * C5 across the octave line, and what snaps an off-scale pitch back on. Gives up
- * after an octave, which can only happen for an empty scale.
+ * A note that states its own alteration is believed, because the pitch cannot say:
+ * the raised seventh of D dorian and its tonic are both MIDI 60, and only the stamp
+ * tells them apart. Subtracting the alteration lands on a note the scale contains, so
+ * the degree underneath comes back exactly.
  *
- * @param pitchClasses - The scale's pitch classes, as `getScalePitches` returns them.
+ * A note carrying no alteration — one drawn by hand, recorded, or imported — is read
+ * off its pitch, offset and all. That keeps a chromatic line a line when it is
+ * transposed, rather than collapsing it onto the scale one arrow press at a time.
  */
-function stepPitchInScale(pitch: number, pitchClasses: number[], direction: -1 | 1): number {
-  let midi = pitch;
-  for (let i = 0; i < 12; i++) {
-    midi += direction;
-    if (pitchClasses.includes(((midi % 12) + 12) % 12)) return midi;
-  }
-  return pitch;
+function noteDegreeAlteration(segment: ChordSegment, scale: Scale): DegreeAlteration {
+  const pitch = segment.pitch as number;
+  const alter = segment.alter ?? 0;
+  return alter === 0
+    ? pitchDegreeAlteration(scale, pitch)
+    : { degree: pitchDegree(scale, pitch - alter), alter };
+}
+
+/**
+ * A note moved onto a degree, with every label that follows from it.
+ *
+ * The one place a note segment's pitch is written, so its name, its register and its
+ * numeral cannot drift away from what it sounds. The timeline derives a note's label
+ * from the live pitch and so never showed the drift, but the stored `chordSymbol` the
+ * stepper left behind is what the inspector reads and what the file keeps.
+ *
+ * The numeral is found by degree rather than by pitch class: an altered note belongs
+ * to no pitch class of the scale, and looking it up that way would leave it unnamed.
+ */
+function withNotePitch(
+  segment: ChordSegment,
+  scale: Scale,
+  at: DegreeAlteration
+): ChordSegment {
+  const pitch = degreeAlterationPitch(scale, at);
+  const length = getScalePitches(scale.root, scale.type).length;
+  const index = ((at.degree % length) + length) % length;
+
+  return {
+    ...segment,
+    pitch,
+    alter: at.alter || undefined,
+    chordSymbol: midiToNoteLabel(pitch),
+    root: SEMITONE_TO_NOTE[((pitch % 12) + 12) % 12],
+    octave: midiToOctave(pitch),
+    romanNumeral:
+      accidentalLabel(at.alter) + (getDiatonicChords(scale)[index]?.romanNumeral ?? ''),
+  };
 }
 
 export function stepSegmentInScale(
@@ -589,25 +644,17 @@ export function stepSegmentInScale(
   scale: Scale,
   direction: -1 | 1
 ): ChordSegment {
-  const pitches = getScalePitches(scale.root, scale.type);
-
   if (segment.kind === 'note') {
     if (segment.pitch === undefined) return segment;
 
-    // Walk semitone by semitone rather than by degree: that is what makes B4 step
-    // to C5 across the octave line, and what snaps an off-scale pitch back on.
-    const midi = stepPitchInScale(segment.pitch, pitches, direction);
+    // One degree along, carrying the alteration with it: a raised seventh steps to a
+    // raised tonic, not to the plain note next door.
+    const at = noteDegreeAlteration(segment, scale);
+    const moved = { degree: at.degree + direction, alter: at.alter };
+    const midi = degreeAlterationPitch(scale, moved);
     if (midi < PIANO_ROLL_MIN_MIDI || midi > PIANO_ROLL_MAX_MIDI) return segment;
 
-    const degree = pitches.indexOf(((midi % 12) + 12) % 12);
-    return {
-      ...segment,
-      pitch: midi,
-      root: SEMITONE_TO_NOTE[((midi % 12) + 12) % 12],
-      // The numeral names the degree the note now sits on; leaving the old one
-      // would label a D as the tonic.
-      romanNumeral: getDiatonicChords(scale)[degree]?.romanNumeral,
-    };
+    return withNotePitch(segment, scale, moved);
   }
 
   const degree = degreeOfChord(segment, scale);
@@ -649,6 +696,31 @@ function registerShift(
   const toSemitone = NOTE_NAMES.indexOf(to);
   if (direction === 1) return toSemitone <= fromSemitone ? 1 : 0;
   return toSemitone >= fromSemitone ? -1 : 0;
+}
+
+/**
+ * Raises or flattens a note, keeping the degree it names.
+ *
+ * The pitch moves, the degree does not: sharpening the seventh gives the leading tone
+ * of the same scale, which is what an accidental means. Chords are left alone — a
+ * chord names a whole stack of degrees and there is no one note to bend.
+ *
+ * @param segment - The segment to alter.
+ * @param scale - The key the segment is written in.
+ * @param alter - Semitones off the degree; 0 puts the note back on it.
+ */
+export function alterSegment(
+  segment: ChordSegment,
+  scale: Scale,
+  alter: number
+): ChordSegment {
+  if (segment.kind !== 'note' || segment.pitch === undefined) return segment;
+
+  const at = { degree: noteDegreeAlteration(segment, scale).degree, alter };
+  const pitch = degreeAlterationPitch(scale, at);
+  if (pitch < PIANO_ROLL_MIN_MIDI || pitch > PIANO_ROLL_MAX_MIDI) return segment;
+
+  return withNotePitch(segment, scale, at);
 }
 
 /**

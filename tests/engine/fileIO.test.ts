@@ -867,46 +867,9 @@ describe('fileIO', () => {
     });
   });
 
-  describe('schema 1.9 custom blocks and velocity', () => {
-    /** A project holding one recorded block: three notes, one of them late. */
-    function recordedProject(): Project {
-      return createTestProject({
-        bars: [
-          {
-            id: 'bar-a',
-            barIndex: 0,
-            content: fixtureContent([
-              {
-                id: 'take-1',
-                kind: 'custom',
-                startBeat: 0,
-                duration: 2,
-                customNotes: [
-                  { pitch: 60, startBeat: 0, duration: 2, velocity: 88 },
-                  { pitch: 64, startBeat: 0, duration: 2, velocity: 71 },
-                  { pitch: 67, startBeat: 0.5, duration: 1.5 },
-                ],
-              },
-            ], []),
-          },
-        ],
-      });
-    }
-
+  describe('schema 1.9 velocity', () => {
     it('states the current schema version', () => {
-      expect(SCHEMA_VERSION).toBe('1.10');
-    });
-
-    it('round-trips a custom block and its notes', () => {
-      const restored = deserializeProject(serializeProject(recordedProject()));
-      const [segment] = restored.bars[0].content[FIXTURE_TRACK_ID].chords;
-
-      expect(segment.kind).toBe('custom');
-      expect(segment.customNotes).toEqual([
-        { pitch: 60, startBeat: 0, duration: 2, velocity: 88 },
-        { pitch: 64, startBeat: 0, duration: 2, velocity: 71 },
-        { pitch: 67, startBeat: 0.5, duration: 1.5, velocity: undefined },
-      ]);
+      expect(SCHEMA_VERSION).toBe('1.11');
     });
 
     it('round-trips a segment velocity', () => {
@@ -926,46 +889,15 @@ describe('fileIO', () => {
       expect(restored.bars[0].content[FIXTURE_TRACK_ID].chords[0].velocity).toBe(64);
     });
 
-    it('writes neither key for a project that has no recorded material', () => {
+    it('writes no velocity for a project that has none', () => {
       // A project nobody has recorded into must serialise exactly as it did under
-      // 1.8 — an absent key, not an explicit null or empty list.
+      // 1.8 — an absent key, not an explicit null.
       const parsed = JSON.parse(serializeProject(createTestProject()));
       const chord = parsed.bars[0].content[FIXTURE_TRACK_ID].chords[0];
-      expect('customNotes' in chord).toBe(false);
       expect('velocity' in chord).toBe(false);
     });
 
-    it('drops malformed notes rather than guessing at them', () => {
-      const json = JSON.stringify({
-        ...JSON.parse(serializeProject(createTestProject())),
-        bars: [
-          {
-            id: 'bar-a',
-            barIndex: 0,
-            content: fixtureContent([
-              {
-                id: 'take-1',
-                kind: 'custom',
-                startBeat: 0,
-                duration: 2,
-                customNotes: [
-                  { pitch: 60, startBeat: 0, duration: 1 },
-                  { pitch: 'sixty', startBeat: 0, duration: 1 },
-                  { startBeat: 0, duration: 1 },
-                  null,
-                ],
-              },
-            ], []),
-          },
-        ],
-      });
-
-      const segment = soleContent(deserializeProject(json).bars[0]).chords[0];
-      expect(segment.customNotes).toHaveLength(1);
-      expect(segment.customNotes?.[0].pitch).toBe(60);
-    });
-
-    it('reads a pre-1.9 file unchanged — no custom notes, no velocity', () => {
+    it('reads a pre-1.9 file unchanged — no velocity', () => {
       const legacy = JSON.stringify({
         ...JSON.parse(serializeProject(createTestProject())),
         version: '1.8',
@@ -973,7 +905,6 @@ describe('fileIO', () => {
 
       const segment = deserializeProject(legacy).bars[0].content[FIXTURE_TRACK_ID].chords[0];
       expect(segment.kind).toBe('chord');
-      expect(segment.customNotes).toBeUndefined();
       expect(segment.velocity).toBeUndefined();
     });
 
@@ -990,6 +921,104 @@ describe('fileIO', () => {
       });
 
       expect(soleContent(deserializeProject(json).bars[0]).chords[0].kind).toBe('chord');
+    });
+  });
+
+  describe('schema 1.11 — sub-lanes', () => {
+    /** A project holding a two-note chord, stacked across two lanes. */
+    function stackedProject(): Project {
+      const project = createTestProject({
+        bars: [
+          {
+            id: 'bar-a',
+            barIndex: 0,
+            content: fixtureContent(
+              [
+                { id: 'lo', kind: 'note', pitch: 60, startBeat: 0, duration: 2 },
+                { id: 'hi', kind: 'note', pitch: 64, startBeat: 0, duration: 2, lane: 1 },
+              ],
+              []
+            ),
+          },
+        ],
+      });
+      return {
+        ...project,
+        tracks: [{ ...project.tracks[0], laneCount: 2 }],
+      };
+    }
+
+    it('round-trips a lane and a lane count', () => {
+      const restored = deserializeProject(serializeProject(stackedProject()));
+
+      expect(restored.tracks[0].laneCount).toBe(2);
+      expect(soleContent(restored.bars[0]).chords.map(c => c.lane)).toEqual([undefined, 1]);
+    });
+
+    it('writes neither key for a project with nothing stacked', () => {
+      // A one-lane project must serialise exactly as it did under 1.10 — an
+      // absent key, not an explicit 0 or 1.
+      const parsed = JSON.parse(serializeProject(createTestProject()));
+      expect('lane' in parsed.bars[0].content[FIXTURE_TRACK_ID].chords[0]).toBe(false);
+      expect('laneCount' in parsed.tracks[0]).toBe(false);
+    });
+
+    it('reads a pre-1.11 file as the single lane it always was', () => {
+      const legacy = JSON.stringify({
+        ...JSON.parse(serializeProject(createTestProject())),
+        version: '1.10',
+      });
+      const restored = deserializeProject(legacy);
+
+      expect(restored.tracks[0].laneCount).toBeUndefined();
+      expect(soleContent(restored.bars[0]).chords[0].lane).toBeUndefined();
+    });
+
+    it('reads a nonsensical lane as the first one', () => {
+      const json = JSON.stringify({
+        ...JSON.parse(serializeProject(createTestProject())),
+        bars: [
+          {
+            id: 'bar-a',
+            barIndex: 0,
+            content: fixtureContent(
+              [{ id: 'c1', kind: 'chord', duration: 1, lane: -3 }],
+              []
+            ),
+          },
+        ],
+      });
+
+      expect(soleContent(deserializeProject(json).bars[0]).chords[0].lane).toBeUndefined();
+    });
+
+    it('reads a 1.9 custom block as a chord, its notes gone with the kind', () => {
+      // The `custom` kind is retired: sub-lanes say what it said, as named notes.
+      // An unrecognised kind has always read back as a chord.
+      const json = JSON.stringify({
+        ...JSON.parse(serializeProject(createTestProject())),
+        bars: [
+          {
+            id: 'bar-a',
+            barIndex: 0,
+            content: fixtureContent(
+              [
+                {
+                  id: 'take-1',
+                  kind: 'custom',
+                  duration: 2,
+                  customNotes: [{ pitch: 60, startBeat: 0, duration: 2 }],
+                },
+              ],
+              []
+            ),
+          },
+        ],
+      });
+
+      const segment = soleContent(deserializeProject(json).bars[0]).chords[0];
+      expect(segment.kind).toBe('chord');
+      expect('customNotes' in segment).toBe(false);
     });
   });
 

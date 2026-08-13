@@ -38,10 +38,11 @@ const makeBar = (
 });
 
 /** A chord segment with a caller-supplied id so assertions can track it. */
-const seg = (id: string, duration = 1, startBeat?: number): ChordSegment => ({
+const seg = (id: string, duration = 1, startBeat?: number, lane?: number): ChordSegment => ({
   id,
   kind: "chord",
   startBeat,
+  lane,
   romanNumeral: "I",
   chordSymbol: "C",
   duration,
@@ -50,6 +51,10 @@ const seg = (id: string, duration = 1, startBeat?: number): ChordSegment => ({
 /** Compact `id@start+duration` rendering, so ripple assertions read at a glance. */
 const layout = (segments: ChordSegment[]): string[] =>
   segments.map((s) => `${s.id}@${s.startBeat}+${s.duration}`);
+
+/** The same, with the sub-lane appended, for assertions that are about lanes. */
+const laneLayout = (segments: ChordSegment[]): string[] =>
+  segments.map((s) => `${s.id}@${s.startBeat}+${s.duration}/${s.lane ?? 0}`);
 
 describe("timeline", () => {
   describe("getBarBeats", () => {
@@ -364,6 +369,34 @@ describe("timeline", () => {
       placeSegmentInBar(segments, seg("g"), 1);
       expect(layout(segments)).toEqual(["c@0+1", "am@1+1", "f@2+1"]);
     });
+
+    // A lane is the only thing that makes two blocks rivals for a beat. Blocks in
+    // other lanes are not in the way, so the ripple must not see them at all.
+    describe("sub-lanes", () => {
+      it("drops a block onto an occupied beat in another lane without rippling", () => {
+        const kept = placeSegmentInBar([seg("c", 2, 0, 0)], seg("g", 2, undefined, 1), 0);
+        expect(laneLayout(kept)).toEqual(["c@0+2/0", "g@0+2/1"]);
+      });
+
+      it("ripples only the blocks sharing the placed block's lane", () => {
+        const segments = [seg("lo", 1, 1, 0), seg("hi", 1, 1, 1)];
+        expect(laneLayout(placeSegmentInBar(segments, seg("g", 1, undefined, 0), 1))).toEqual([
+          "g@1+1/0",
+          "hi@1+1/1",
+          "lo@2+1/0",
+        ]);
+      });
+
+      it("moves a block between lanes rather than leaving a copy behind", () => {
+        const kept = placeSegmentInBar([seg("c", 1, 0, 0)], seg("c", 1, undefined, 1), 0);
+        expect(laneLayout(kept)).toEqual(["c@0+1/1"]);
+      });
+
+      it("orders blocks on the same beat by lane", () => {
+        const kept = placeSegmentInBar([seg("hi", 1, 0, 2)], seg("lo", 1, undefined, 0), 0);
+        expect(kept.map((s) => s.id)).toEqual(["lo", "hi"]);
+      });
+    });
   });
 
   describe("refitBars", () => {
@@ -498,6 +531,67 @@ describe("timeline", () => {
       expect(refitBars([], TS_4_4)).toEqual([]);
     });
 
+    // The non-overlap rule is per *lane*, not per instrument: two blocks may share
+    // a beat as long as they are stacked, which is the whole reason lanes exist.
+    describe("per-lane isolation", () => {
+      it("leaves two blocks on the same beat in different lanes alone", () => {
+        const bars = [makeBar(0, [seg("lo", 2, 0, 0), seg("hi", 2, 0, 1)])];
+        const result = refitBars(bars, TS_4_4);
+        expect(laneLayout(barChords(result[0], TEST_TRACK_ID))).toEqual([
+          "lo@0+2/0",
+          "hi@0+2/1",
+        ]);
+      });
+
+      it("keeps a whole chord's worth of blocks stacked on one beat", () => {
+        const chord = [seg("c", 2, 0, 0), seg("e", 2, 0, 1), seg("g", 2, 0, 2)];
+        const result = refitBars([makeBar(0, chord)], TS_4_4);
+        expect(result).toHaveLength(1);
+        expect(barChords(result[0], TEST_TRACK_ID).map((s) => s.startBeat)).toEqual([0, 0, 0]);
+      });
+
+      it("pushes an overlap apart within a lane and only within it", () => {
+        const bars = [makeBar(0, [seg("a", 2, 0, 0), seg("b", 1, 1, 0), seg("hi", 1, 1, 1)])];
+        const result = refitBars(bars, TS_4_4);
+        expect(laneLayout(barChords(result[0], TEST_TRACK_ID))).toEqual([
+          "a@0+2/0",
+          "hi@1+1/1",
+          "b@2+1/0",
+        ]);
+      });
+
+      it("overflows one lane into the next bar without disturbing another", () => {
+        const bars = [makeBar(0, [seg("a", 4, 0, 0), seg("b", 4, 0, 0), seg("hi", 1, 0, 1)])];
+        const result = refitBars(bars, TS_4_4);
+        expect(laneLayout(barChords(result[0], TEST_TRACK_ID))).toEqual(["a@0+4/0", "hi@0+1/1"]);
+        expect(laneLayout(barChords(result[1], TEST_TRACK_ID))).toEqual(["b@0+4/0"]);
+      });
+
+      it("packs positionless blocks lane by lane", () => {
+        // Two lanes of two, none positioned: each lane packs from its own beat 0.
+        const bars = [
+          makeBar(0, [
+            seg("a", 1, undefined, 0),
+            seg("x", 1, undefined, 1),
+            seg("b", 1, undefined, 0),
+            seg("y", 1, undefined, 1),
+          ]),
+        ];
+        expect(laneLayout(barChords(refitBars(bars, TS_4_4)[0], TEST_TRACK_ID))).toEqual([
+          "a@0+1/0",
+          "x@0+1/1",
+          "b@1+1/0",
+          "y@1+1/1",
+        ]);
+      });
+
+      it("is idempotent over stacked lanes", () => {
+        const bars = [makeBar(0, [seg("lo", 2, 0, 0), seg("hi", 3, 1, 1)]), makeBar(1)];
+        const once = refitBars(bars, TS_4_4);
+        expect(refitBars(once, TS_4_4)).toEqual(once);
+      });
+    });
+
     // Instruments share bars but not lanes: the whole point of refitting each
     // track's list on its own is that one instrument's ripple cannot move
     // another's blocks, even when they sit on exactly the same beats.
@@ -564,6 +658,18 @@ describe("timeline", () => {
       const bars = [makeBar(0, [seg("a", 1, 0), seg("b", 1, 1), seg("c", 1, 3)])];
       const result = clearRange(bars, TS_4_4, TEST_TRACK_ID, 1, 2);
       expect(layout(barChords(result[0], TEST_TRACK_ID))).toEqual(["a@0+1", "c@3+1"]);
+    });
+
+    it("punches only the named lane, sparing the ones stacked with it", () => {
+      const bars = [makeBar(0, [seg("lo", 4, 0, 0), seg("hi", 4, 0, 1)])];
+      const result = clearRange(bars, TS_4_4, TEST_TRACK_ID, 0, 4, undefined, 1);
+      expect(laneLayout(barChords(result[0], TEST_TRACK_ID))).toEqual(["lo@0+4/0"]);
+    });
+
+    it("punches every lane when none is named", () => {
+      const bars = [makeBar(0, [seg("lo", 4, 0, 0), seg("hi", 4, 0, 1)])];
+      const result = clearRange(bars, TS_4_4, TEST_TRACK_ID, 0, 4);
+      expect(barChords(result[0], TEST_TRACK_ID)).toEqual([]);
     });
 
     it("trims a block whose tail runs into the range", () => {

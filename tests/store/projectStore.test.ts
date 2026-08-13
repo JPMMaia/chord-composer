@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { projectStore } from '@/store/projectStore';
-import { Bar, ChordSegment, NoteName, ScaleType, TimeSignature } from '@/types/music';
+import { Bar, ChordSegment, NoteName, ScaleType } from '@/types/music';
 import { barChords, barNotes } from '@/engine/timeline';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
 import type { TemplateInstrument } from '@/engine/instrumentTemplate';
@@ -556,141 +556,74 @@ describe('projectStore', () => {
       expect(state().project!.bars.length).toBe(before);
       expect(state().project!.bars.every(b => barChords(b, trackId()).length === 0)).toBe(true);
     });
-  });
 
-  describe('convertCustomSegments', () => {
-    const state = () => projectStore.getState();
+    // Recording a chord is several simultaneous blocks, one per key. A lane is
+    // what gives each of them somewhere to be.
+    describe('sub-lanes', () => {
+      const laneSpans = (barIndex: number) =>
+        barChords(state().project!.bars[barIndex], trackId()).map(
+          c => `${c.id}@${c.startBeat}/${c.lane ?? 0}`
+        );
 
-    beforeEach(() => {
-      state().createProject();
-      state().addBar();
+      it('grows the instrument to hold the lane written to', () => {
+        state().recordSegment(trackId(), 0, chordSegment({ id: 'hi', lane: 2 }));
+
+        expect(state().project!.tracks[0].laneCount).toBe(3);
+      });
+
+      it('leaves a lane count that already covers the lane alone', () => {
+        state().setTrackLaneCount(trackId(), 4);
+        state().recordSegment(trackId(), 0, chordSegment({ id: 'hi', lane: 1 }));
+
+        expect(state().project!.tracks[0].laneCount).toBe(4);
+      });
+
+      it('lands two takes on the same beat in different lanes', () => {
+        state().recordSegment(trackId(), 0, chordSegment({ id: 'lo', lane: 0 }));
+        state().recordSegment(trackId(), 0, chordSegment({ id: 'hi', lane: 1 }));
+
+        expect(laneSpans(0)).toEqual(['lo@0/0', 'hi@0/1']);
+      });
+
+      it('punches only its own lane, leaving what is stacked with it', () => {
+        state().recordSegment(trackId(), 0, chordSegment({ id: 'lo', duration: 4, lane: 0 }));
+        state().recordSegment(trackId(), 0, chordSegment({ id: 'hi', duration: 4, lane: 1 }));
+
+        // Re-recording over lane 1 replaces its block and spares lane 0's.
+        state().recordSegment(trackId(), 0, chordSegment({ id: 'hi2', duration: 4, lane: 1 }));
+
+        expect(laneSpans(0)).toEqual(['lo@0/0', 'hi2@0/1']);
+      });
     });
 
-    /** A recorded block, as `recordSegment` commits one. */
-    const take = (
-      customNotes: ChordSegment['customNotes'],
-      overrides: Partial<ChordSegment> = {}
-    ): ChordSegment => ({
-      id: 'take',
-      kind: 'custom',
-      duration: 2,
-      customNotes,
-      ...overrides,
-    });
+    describe('setTrackLaneCount', () => {
+      it('adds and removes a lane', () => {
+        state().setTrackLaneCount(trackId(), 3);
+        expect(state().project!.tracks[0].laneCount).toBe(3);
 
-    const record = (segment: ChordSegment, atBeat = 0) =>
-      state().recordSegment(trackId(), atBeat, segment);
+        state().setTrackLaneCount(trackId(), 1);
+        expect(state().project!.tracks[0].laneCount).toBe(1);
+      });
 
-    it('turns a held chord into one chord segment where the take sat', () => {
-      record(
-        take([
-          { pitch: 60, startBeat: 0, duration: 2 },
-          { pitch: 64, startBeat: 0, duration: 2 },
-          { pitch: 67, startBeat: 0, duration: 2 },
-        ]),
-        1
-      );
+      it('refuses to shrink over a lane that still holds blocks', () => {
+        state().recordSegment(trackId(), 0, chordSegment({ id: 'hi', lane: 2 }));
 
-      const produced = state().convertCustomSegments(['take']);
+        state().setTrackLaneCount(trackId(), 1);
 
-      const chords = barChords(state().project!.bars[0], trackId());
-      expect(chords).toHaveLength(1);
-      expect(chords[0]).toMatchObject({ kind: 'chord', root: 'C', quality: 'major', startBeat: 1 });
-      expect(produced).toEqual([chords[0].id]);
-    });
+        expect(state().project!.tracks[0].laneCount).toBe(3);
+        expect(barChords(state().project!.bars[0], trackId())).toHaveLength(1);
+      });
 
-    it('leaves the piano roll sounding what was played', () => {
-      record(
-        take([
-          { pitch: 60, startBeat: 0, duration: 2 },
-          { pitch: 64, startBeat: 0, duration: 2 },
-          { pitch: 67, startBeat: 0, duration: 2 },
-        ])
-      );
-      const before = barNotes(state().project!.bars[0], trackId())
-        .map(n => n.pitch)
-        .sort((a, b) => a - b);
+      it('never goes below one lane, and ignores nonsense', () => {
+        state().setTrackLaneCount(trackId(), 3);
+        state().setTrackLaneCount(trackId(), 0);
+        expect(state().project!.tracks[0].laneCount).toBe(1);
 
-      state().convertCustomSegments(['take']);
-
-      const after = barNotes(state().project!.bars[0], trackId())
-        .map(n => n.pitch)
-        .sort((a, b) => a - b);
-      expect(after).toEqual(before);
-    });
-
-    it('splits a melodic take into one segment per note, and regenerates its notes', () => {
-      record(
-        take(
-          [
-            { pitch: 60, startBeat: 0, duration: 1 },
-            { pitch: 62, startBeat: 1, duration: 1 },
-            { pitch: 64, startBeat: 2, duration: 1 },
-          ],
-          { duration: 3 }
-        )
-      );
-
-      const produced = state().convertCustomSegments(['take']);
-
-      const chords = barChords(state().project!.bars[0], trackId());
-      expect(chords).toHaveLength(3);
-      expect(chords.map(c => c.startBeat)).toEqual([0, 1, 2]);
-      expect(chords.every(c => c.kind === 'note')).toBe(true);
-      expect(produced).toHaveLength(3);
-      expect(barNotes(state().project!.bars[0], trackId()).map(n => n.pitch)).toEqual([60, 62, 64]);
-    });
-
-    it('leaves the neighbours where they are', () => {
-      state().insertSegment(state().project!.bars[0].id, 3, chordSegment({ id: 'after' }), trackId());
-      record(
-        take([
-          { pitch: 60, startBeat: 0, duration: 1 },
-          { pitch: 62, startBeat: 1, duration: 1 },
-        ]),
-        0
-      );
-
-      state().convertCustomSegments(['take']);
-
-      expect(barChords(state().project!.bars[0], trackId()).find(c => c.id === 'after')).toMatchObject(
-        { startBeat: 3 }
-      );
-    });
-
-    it('leaves a block it cannot name untouched, and says so by producing nothing', () => {
-      record(
-        take([
-          { pitch: 60, startBeat: 0, duration: 2 },
-          { pitch: 62, startBeat: 0, duration: 2 },
-          { pitch: 64, startBeat: 0, duration: 2 },
-        ])
-      );
-
-      expect(state().convertCustomSegments(['take'])).toEqual([]);
-      expect(barChords(state().project!.bars[0], trackId())[0].kind).toBe('custom');
-    });
-
-    it('ignores ids that name nothing, and segments that are not recordings', () => {
-      state().insertSegment(state().project!.bars[0].id, 0, chordSegment({ id: 'a' }), trackId());
-      const before = state().project;
-
-      expect(state().convertCustomSegments(['a', 'nope'])).toEqual([]);
-      // Untouched down to the object identity: nothing was written at all.
-      expect(state().project).toBe(before);
-    });
-
-    it('converts a whole selection in one write, so one undo takes it back', () => {
-      record(take([{ pitch: 60, startBeat: 0, duration: 1 }], { id: 'one' }), 0);
-      record(take([{ pitch: 62, startBeat: 0, duration: 1 }], { id: 'two' }), 2);
-
-      let writes = 0;
-      const unsubscribe = projectStore.subscribe(() => writes++);
-      state().convertCustomSegments(['one', 'two']);
-      unsubscribe();
-
-      expect(writes).toBe(1);
-      expect(barChords(state().project!.bars[0], trackId()).every(c => c.kind === 'note')).toBe(true);
+        const before = state().project;
+        state().setTrackLaneCount(trackId(), Number.NaN);
+        state().setTrackLaneCount('nope', 3);
+        expect(state().project).toBe(before);
+      });
     });
   });
 
@@ -1481,46 +1414,42 @@ describe('projectStore', () => {
           barNotes(barOf(id)!, trackId()).map(n => n.velocity);
 
         it('applies to every kind in one selection, and regenerates the notes', () => {
-          // The one segment edit that is not chords-only: a note and a recorded
-          // block both sound at some velocity.
+          // The one segment edit that is not chords-only: a note sounds at some
+          // velocity just as a chord does.
           const chord = chordSegment({ octave: 4 });
           const note: ChordSegment = { id: 'note-vel', kind: 'note', pitch: 60, duration: 1 };
-          const take: ChordSegment = {
-            id: 'take-vel',
-            kind: 'custom',
-            duration: 1,
-            customNotes: [{ pitch: 67, startBeat: 0, duration: 1 }],
-          };
           appendSegment(chord);
           appendSegment(note);
-          appendSegment(take);
 
-          state().setSegmentsVelocity([chord.id, note.id, take.id], 40);
+          state().setSegmentsVelocity([chord.id, note.id], 40);
 
           expect(segmentOf(chord.id).velocity).toBe(40);
           expect(segmentOf(note.id).velocity).toBe(40);
-          expect(segmentOf(take.id).velocity).toBe(40);
           // Derived notes are what actually reaches the sampler, so the edit is
-          // only real once they carry it. All three pack into one bar, so this is
-          // the triad's three plus one each for the note and the take.
-          expect(velocitiesOf(chord.id)).toEqual([40, 40, 40, 40, 40]);
+          // only real once they carry it. Both pack into one bar, so this is the
+          // triad's three plus one for the note.
+          expect(velocitiesOf(chord.id)).toEqual([40, 40, 40, 40]);
         });
 
-        it('leaves a recorded note that states its own velocity alone', () => {
-          const take: ChordSegment = {
-            id: 'take-own',
-            kind: 'custom',
+        it('leaves a stacked note in another lane alone', () => {
+          // Blocks in different lanes are independent material, so a velocity edit
+          // aimed at one must not reach the one sounding beside it.
+          const lo: ChordSegment = { id: 'lo-vel', kind: 'note', pitch: 60, duration: 1 };
+          const hi: ChordSegment = {
+            id: 'hi-vel',
+            kind: 'note',
+            pitch: 64,
             duration: 1,
-            customNotes: [
-              { pitch: 60, startBeat: 0, duration: 1, velocity: 88 },
-              { pitch: 64, startBeat: 0, duration: 1 },
-            ],
+            lane: 1,
+            velocity: 88,
           };
-          appendSegment(take);
+          appendSegment(lo);
+          appendSegment(hi);
 
-          state().setSegmentVelocity(take.id, 40);
+          state().setSegmentVelocity(lo.id, 40);
 
-          expect(velocitiesOf(take.id)).toEqual([88, 40]);
+          expect(segmentOf(hi.id).velocity).toBe(88);
+          expect(velocitiesOf(lo.id).sort()).toEqual([40, 88]);
         });
 
         it('ignores an unknown segment id', () => {

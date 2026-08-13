@@ -10,7 +10,6 @@ import type {
   ScaleType,
   SegmentBreak,
   SegmentKind,
-  SegmentNote,
   SegmentVoicing,
   SpacingPreset,
   TimeSignature,
@@ -92,8 +91,20 @@ const LEGACY_TRACK_ID = 'track-legacy';
  * has any. The key is omitted when the curve is empty, so a project nobody has
  * automated serialises exactly as it did under 1.9, and a pre-1.10 file has no
  * curves at all — its instruments play at the one level they always did.
+ *
+ * 1.11 gave each instrument stacked sub-lanes: a `lane` on every segment and a
+ * `laneCount` on every instrument. Blocks may not overlap within a lane, so a lane
+ * is what lets a played chord be the several simultaneous note blocks it is. Both
+ * keys are omitted at their defaults — lane 0, one lane — so a project with nothing
+ * stacked serialises exactly as it did under 1.10, and a pre-1.11 file reads back as
+ * the single lane it always was.
+ *
+ * 1.11 also retired the `custom` block that 1.9 introduced. Sub-lanes express a
+ * recording directly, as named notes, so nothing needs the opaque form any more.
+ * A `custom` segment in an older file is unrecognised and, like every unrecognised
+ * kind, reads back as a chord.
  */
-export const SCHEMA_VERSION = '1.10';
+export const SCHEMA_VERSION = '1.11';
 
 /**
  * Validation error returned by validateProject.
@@ -157,6 +168,8 @@ export function serializeProject(project: Project): string {
       id: t.id,
       name: t.name,
       instrument: t.instrument,
+      // Absent means the single lane every instrument had before 1.11.
+      laneCount: t.laneCount !== undefined && t.laneCount > 1 ? t.laneCount : undefined,
       volume: t.volume,
       // Omitted when there is no curve, so an unautomated project gains no bytes
       // and still round-trips byte for byte as it did under 1.9.
@@ -186,6 +199,9 @@ export function serializeProject(project: Project): string {
             chords: trackContent.chords.map(c => ({
               id: c.id,
               startBeat: c.startBeat,
+              // Absent means lane 0, so a project with nothing stacked gains no
+              // bytes and round-trips exactly as it did under 1.10.
+              lane: c.lane,
               kind: c.kind ?? 'chord',
               romanNumeral: c.romanNumeral,
               chordSymbol: c.chordSymbol,
@@ -195,9 +211,6 @@ export function serializeProject(project: Project): string {
               root: c.root,
               inversion: c.inversion,
               quality: c.quality,
-              // Custom blocks only, and absent everywhere else — so a project with
-              // nothing recorded in it still serialises exactly as it did under 1.8.
-              customNotes: c.customNotes,
               velocity: c.velocity,
               // The key this block is written in — a bar-level `scale` is no
               // longer written, so this is where a 1.8 file states its keys.
@@ -327,35 +340,23 @@ function readVelocity(raw: unknown): number | undefined {
 }
 
 /**
- * Read the notes of a custom block, dropping any that do not describe a note.
+ * Read a segment's sub-lane, or undefined for the first one.
  *
- * Dropped rather than repaired, for `readVoicing`'s reason: an entry with no pitch
- * says nothing about what was played, and inventing one would put a note in the
- * piece that nobody performed. An empty or absent list reads as undefined — a
- * block with nothing in it, which is what every pre-1.9 segment is.
+ * Undefined rather than 0, for `readVelocity`'s reason: the two mean the same, but
+ * only the absence round-trips back to a file that says nothing, which is what keeps
+ * a project with nothing stacked serialising exactly as it did under 1.10. A
+ * negative or fractional lane is nonsense rather than a position, and reads as the
+ * first lane.
  */
-function readCustomNotes(raw: unknown): SegmentNote[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
+function readLane(raw: unknown): number | undefined {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 1) return undefined;
+  return Math.floor(raw);
+}
 
-  const notes = (raw as Record<string, unknown>[])
-    .filter(
-      n =>
-        typeof n?.pitch === 'number' &&
-        Number.isFinite(n.pitch) &&
-        typeof n.startBeat === 'number' &&
-        Number.isFinite(n.startBeat) &&
-        typeof n.duration === 'number' &&
-        Number.isFinite(n.duration)
-    )
-    .map(n => ({
-      pitch: Math.max(0, Math.min(127, Math.round(n.pitch as number))),
-      // A note cannot start before the block that holds it, nor sound backwards.
-      startBeat: Math.max(0, n.startBeat as number),
-      duration: Math.max(0, n.duration as number),
-      velocity: readVelocity(n.velocity),
-    }));
-
-  return notes.length > 0 ? notes : undefined;
+/** Read an instrument's lane count, or undefined for the single lane that is the default. */
+function readLaneCount(raw: unknown): number | undefined {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 2) return undefined;
+  return Math.floor(raw);
 }
 
 /**
@@ -413,6 +414,8 @@ export function deserializeProject(json: string): Project {
           typeof t.instrument === 'string' && t.instrument
             ? t.instrument
             : DEFAULT_INSTRUMENT_ID,
+        // Pre-1.11 tracks had one lane, which is what an absent count means.
+        laneCount: readLaneCount(t.laneCount),
         volume: typeof t.volume === 'number' ? t.volume : 1.0,
         // Normalised on read rather than trusted: it is the one field a hand-edited
         // file can put out of order, and everything downstream assumes it is sorted.
@@ -480,10 +483,13 @@ export function deserializeProject(json: string): Project {
           // Schema 1.1 and earlier had no positions; leaving it undefined lets
           // the store pack the bar, which is what those files meant.
           startBeat: typeof c.startBeat === 'number' ? c.startBeat : undefined,
+          // Schema 1.10 and earlier had one lane per instrument; an absent lane is
+          // that lane, which is what those files meant.
+          lane: readLane(c.lane),
           // Schema 1.0 had no note segments, so anything unlabelled is a chord —
           // and so is anything unrecognised, which is what a file from a future
-          // version can look like.
-          kind: (c.kind === 'note' || c.kind === 'custom' ? c.kind : 'chord') as SegmentKind,
+          // version, or a 1.9 `custom` block, looks like.
+          kind: (c.kind === 'note' ? c.kind : 'chord') as SegmentKind,
           romanNumeral: typeof c.romanNumeral === 'string' ? c.romanNumeral : undefined,
           chordSymbol: typeof c.chordSymbol === 'string' ? c.chordSymbol : undefined,
           duration: typeof c.duration === 'number' ? c.duration : 4,
@@ -501,9 +507,8 @@ export function deserializeProject(json: string): Project {
           // Schema 1.5 and earlier had no voicing; an absent one means the plain
           // block chord, which is all those files could express.
           voicing: readVoicing(c.voicing),
-          // Schema 1.8 and earlier had neither. An absent velocity is the fixed 100
-          // every note used to carry, and only a custom block has notes of its own.
-          customNotes: readCustomNotes(c.customNotes),
+          // Schema 1.8 and earlier had none. An absent velocity is the fixed 100
+          // every note used to carry.
           velocity: readVelocity(c.velocity),
         }))
       : [];
@@ -699,6 +704,14 @@ export function validateProject(project: Project): ValidationResult {
         const c = chords[j];
         if (c.quality && !VALID_QUALITIES.includes(c.quality)) {
           errors.push(`Bar ${i}, chord ${j}: invalid quality "${c.quality}".`);
+        }
+        // A lane names a row, so a fraction or a negative names none. Absent is
+        // the first lane and always fine.
+        if (
+          c.lane !== undefined &&
+          (!Number.isInteger(c.lane) || c.lane < 0)
+        ) {
+          errors.push(`Bar ${i}, chord ${j}: invalid lane "${c.lane}".`);
         }
       }
     }

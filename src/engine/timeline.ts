@@ -1,4 +1,4 @@
-import type { Bar, ChordSegment, Note, TimeSignature, TrackContent } from '@/types/music';
+import type { Bar, ChordSegment, Note, TimeSignature, Track, TrackContent } from '@/types/music';
 import { generateId } from '@/utils/id';
 
 // ---------------------------------------------------------------------------
@@ -137,24 +137,64 @@ function startOf(segment: ChordSegment, fallback: number): number {
 }
 
 /**
+ * Which of its instrument's stacked sub-lanes a segment sits in.
+ *
+ * Absent, negative or fractional all read as lane 0 — the single lane every project
+ * written before sub-lanes had, and the only lane most material ever needs.
+ */
+export function laneOf(segment: ChordSegment): number {
+  const lane = segment.lane;
+  return typeof lane === 'number' && Number.isFinite(lane) && lane > 0 ? Math.floor(lane) : 0;
+}
+
+/** How many sub-lanes an instrument shows. Absent, or anything invalid, reads as 1. */
+export function trackLaneCount(track: Pick<Track, 'laneCount'>): number {
+  const count = track.laneCount;
+  return typeof count === 'number' && Number.isFinite(count) && count > 1 ? Math.floor(count) : 1;
+}
+
+/**
+ * Split segments into one list per lane, indexed by lane number.
+ *
+ * The length follows the *data*, not the track's `laneCount`: a block sitting in a
+ * lane the track no longer shows still has to be refitted and drawn somewhere rather
+ * than quietly vanishing.
+ */
+export function byLane(segments: ChordSegment[]): ChordSegment[][] {
+  const lanes: ChordSegment[][] = [[]];
+  for (const segment of segments) {
+    const lane = laneOf(segment);
+    while (lanes.length <= lane) lanes.push([]);
+    lanes[lane].push(segment);
+  }
+  return lanes;
+}
+
+/**
  * Fill in any missing `startBeat` by packing segments in order.
  *
  * That packing is exactly what a position-less list used to mean — durations
  * accumulated from the start of the bar — so this is what lets projects saved before
  * free placement open with the positions they always had.
+ *
+ * One cursor per lane, because packing is a per-lane notion: where a lane-1 block
+ * lands follows from the lane-1 blocks before it, not from whatever lane 0 holds.
+ * Files written before sub-lanes are entirely lane 0, so they pack as they always
+ * did. Input order is preserved, since callers iterate the result.
  */
 export function withStartBeats(segments: ChordSegment[]): ChordSegment[] {
-  let cursor = 0;
+  const cursors = new Map<number, number>();
   return segments.map(segment => {
-    const startBeat = startOf(segment, cursor);
-    cursor = startBeat + segment.duration;
+    const lane = laneOf(segment);
+    const startBeat = startOf(segment, cursors.get(lane) ?? 0);
+    cursors.set(lane, startBeat + segment.duration);
     return segment.startBeat === startBeat ? segment : { ...segment, startBeat };
   });
 }
 
-/** Order segments by position. */
+/** Order segments by position, and blocks stacked on one beat by lane. */
 function byStart(segments: ChordSegment[]): ChordSegment[] {
-  return [...segments].sort((a, b) => startOf(a, 0) - startOf(b, 0));
+  return [...segments].sort((a, b) => startOf(a, 0) - startOf(b, 0) || laneOf(a) - laneOf(b));
 }
 
 /**
@@ -168,7 +208,12 @@ function byStart(segments: ChordSegment[]): ChordSegment[] {
  * because a position past `capacity` is just a position further along the timeline,
  * and `refitBars` is what re-homes it into the bar it now starts in.
  *
- * Passing a segment already present moves it, rather than duplicating it.
+ * **The ripple is confined to the placed block's own lane.** Blocks stacked above or
+ * below it are not in its way — that is what a lane is for — so they are carried
+ * through untouched, however exactly their beats coincide.
+ *
+ * Passing a segment already present moves it, rather than duplicating it, including
+ * when the move is from one lane to another.
  */
 export function placeSegmentInBar(
   segments: ChordSegment[],
@@ -176,9 +221,13 @@ export function placeSegmentInBar(
   startBeat: number
 ): ChordSegment[] {
   const placed = { ...segment, startBeat };
-  const others = byStart(withStartBeats(segments.filter(s => s.id !== placed.id)));
+  const lane = laneOf(placed);
+  // Filtered by id across every lane, so moving a block between lanes lifts the
+  // old copy out rather than leaving it behind in the lane it came from.
+  const rest = withStartBeats(segments.filter(s => s.id !== placed.id));
+  const others = byStart(rest.filter(s => laneOf(s) === lane));
 
-  const kept: ChordSegment[] = [placed];
+  const kept: ChordSegment[] = [placed, ...rest.filter(s => laneOf(s) !== lane)];
   let cursor = startBeat + placed.duration;
 
   for (const other of others) {
@@ -215,6 +264,9 @@ export function placeSegmentInBar(
  *
  * @param exceptId - A segment to leave alone: the take being recorded, which is
  *   already on the timeline and must not clear itself away as it grows.
+ * @param lane - Punch only this sub-lane. Recording into lane 1 must not erase what
+ *   is stacked underneath it in lane 0, any more than it erases another instrument.
+ *   Absent punches every lane.
  */
 export function clearRange(
   bars: Bar[],
@@ -222,7 +274,8 @@ export function clearRange(
   trackId: string,
   fromBeat: number,
   toBeat: number,
-  exceptId?: string
+  exceptId?: string,
+  lane?: number
 ): Bar[] {
   if (!(toBeat > fromBeat)) return bars;
 
@@ -242,8 +295,13 @@ export function clearRange(
       const start = offset + segment.startBeat!;
       const end = start + segment.duration;
 
-      // Outside the punch entirely, or explicitly spared.
-      if (end <= fromBeat || start >= toBeat || segment.id === exceptId) {
+      // Outside the punch entirely, in a lane it does not reach, or explicitly spared.
+      if (
+        end <= fromBeat ||
+        start >= toBeat ||
+        segment.id === exceptId ||
+        (lane !== undefined && laneOf(segment) !== lane)
+      ) {
         kept.push(segment);
         continue;
       }
@@ -275,8 +333,11 @@ export function clearRange(
 
 /**
  * Restore the timeline invariant across the whole project: every segment
- * positioned, in order, and non-overlapping, each one living in the bar its onset
- * falls in.
+ * positioned, in order, and non-overlapping *within its lane*, each one living in
+ * the bar its onset falls in.
+ *
+ * Blocks in different lanes may coincide exactly, which is what lets a played chord
+ * be the three note blocks it actually is rather than one opaque block.
  *
  * A block may run past its bar line — a chord held across the barline is ordinary
  * music — so what gets re-homed here is only a block whose *start* has been pushed
@@ -299,7 +360,7 @@ export function refitBars(bars: Bar[], projectTs: TimeSignature, trackIds?: stri
   let barCount = bars.length;
   const perTrack = new Map<string, ChordSegment[][]>();
   for (const id of ids) {
-    const refitted = refitTrackChords(
+    const refitted = refitTrackLanes(
       bars.map(bar => barChords(bar, id)),
       capacityAt
     );
@@ -327,7 +388,50 @@ export function refitBars(bars: Bar[], projectTs: TimeSignature, trackIds?: stri
 }
 
 /**
- * Refit one instrument's segments across the project. Returns one list per bar,
+ * Refit one instrument's segments across the project, lane by lane.
+ *
+ * A lane is the unit the non-overlap rule applies to, so each one is refitted on its
+ * own and the results are merged back per bar — exactly the relationship `refitBars`
+ * has to instruments, one level down. A lane that overflows appends bars without
+ * touching the lanes stacked with it, so the project ends up as long as the longest.
+ *
+ * The lanes considered come from the segments themselves rather than from the
+ * track's `laneCount`, so a block left in a lane the track has since stopped showing
+ * is still placed rather than lost.
+ */
+function refitTrackLanes(
+  chordsPerBar: ChordSegment[][],
+  capacityAt: (index: number) => number
+): ChordSegment[][] {
+  const laneCount = chordsPerBar.reduce(
+    (widest, chords) => chords.reduce((max, s) => Math.max(max, laneOf(s) + 1), widest),
+    1
+  );
+
+  // The one-lane case is every project written before sub-lanes, and most tracks
+  // in every project after: skip the split and the merge entirely.
+  if (laneCount === 1) return refitTrackChords(chordsPerBar, capacityAt);
+
+  let barCount = chordsPerBar.length;
+  const perLane: ChordSegment[][][] = [];
+  for (let lane = 0; lane < laneCount; lane++) {
+    const refitted = refitTrackChords(
+      chordsPerBar.map(chords => chords.filter(s => laneOf(s) === lane)),
+      capacityAt
+    );
+    perLane.push(refitted);
+    barCount = Math.max(barCount, refitted.length);
+  }
+
+  const merged: ChordSegment[][] = [];
+  for (let i = 0; i < barCount; i++) {
+    merged.push(byStart(perLane.flatMap(lane => lane[i] ?? [])));
+  }
+  return merged;
+}
+
+/**
+ * Refit one lane's segments across the project. Returns one list per bar,
  * possibly longer than the input when blocks ran off the end.
  *
  * The work is done in absolute beats rather than bar by bar, because that is the

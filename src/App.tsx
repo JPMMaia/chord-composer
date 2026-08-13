@@ -217,8 +217,8 @@ function App() {
   // 1–7 play the palette's degrees, and record them while armed. `r` arms.
   useRecordShortcuts({ isPlaying, getSongTime, getPool, recordGated });
 
-  // A MIDI keyboard plays the selected instrument, and records into `custom` blocks
-  // while armed. Same gating as above: one history entry per take.
+  // A MIDI keyboard plays the selected instrument, and records one note block per
+  // key while armed. Same gating as above: one history entry per gesture.
   const midiStatus = useMidiInput({
     isPlaying,
     getSongTime,

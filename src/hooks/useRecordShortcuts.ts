@@ -127,6 +127,24 @@ export function useRecordShortcuts({
       for (const key of [...held.keys()]) close(key, commit);
     };
 
+    /**
+     * The lowest sub-lane no currently-held key is writing to.
+     *
+     * Two number keys held together are two blocks sounding at once, and a lane
+     * holds one block at a time — without this the second would ripple the first
+     * along and neither would land where it was played. Lowest rather than
+     * next-highest, so a line played one key at a time never leaves lane 0.
+     */
+    const freeLane = (): number => {
+      const taken = new Set<number>();
+      for (const take of held.values()) {
+        if (take.pressBeat !== null) taken.add(take.segment.lane ?? 0);
+      }
+      let lane = 0;
+      while (taken.has(lane)) lane++;
+      return lane;
+    };
+
     const handleKeyDown = (e: KeyboardEvent) => {
       if (isTextEntry(e.target)) return;
       // Leave every modifier combination to the shortcuts that own them — Ctrl+1 is
@@ -165,7 +183,10 @@ export function useRecordShortcuts({
         ? getPaletteItems(paletteScale, paletteMode, paletteOctave + shift)[degree % items.length]
         : items[degree];
 
-      const segment = paletteItemToSegment(item, MIN_SEGMENT_BEATS, paletteScale);
+      const segment: ChordSegment = {
+        ...paletteItemToSegment(item, MIN_SEGMENT_BEATS, paletteScale),
+        lane: freeLane(),
+      };
       const release = auditionSegment(
         getPool()?.get(trackId),
         segment,

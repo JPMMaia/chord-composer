@@ -20,6 +20,7 @@ import {
   clampStartToBar,
   clearRange,
   findSegment,
+  flattenSegments,
   getBarIndexAtBeat,
   getBarBeats,
   getBarStartBeat,
@@ -27,15 +28,16 @@ import {
   isValidTimeSignature,
   mapBarChords,
   MIN_SEGMENT_BEATS,
+  laneOf,
   placeSegmentInBar,
   refitBars,
   removeSegmentById,
   resizeSegment,
+  trackLaneCount,
   withoutTrackContent,
   withStartBeats,
 } from '@/engine/timeline';
 import {
-  convertCustomSegment,
   convertSegmentKind,
   cycleSegmentInversion,
   generateNotesFromSegments,
@@ -76,6 +78,8 @@ export interface SegmentMove {
   segmentId: string;
   targetBarId: string;
   startBeat: number;
+  /** Sub-lane to land in. Absent keeps the lane the block is already in. */
+  lane?: number;
 }
 
 interface ProjectState {
@@ -103,8 +107,20 @@ interface ProjectState {
   ) => void;
   removeSegment: (segmentId: string) => void;
   removeSegments: (segmentIds: string[]) => void;
-  moveSegment: (segmentId: string, targetBarId: string, startBeat: number) => void;
+  moveSegment: (
+    segmentId: string,
+    targetBarId: string,
+    startBeat: number,
+    lane?: number
+  ) => void;
   moveSegments: (moves: SegmentMove[]) => void;
+  /**
+   * How many stacked sub-lanes an instrument shows.
+   *
+   * Refuses to shrink over a lane that still holds blocks — a lane is removed by
+   * emptying it first, not by having its contents silently rehomed.
+   */
+  setTrackLaneCount: (trackId: string, count: number) => void;
   /** `snapBeats` is the editor's current grid; the caller owns it, the store does not. */
   resizeSegmentDuration: (segmentId: string, duration: number, snapBeats: number) => void;
   // Instruments. Tracks live here rather than in a store of their own so they
@@ -158,9 +174,8 @@ interface ProjectState {
   /**
    * How hard every named segment sounds, 1-127.
    *
-   * Unlike the voicing edits above this applies to every kind: a note and a
-   * recorded block both carry a velocity. On a recorded block it sets the
-   * fallback its own notes may each override.
+   * Unlike the voicing edits above this applies to every kind: a note carries a
+   * velocity just as a chord does.
    */
   setSegmentsVelocity: (segmentIds: string[], velocity: number) => void;
   clearSegmentsVoicing: (segmentIds: string[]) => void;
@@ -168,14 +183,6 @@ interface ProjectState {
     segmentIds: string[],
     target: import('@/engine/chordOperations').SegmentKindTarget
   ) => void;
-  /**
-   * Turn recorded blocks into the named material they spell — a chord, or a line
-   * of notes.
-   *
-   * @returns the ids of the segments produced, so the caller can keep them
-   *   selected; empty when nothing could be converted.
-   */
-  convertCustomSegments: (segmentIds: string[]) => string[];
   setLoopRegion: (start: number | null, end: number | null) => void;
   /** Clone an instrument and all its chord segments. Returns the new instrument's id. */
   duplicateTrack: (sourceTrackId: string) => string | null;
@@ -652,11 +659,18 @@ export const projectStore = create<ProjectState>((set, get) => ({
    * shove the rest of the song along. Re-calling it with the same segment id and a
    * longer duration is how a held key grows its block — `placeSegmentInBar` moves a
    * segment it already holds rather than duplicating it.
+   *
+   * Both the clear and the placement are confined to the segment's own sub-lane, and
+   * the instrument grows a lane when the segment needs one it does not have. That is
+   * what lets a chord be recorded as the several simultaneous blocks it is: each key
+   * lands in its own lane instead of erasing the one before it, and nothing played is
+   * ever refused for want of somewhere to put it.
    */
   recordSegment: (trackId, startBeat, segment, onCommit) => {
     const project = get().project;
     if (!project) return;
-    if (!project.tracks.some(t => t.id === trackId)) return;
+    const track = project.tracks.find(t => t.id === trackId);
+    if (!track) return;
     // Recording is bounded by the song: bars are added deliberately, not by holding
     // a key down past the last one.
     if (startBeat < 0 || startBeat >= getTotalBeats(project.bars, project.timeSignature)) return;
@@ -665,13 +679,15 @@ export const projectStore = create<ProjectState>((set, get) => ({
     const target = project.bars[barIndex];
     const offset = getBarStartBeat(project.bars, barIndex, project.timeSignature);
 
+    const lane = laneOf(segment);
     const cleared = clearRange(
       project.bars,
       project.timeSignature,
       trackId,
       startBeat,
       startBeat + segment.duration,
-      segment.id
+      segment.id,
+      lane
     );
     // Lift any earlier copy of the take out first, so a shrinking one leaves no
     // stale remains behind for the ripple in `placedIn` to find.
@@ -687,7 +703,21 @@ export const projectStore = create<ProjectState>((set, get) => ({
     const bars = mapBar(lifted, target.id, trackId, chords =>
       placedIn(chords, segment, startBeat - offset, capacity)
     );
-    const next = applyBars(project, bars);
+
+    // The instrument grows to hold the lane just written to. It never shrinks back
+    // on its own: an emptied lane keeps its row so the strip's height does not
+    // change under the cursor mid-take.
+    const grown =
+      lane < trackLaneCount(track)
+        ? project
+        : {
+            ...project,
+            tracks: project.tracks.map(t =>
+              t.id === trackId ? { ...t, laneCount: lane + 1 } : t
+            ),
+          };
+
+    const next = applyBars(grown, bars);
     set({ project: next });
     onCommit?.(next);
   },
@@ -737,8 +767,32 @@ export const projectStore = create<ProjectState>((set, get) => ({
     set({ project: applyBars(project, bars) });
   },
 
-  moveSegment: (segmentId: string, targetBarId: string, startBeat: number) => {
-    get().moveSegments([{ segmentId, targetBarId, startBeat }]);
+  moveSegment: (segmentId: string, targetBarId: string, startBeat: number, lane?: number) => {
+    get().moveSegments([{ segmentId, targetBarId, startBeat, lane }]);
+  },
+
+  setTrackLaneCount: (trackId: string, count: number) => {
+    const project = get().project;
+    if (!project) return;
+    if (!Number.isFinite(count)) return;
+
+    const next = Math.max(1, Math.floor(count));
+    const track = project.tracks.find(t => t.id === trackId);
+    if (!track || trackLaneCount(track) === next) return;
+
+    // Shrinking over occupied lanes is a no-op rather than an error: the buttons
+    // that call this are a gesture, and a gesture that cannot apply simply does
+    // not, exactly as a drop that missed every bar does nothing.
+    const occupied = flattenSegments(project.bars, trackId).some(s => laneOf(s) >= next);
+    if (occupied) return;
+
+    set({
+      project: {
+        ...project,
+        tracks: project.tracks.map(t => (t.id === trackId ? { ...t, laneCount: next } : t)),
+        updatedAt: new Date(),
+      },
+    });
   },
 
   /**
@@ -791,17 +845,23 @@ export const projectStore = create<ProjectState>((set, get) => ({
         : bar
     );
 
+    // Lane joins the ordering key so a chord's worth of stacked blocks lands in a
+    // fixed order, however the caller happened to list them.
     const ordered = [...resolved].sort(
       (a, b) =>
         barIndexById.get(a.move.targetBarId)! - barIndexById.get(b.move.targetBarId)! ||
-        a.move.startBeat - b.move.startBeat
+        a.move.startBeat - b.move.startBeat ||
+        (a.move.lane ?? laneOf(a.segment)) - (b.move.lane ?? laneOf(b.segment))
     );
 
     for (const { move, segment } of ordered) {
       const target = bars.find(bar => bar.id === move.targetBarId)!;
       const capacity = getBarBeats(target, project.timeSignature);
+      // A move with no lane keeps the one the block is in, so every caller that
+      // predates sub-lanes goes on meaning what it did.
+      const placed = move.lane === undefined ? segment : { ...segment, lane: move.lane };
       bars = mapBar(bars, move.targetBarId, trackId, chords =>
-        placedIn(chords, segment, move.startBeat, capacity)
+        placedIn(chords, placed, move.startBeat, capacity)
       );
     }
 
@@ -942,49 +1002,6 @@ export const projectStore = create<ProjectState>((set, get) => ({
       convertSegmentKind(segment, scale, target)
     );
     if (next) set({ project: next });
-  },
-
-  /**
-   * Convert recorded blocks into named material: a chord when the take spells one,
-   * a run of note segments when it was played one note at a time.
-   *
-   * One block can become several segments, which is why this cannot go through
-   * `withTransformedSegments` like every other segment edit — it splices a list in
-   * where a single block was. Blocks that spell neither are skipped rather than
-   * mangled; `convertCustomSegment` is also what the inspector asks in order to
-   * explain the refusal before the user presses anything.
-   */
-  convertCustomSegments: (segmentIds: string[]) => {
-    const project = get().project;
-    if (!project) return [];
-
-    const fallback = keyScale(project);
-    const produced: string[] = [];
-    let bars = project.bars;
-
-    for (const segmentId of segmentIds) {
-      // Re-located each time round, because the bars are rebuilt as we go.
-      const located = findSegment(bars, segmentId);
-      if (!located) continue;
-
-      const result = convertCustomSegment(
-        located.segment,
-        segmentScale(located.segment, fallback)
-      );
-      if (result.kind === 'blocked') continue;
-
-      produced.push(...result.segments.map(s => s.id));
-      bars = mapBar(bars, located.bar.id, located.trackId, chords =>
-        chords.flatMap(c => (c.id === segmentId ? result.segments : [c]))
-      );
-    }
-
-    if (produced.length === 0) return [];
-
-    // One write for the whole selection, so however many blocks were converted it
-    // is one visual step and one history entry.
-    set({ project: applyBars(project, bars) });
-    return produced;
   },
 
   // The single-segment forms, kept because plenty of callers only ever have one.
@@ -1165,6 +1182,8 @@ export const projectStore = create<ProjectState>((set, get) => ({
       id: newId,
       name: `${source.name} (copy)`,
       instrument: source.instrument,
+      // The copy holds the same blocks in the same lanes, so it needs the same rows.
+      laneCount: source.laneCount,
       volume: source.volume,
       volumeAutomation: source.volumeAutomation,
       pan: source.pan,

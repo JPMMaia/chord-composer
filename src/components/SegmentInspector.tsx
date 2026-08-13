@@ -1,13 +1,8 @@
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { findSegment } from '@/engine/timeline';
-import {
-  convertCustomSegment,
-  currentKind,
-  resolveSegmentChord,
-  segmentVelocity,
-} from '@/engine/chordOperations';
-import type { CustomConversion, SegmentKindTarget } from '@/engine/chordOperations';
+import { currentKind, resolveSegmentChord, segmentVelocity } from '@/engine/chordOperations';
+import type { SegmentKindTarget } from '@/engine/chordOperations';
 import { projectScale, segmentScale } from '@/engine/scales';
 import { ScaleSelect } from '@/components/ScaleSelect';
 import { DEFAULT_VELOCITY, voicedPitches } from '@/engine/voicing';
@@ -140,9 +135,7 @@ export function SegmentInspector() {
   const setSegmentsVelocity = projectStore(s => s.setSegmentsVelocity);
   const withRecording = projectStore(s => s.withRecording);
   const convertSegmentsKind = projectStore(s => s.convertSegmentsKind);
-  const convertCustomSegments = projectStore(s => s.convertCustomSegments);
   const setSegmentsScale = projectStore(s => s.setSegmentsScale);
-  const setSelectedSegments = selectionStore(s => s.setSelectedSegments);
 
   const located = project
     ? selectedSegmentIds
@@ -161,19 +154,9 @@ export function SegmentInspector() {
 
   const segments = located.map(l => l.segment);
   const ids = segments.map(s => s.id);
-  // Custom blocks are excluded alongside notes: a recorded take has no named
-  // harmony, so there is nothing to invert, space, double or break.
-  const chords = located.filter(
-    l => l.segment.kind !== 'note' && l.segment.kind !== 'custom'
-  );
+  // A note has no named harmony, so there is nothing to invert, space, double or break.
+  const chords = located.filter(l => l.segment.kind !== 'note');
   const first = located[0];
-
-  // A recorded block names no degree and is written in no key, so neither
-  // conversion nor retuning means anything for it. Withheld for the whole
-  // selection when any of it is custom rather than quietly applied to the rest:
-  // the controls act on everything selected, and a half-applied edit is worse
-  // than an absent one.
-  const anyCustom = segments.some(s => s.kind === 'custom');
 
   const fallbackScale = projectScale(project.key, project.keyMode);
   const scaleOf = (segment: ChordSegment) => segmentScale(segment, fallbackScale);
@@ -206,41 +189,36 @@ export function SegmentInspector() {
         }
       />
 
-      {!anyCustom && (
-        <Section label="Kind">
-          <select
-            data-testid="segment-kind-select"
-            value={sharedKind ?? ''}
-            disabled={located.length === 0}
-            onChange={e => convertSegmentsKind(ids, e.target.value as SegmentKindTarget)}
-            className={FIELD_CLASS}
-          >
-            <option value="note">Note</option>
-            <option value="triad">Triad</option>
-            <option value="seventh">Seventh</option>
-          </select>
-        </Section>
-      )}
+      <Section label="Kind">
+        <select
+          data-testid="segment-kind-select"
+          value={sharedKind ?? ''}
+          disabled={located.length === 0}
+          onChange={e => convertSegmentsKind(ids, e.target.value as SegmentKindTarget)}
+          className={FIELD_CLASS}
+        >
+          <option value="note">Note</option>
+          <option value="triad">Triad</option>
+          <option value="seventh">Seventh</option>
+        </select>
+      </Section>
 
       {/* Outside the chords-only branch below: a note is written in a key too, and
           retuning one moves it to the same degree of the new scale. */}
-      {!anyCustom && (
-        <Section label="Key">
-          <ScaleSelect
-            idPrefix="segment"
-            layout="stacked"
-            root={sharedRoot}
-            type={sharedType}
-            onChange={patch => setSegmentsScale(ids, patch)}
-          />
-        </Section>
-      )}
+      <Section label="Key">
+        <ScaleSelect
+          idPrefix="segment"
+          layout="stacked"
+          root={sharedRoot}
+          type={sharedType}
+          onChange={patch => setSegmentsScale(ids, patch)}
+        />
+      </Section>
 
-      {/* Offered for every kind, unlike the two above: a note and a recorded block
-          both sound at some velocity, and only a chord has tones to voice. */}
+      {/* Offered for every kind, unlike the voicing controls below: a note sounds at
+          some velocity too, but only a chord has tones to voice. */}
       <VelocitySection
         shared={sharedValue(segments.map(s => segmentVelocity(s)))}
-        allCustom={segments.every(s => s.kind === 'custom')}
         onChange={(velocity, live) =>
           live
             ? withRecording(() => setSegmentsVelocity(ids, velocity))
@@ -248,29 +226,8 @@ export function SegmentInspector() {
         }
       />
 
-      {/* The one place a block's actual notes are shown, because a recorded block
-          is the one kind whose notes cannot be read off its name. */}
-      {segments.length === 1 && first.segment.kind === 'custom' && (
-        <CustomNotes segment={first.segment} />
-      )}
-
-      {/* Offered only when the whole selection is recordings, matching how the
-          controls above are withheld from a mixed one. */}
-      {segments.length > 0 && segments.every(s => s.kind === 'custom') && (
-        <ConvertCustom
-          conversions={segments.map(s => convertCustomSegment(s, scaleOf(s)))}
-          onConvert={() => setSelectedSegments(convertCustomSegments(ids))}
-        />
-      )}
-
       {chords.length === 0 ? (
-        anyCustom ? (
-          <p className="text-xs text-gray-500">
-            A recorded block holds the notes it was played with.
-          </p>
-        ) : (
-          <p className="text-xs text-gray-500">A single note has no chord tones to voice.</p>
-        )
+        <p className="text-xs text-gray-500">A single note has no chord tones to voice.</p>
       ) : (
         <>
           {perToneControls && (
@@ -410,29 +367,18 @@ function Identity({
     );
   }
 
-  const isCustom = segment.kind === 'custom';
-  const played = segment.customNotes ?? [];
-
   return (
     <div className="text-sm text-gray-300 space-y-0.5">
-      <div>
-        {isCustom
-          ? `${played.length} ${played.length === 1 ? 'note' : 'notes'}`
-          : (segment.chordSymbol ?? segment.root)}
-      </div>
+      <div>{segment.chordSymbol ?? segment.root}</div>
       <div className="text-xs text-gray-500">
-        {isCustom ? 'Recorded' : segment.kind === 'note' ? 'Note' : 'Chord'}
+        {segment.kind === 'note' ? 'Note' : 'Chord'}
         {segment.romanNumeral ? ` · ${segment.romanNumeral}` : ''}
       </div>
-      {/* A recorded block has no one register to state — every pitch in it is
-          absolute, and the list below names them all. */}
-      {!isCustom && (
-        <div className="text-xs text-gray-500">
-          {segment.kind === 'note' && segment.pitch !== undefined
-            ? midiToNoteLabel(segment.pitch)
-            : `Octave ${segment.octave ?? 4}`}
-        </div>
-      )}
+      <div className="text-xs text-gray-500">
+        {segment.kind === 'note' && segment.pitch !== undefined
+          ? midiToNoteLabel(segment.pitch)
+          : `Octave ${segment.octave ?? 4}`}
+      </div>
       {/* Named as a note value and located in the bar's own metre — "1.5 beats"
           says nothing about whether the bar counts in quarters or dotted quarters. */}
       <div className="text-xs text-gray-500">
@@ -460,11 +406,9 @@ function Identity({
  */
 function VelocitySection({
   shared,
-  allCustom,
   onChange,
 }: {
   shared: number | undefined;
-  allCustom: boolean;
   /** `live` marks a mid-drag write, to be gated out of the undo history. */
   onChange: (velocity: number, live: boolean) => void;
 }) {
@@ -505,113 +449,8 @@ function VelocitySection({
           {shared ?? '—'}
         </span>
       </div>
-      {/* Said outright, because the slider plainly does less here than it looks
-          like it does: almost every note in a take states its own velocity. */}
-      {allCustom && (
-        <p className="text-xs text-gray-500 mt-1">
-          Recorded notes keep the velocity they were played with. This sets the one
-          used by any that state none.
-        </p>
-      )}
     </Section>
   );
-}
-
-/**
- * What a recorded block actually holds, note by note.
- *
- * Read-only: a take is edited by playing it again, not by retyping it. It is here
- * at all because a custom block is the one kind whose contents cannot be read off
- * its name — "Recorded" says nothing about what was played, and the block on the
- * timeline has room for three pitches at most.
- *
- * Ordered by onset, then by pitch, so a chord reads bottom-up and a run reads
- * left-to-right — which is the order they were played in either way.
- */
-function CustomNotes({ segment }: { segment: ChordSegment }) {
-  const notes = [...(segment.customNotes ?? [])].sort(
-    (a, b) => a.startBeat - b.startBeat || a.pitch - b.pitch
-  );
-
-  if (notes.length === 0) {
-    return <p className="text-xs text-gray-500">This block holds no notes.</p>;
-  }
-
-  return (
-    <Section label="Notes">
-      <ul className="space-y-0.5 max-h-40 overflow-y-auto">
-        {notes.map((note, index) => (
-          <li
-            key={`${note.pitch}-${note.startBeat}-${index}`}
-            data-testid={`custom-note-${index}`}
-            className="flex justify-between gap-2 text-xs text-gray-400 tabular-nums"
-          >
-            <span className="text-gray-300">{midiToNoteLabel(note.pitch)}</span>
-            <span>
-              +{formatBeats(note.startBeat)} · {formatBeats(note.duration)}
-            </span>
-            <span title="Velocity">{note.velocity ?? DEFAULT_VELOCITY}</span>
-          </li>
-        ))}
-      </ul>
-    </Section>
-  );
-}
-
-/**
- * The one way out of a recording: turn it into the material it spells.
- *
- * A take is otherwise a dead end — nothing about it can be transposed by degree,
- * inverted or retuned, because it names no harmony. Converting it is lossy on
- * purpose: what comes back is the *named* chord or line, close-voiced in the
- * register it sounded, not the exact spacing and micro-timing that were played.
- *
- * A block that spells neither one chord nor one line is refused rather than
- * approximated, and the button says why. Two segments cannot share a beat in one
- * lane, so splitting such a block would ripple its notes apart and rewrite the
- * timing it was played with — which is precisely what a recording is for.
- */
-function ConvertCustom({
-  conversions,
-  onConvert,
-}: {
-  conversions: CustomConversion[];
-  onConvert: () => void;
-}) {
-  const blocked = conversions.find(c => c.kind === 'blocked');
-  const label =
-    conversions.length > 1
-      ? `Convert ${conversions.length} blocks`
-      : conversions[0]?.kind === 'chord'
-        ? 'Convert to chord'
-        : 'Convert to notes';
-
-  return (
-    <div className="space-y-1">
-      <button
-        type="button"
-        data-testid="convert-custom"
-        disabled={blocked !== undefined}
-        title={blocked?.reason}
-        onClick={onConvert}
-        className="w-full px-3 py-1.5 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-gray-700"
-      >
-        {label}
-      </button>
-      {/* Said in the panel as well as in the tooltip: a `title` is invisible on a
-          touch screen, and this is a refusal the user is owed an answer for. */}
-      {blocked && (
-        <p data-testid="convert-custom-reason" className="text-xs text-gray-500">
-          {blocked.reason}
-        </p>
-      )}
-    </div>
-  );
-}
-
-/** Beats, to at most two decimals, without a trailing `.00` on the whole ones. */
-function formatBeats(beats: number): string {
-  return `${Math.round(beats * 100) / 100}`;
 }
 
 /**

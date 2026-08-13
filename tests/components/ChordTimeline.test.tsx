@@ -69,15 +69,20 @@ function fireDrag(el: HTMLElement, type: 'dragOver' | 'drop', dataTransfer: unkn
   fireEvent(el, event);
 }
 
+/** One bar's sub-lane row. Lane 0 is the only one most tests care about. */
+function laneEl(barId: string, lane = 0): HTMLElement {
+  return screen.getByTestId(`timeline-lane-${barId}-${lane}`);
+}
+
 /**
  * Drop a palette item into a bar's lane at `beat` beats from that bar's start.
  * jsdom reports a zeroed bounding rect, so clientX is the offset within the lane.
  */
-function dropAt(barId: string, item: PaletteItem, beat: number) {
-  const lane = screen.getByTestId(`timeline-lane-${barId}`);
+function dropAt(barId: string, item: PaletteItem, beat: number, lane = 0) {
+  const target = laneEl(barId, lane);
   const dataTransfer = makeDataTransfer(item);
-  fireDrag(lane, 'dragOver', dataTransfer, beat * PIXELS_PER_BEAT);
-  fireDrag(lane, 'drop', dataTransfer, beat * PIXELS_PER_BEAT);
+  fireDrag(target, 'dragOver', dataTransfer, beat * PIXELS_PER_BEAT);
+  fireDrag(target, 'drop', dataTransfer, beat * PIXELS_PER_BEAT);
 }
 
 /**
@@ -86,9 +91,15 @@ function dropAt(barId: string, item: PaletteItem, beat: number) {
  * `document.elementFromPoint` is stubbed to the destination lane: jsdom has no
  * layout engine, so hit-testing has to be told what the pointer is over.
  */
-function dragBlock(segmentId: string, toBarId: string, fromBeat: number, toBeat: number) {
+function dragBlock(
+  segmentId: string,
+  toBarId: string,
+  fromBeat: number,
+  toBeat: number,
+  toLane = 0
+) {
   const block = screen.getByTestId(`chord-block-${segmentId}`);
-  const target = screen.getByTestId(`timeline-lane-${toBarId}`);
+  const target = laneEl(toBarId, toLane);
   document.elementFromPoint = () => target;
 
   fireEvent.pointerDown(block, { clientX: fromBeat * PIXELS_PER_BEAT, pointerId: 1 });
@@ -604,7 +615,7 @@ describe('ChordTimeline', () => {
       const [first, , last] = threeBlocks();
       selectionStore.getState().setSelectedSegments([first, last]);
 
-      fireEvent.pointerDown(screen.getByTestId(`timeline-lane-${bars()[1].id}`));
+      fireEvent.pointerDown(laneEl(bars()[1].id));
 
       expect(selected()).toEqual([]);
       expect(selectionStore.getState().selectedBarId).toBe(bars()[1].id);
@@ -687,7 +698,7 @@ describe('ChordTimeline', () => {
 
   it('selects a bar when its lane is pressed', () => {
     render(<ChordTimeline />);
-    fireEvent.pointerDown(screen.getByTestId(`timeline-lane-${bars()[1].id}`));
+    fireEvent.pointerDown(laneEl(bars()[1].id));
     expect(selectionStore.getState().selectedBarId).toBe(bars()[1].id);
   });
 
@@ -950,66 +961,103 @@ describe('ChordTimeline', () => {
     });
   });
 
-  describe('custom blocks', () => {
-    /** Put a recorded block on the timeline, as MIDI recording would. */
-    function placeCustom(pitches: number[]) {
-      const segment: ChordSegment = {
-        id: 'take-1',
-        kind: 'custom',
-        startBeat: 0,
+  // A sub-lane is a row, and a row exists only so that two blocks can occupy the
+  // same beats. Everything above this point works one lane deep, which is what
+  // every project looks like until something has to sound at the same time as
+  // something else.
+  describe('sub-lanes', () => {
+    /** Put a recorded note block on the timeline, as MIDI recording would. */
+    function record(id: string, pitch: number, lane: number, startBeat = 0) {
+      projectStore.getState().recordSegment(trackId(), startBeat, {
+        id,
+        kind: 'note',
+        pitch,
+        lane,
+        startBeat,
         duration: 2,
-        customNotes: pitches.map(pitch => ({ pitch, startBeat: 0, duration: 2 })),
-      };
-      projectStore.getState().recordSegment(trackId(), 0, segment);
-      return segment;
+      } satisfies ChordSegment);
     }
 
-    it('names the block after the notes in it', () => {
-      placeCustom([60, 64, 67]);
+    it('shows one row until an instrument needs a second', () => {
       render(<ChordTimeline />);
-
-      expect(screen.getByTestId('chord-block-take-1')).toHaveAccessibleName('Recorded C4 E4 G4');
+      expect(laneEl(bars()[0].id)).toBeInTheDocument();
+      expect(screen.queryByTestId(`timeline-lane-${bars()[0].id}-1`)).not.toBeInTheDocument();
     });
 
-    it('lists only the first few, and counts the rest', () => {
-      placeCustom([60, 62, 64, 65, 67]);
+    it('grows a row when a block is recorded into a lane the track lacks', () => {
+      record('lo', 60, 0);
+      record('hi', 64, 1);
       render(<ChordTimeline />);
 
-      expect(screen.getByTestId('chord-block-take-1')).toHaveAccessibleName(
-        'Recorded C4 D4 E4 +2'
-      );
+      expect(tracks()[0].laneCount).toBe(2);
+      expect(screen.getByTestId(`timeline-lane-${bars()[0].id}-1`)).toBeInTheDocument();
     });
 
-    it('names each pitch once, however many times it was played', () => {
-      const segment: ChordSegment = {
-        id: 'take-1',
-        kind: 'custom',
-        startBeat: 0,
-        duration: 2,
-        customNotes: [
-          { pitch: 60, startBeat: 0, duration: 0.5 },
-          { pitch: 60, startBeat: 1, duration: 0.5 },
-          { pitch: 64, startBeat: 1.5, duration: 0.5 },
-        ],
-      };
-      projectStore.getState().recordSegment(trackId(), 0, segment);
+    it('keeps two blocks on the same beat instead of rippling them apart', () => {
+      record('lo', 60, 0);
+      record('hi', 64, 1);
       render(<ChordTimeline />);
 
-      expect(screen.getByTestId('chord-block-take-1')).toHaveAccessibleName('Recorded C4 E4');
+      expect(segments().map(s => s.startBeat)).toEqual([0, 0]);
     });
 
-    it('wears no octave badge — its notes carry their own registers', () => {
-      placeCustom([60, 64, 67]);
+    it('draws each block in its own row', () => {
+      record('lo', 60, 0);
+      record('hi', 64, 1);
       render(<ChordTimeline />);
 
-      expect(screen.queryByTestId('octave-badge-take-1')).not.toBeInTheDocument();
+      const barId = bars()[0].id;
+      expect(within(laneEl(barId, 0)).getByTestId('chord-block-lo')).toBeInTheDocument();
+      expect(within(laneEl(barId, 1)).getByTestId('chord-block-hi')).toBeInTheDocument();
     });
 
-    it('generates the notes it was played with', () => {
-      placeCustom([60, 64, 67]);
+    it('drops a palette block into the row it was dropped on', () => {
+      record('lo', 60, 0);
       render(<ChordTimeline />);
 
-      expect(barNotes(bars()[0], trackId()).map(n => n.pitch)).toEqual([60, 64, 67]);
+      fireEvent.click(screen.getByLabelText('Add lane'));
+      dropAt(bars()[0].id, cMajorChords()[0], 0, 1);
+
+      const dropped = segments().find(s => s.id !== 'lo')!;
+      expect(dropped.lane).toBe(1);
+      expect(dropped.startBeat).toBe(0);
+    });
+
+    it('drags a block from one row to another', () => {
+      record('lo', 60, 0);
+      render(<ChordTimeline />);
+
+      fireEvent.click(screen.getByLabelText('Add lane'));
+      dragBlock('lo', bars()[0].id, 0, 0, 1);
+
+      expect(segments()[0].lane).toBe(1);
+    });
+
+    it('adds and removes a row from the gutter', () => {
+      render(<ChordTimeline />);
+
+      fireEvent.click(screen.getByLabelText('Add lane'));
+      expect(tracks()[0].laneCount).toBe(2);
+
+      fireEvent.click(screen.getByLabelText('Remove lane'));
+      expect(tracks()[0].laneCount).toBe(1);
+    });
+
+    it('refuses to remove a row that still holds blocks', () => {
+      record('lo', 60, 0);
+      record('hi', 64, 1);
+      render(<ChordTimeline />);
+
+      expect(screen.getByLabelText('Remove lane')).toBeDisabled();
+      expect(tracks()[0].laneCount).toBe(2);
+    });
+
+    it('generates the notes both rows sound', () => {
+      record('lo', 60, 0);
+      record('hi', 64, 1);
+      render(<ChordTimeline />);
+
+      expect(barNotes(bars()[0], trackId()).map(n => n.pitch).sort()).toEqual([60, 64]);
     });
   });
 

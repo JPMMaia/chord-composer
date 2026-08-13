@@ -9,13 +9,12 @@ import {
   chordFromRomanNumeral,
   chordFromSymbol,
   chordToNotes,
-  detectChord,
   invertIntervals,
   midiToOctave,
   midiToNoteLabel,
 } from '@/engine/chords';
 import { getScalePitches } from '@/engine/scales';
-import { Scale, NoteName, ChordQuality } from '@/types/music';
+import { Scale, ChordQuality } from '@/types/music';
 
 describe('chords', () => {
   describe('getDiatonicChords', () => {
@@ -330,81 +329,6 @@ describe('chords', () => {
     it("names the lowest and highest keys of an 88-key piano", () => {
       expect(midiToNoteLabel(21)).toBe('A0');
       expect(midiToNoteLabel(108)).toBe('C8');
-    });
-  });
-
-  describe('detectChord', () => {
-    it("names a root-position triad in the register it sounds", () => {
-      expect(detectChord([60, 64, 67])).toEqual({
-        root: 'C',
-        quality: 'major',
-        inversion: 0,
-        octave: 4,
-      });
-    });
-
-    it("hears a first inversion as the same chord with the third in the bass", () => {
-      // E4 G4 C5 — the root is C, sounding above a bass that is not it.
-      expect(detectChord([64, 67, 72])).toEqual({
-        root: 'C',
-        quality: 'major',
-        inversion: 1,
-        octave: 4,
-      });
-    });
-
-    it("recovers the register from the bass, not from the lowest chord tone", () => {
-      // C major with the third in the bass an octave down: E3 G3 C4.
-      expect(detectChord([52, 55, 60])).toEqual({
-        root: 'C',
-        quality: 'major',
-        inversion: 1,
-        octave: 3,
-      });
-    });
-
-    it("ignores octave doublings and voicing order", () => {
-      expect(detectChord([67, 60, 64, 72, 79])).toEqual({
-        root: 'C',
-        quality: 'major',
-        inversion: 0,
-        octave: 4,
-      });
-    });
-
-    it("names a seventh chord", () => {
-      // B3 D4 F4 A4 — the half-diminished seventh on B.
-      expect(detectChord([59, 62, 65, 69])).toMatchObject({
-        root: 'B',
-        quality: 'halfDim7',
-        inversion: 0,
-      });
-    });
-
-    it("resolves a symmetric dim7 to the chord its bass implies", () => {
-      // Every note of a dim7 could be the root; the bass is what decides.
-      expect(detectChord([60, 63, 66, 69])).toMatchObject({ root: 'C', quality: 'dim7' });
-      expect(detectChord([63, 66, 69, 72])).toMatchObject({ root: 'D#', quality: 'dim7' });
-    });
-
-    it("names nothing for a cluster that spells no chord", () => {
-      expect(detectChord([60, 62, 64])).toBeUndefined();
-    });
-
-    it("names nothing for fewer than three pitch classes or more than four", () => {
-      expect(detectChord([60])).toBeUndefined();
-      expect(detectChord([60, 67])).toBeUndefined();
-      expect(detectChord([60, 72])).toBeUndefined();
-      expect(detectChord([60, 62, 64, 65, 67])).toBeUndefined();
-    });
-
-    it("names nothing at all for no pitches", () => {
-      expect(detectChord([])).toBeUndefined();
-    });
-
-    it("keeps the register inside the range a segment can carry", () => {
-      // C0 E0 G0 sits below MIN_SEGMENT_OCTAVE, which a segment cannot express.
-      expect(detectChord([12, 16, 19])?.octave).toBe(1);
     });
   });
 });

@@ -10,9 +10,11 @@ import {
   getBarPulse,
   getBarStartBeat,
   getTotalBeats,
+  laneOf,
   MIN_SEGMENT_BEATS,
   snapBeat,
   SNAP_OPTIONS,
+  trackLaneCount,
 } from '@/engine/timeline';
 import { describeMeter } from '@/engine/meterDisplay';
 import { paletteItemToSegment, type PaletteItem } from '@/engine/palette';
@@ -85,6 +87,8 @@ function gridPositions(beats: number, steps: number[], covered: number[]): numbe
 interface SegmentPlacement {
   barIndex: number;
   startBeat: number;
+  /** Which of the instrument's stacked sub-lanes. */
+  lane: number;
 }
 
 /**
@@ -126,6 +130,18 @@ const RANGE_HANDLE_PX = 8;
 /** Attribute the drag hit-test looks for; a lane carries its bar's id. */
 const LANE_ATTRIBUTE = 'data-timeline-lane';
 
+/** Which of the bar's stacked sub-lanes a lane element is. */
+const SUBLANE_ATTRIBUTE = 'data-timeline-sublane';
+
+/** Height of one sub-lane row, in pixels. Matches the `h-20` a single lane used to be. */
+const SUBLANE_HEIGHT = 80;
+
+/** The sub-lane index an element carries, or 0 when it names none. */
+function sublaneOfElement(lane: Element): number {
+  const raw = Number(lane.getAttribute(SUBLANE_ATTRIBUTE));
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+}
+
 /**
  * The chord area: every bar of the project laid out on one scrollable horizontal
  * timeline, with bar lines, beat gridlines and per-bar meters.
@@ -142,6 +158,7 @@ export const ChordTimeline: React.FC = () => {
   const moveSegment = projectStore(s => s.moveSegment);
   const resizeSegmentDuration = projectStore(s => s.resizeSegmentDuration);
   const setBarTimeSignature = projectStore(s => s.setBarTimeSignature);
+  const setTrackLaneCount = projectStore(s => s.setTrackLaneCount);
   const clearVolumeAutomation = projectStore(s => s.clearVolumeAutomation);
   const setLoopRegion = projectStore(s => s.setLoopRegion);
 
@@ -171,7 +188,11 @@ export const ChordTimeline: React.FC = () => {
   const setTimelineMouseBeat = editorStore(s => s.setTimelineMouseBeat);
 
   /** Where the insertion caret sits while a palette block hovers. */
-  const [dropIndicator, setDropIndicator] = useState<{ barId: string; beat: number } | null>(null);
+  const [dropIndicator, setDropIndicator] = useState<{
+    barId: string;
+    lane: number;
+    beat: number;
+  } | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [rangeDrag, setRangeDrag] = useState<RangeDragState | null>(null);
 
@@ -213,6 +234,20 @@ export const ChordTimeline: React.FC = () => {
       const grabbed = state.origins.get(state.segmentId);
       if (!grabbed) return;
 
+      // One lane delta for the whole selection, for the same reason as the bar and
+      // beat deltas below: a chord dragged down a row must stay a chord. The live
+      // track is read here rather than closed over, so the gesture cannot clamp
+      // against a lane count that has since grown.
+      const draggedTrack = currentProject.tracks.find(
+        t => t.id === selectionStore.getState().selectedTrackId
+      );
+      const laneCount = draggedTrack ? trackLaneCount(draggedTrack) : 1;
+      const laneDelta = clamp(
+        sublaneOfElement(lane) - grabbed.lane,
+        -Math.min(...[...state.origins.values()].map(o => o.lane)),
+        laneCount - 1 - Math.max(...[...state.origins.values()].map(o => o.lane))
+      );
+
       // The grabbed block follows the pointer; everything else in the selection
       // keeps its offset from it, so the shape of the selection is preserved.
       const startBeat = snapBeat(beatIn(lane, e.clientX) - state.grabOffset, snapBeats);
@@ -253,12 +288,14 @@ export const ChordTimeline: React.FC = () => {
         preview.set(segmentId, {
           barIndex: origin.barIndex + barDelta,
           startBeat: origin.startBeat + beatDelta,
+          lane: origin.lane + laneDelta,
         });
       }
 
       const moved =
         state.moved ||
         barDelta !== 0 ||
+        laneDelta !== 0 ||
         Math.abs(beatDelta) * pixelsPerBeat > DRAG_THRESHOLD_PX;
 
       setDrag({ ...state, preview, moved });
@@ -277,6 +314,7 @@ export const ChordTimeline: React.FC = () => {
           segmentId,
           targetBarId: currentBars[placement.barIndex].id,
           startBeat: placement.startBeat,
+          lane: placement.lane,
         }))
       );
     };
@@ -431,6 +469,26 @@ export const ChordTimeline: React.FC = () => {
   /** Whether the selected instrument has a curve, and so something to clear. */
   const hasAutomation = (selectedTrack?.volumeAutomation?.length ?? 0) > 0;
 
+  /**
+   * The sub-lane rows to draw, as indices.
+   *
+   * Taken from the instrument's own count, but never fewer rows than there are
+   * lanes with something in them: a block left in a lane the count no longer
+   * covers still has to be visible, or it would be unreachable and inaudibly
+   * present. `setTrackLaneCount` refuses to create that state; a hand-edited file
+   * can still arrive in it.
+   */
+  const laneCount = Math.max(
+    selectedTrack ? trackLaneCount(selectedTrack) : 1,
+    ...flattenSegments(bars, selectedTrackId).map(s => laneOf(s) + 1),
+    1
+  );
+  const laneIndices = Array.from({ length: laneCount }, (_, i) => i);
+  /** True while the last lane is empty, so removing it takes nothing with it. */
+  const canRemoveLane =
+    laneCount > 1 &&
+    !flattenSegments(bars, selectedTrackId).some(s => laneOf(s) >= laneCount - 1);
+
   /** The range to draw: the one being dragged if there is one, else the stored one. */
   const shownRange = rangeDrag
     ? {
@@ -467,14 +525,14 @@ export const ChordTimeline: React.FC = () => {
     return Number.isFinite(beat) ? Math.max(0, beat) : 0;
   };
 
-  const handleDragOver = (e: React.DragEvent<HTMLDivElement>, bar: Bar) => {
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>, bar: Bar, lane: number) => {
     // Without this the browser refuses the drop outright.
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
-    setDropIndicator({ barId: bar.id, beat: snapBeat(beatAt(e), snapBeats) });
+    setDropIndicator({ barId: bar.id, lane, beat: snapBeat(beatAt(e), snapBeats) });
   };
 
-  const handleDrop = (e: React.DragEvent<HTMLDivElement>, bar: Bar) => {
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>, bar: Bar, lane: number) => {
     e.preventDefault();
     setDropIndicator(null);
 
@@ -492,9 +550,14 @@ export const ChordTimeline: React.FC = () => {
     insertSegment(
       bar.id,
       snapBeat(beatAt(e), snapBeats),
-      // The palette's key rather than the item's own: the block is written in
-      // whatever the strip is currently offering, and carries that from here on.
-      paletteItemToSegment(item, DROP_DURATION_BEATS, paletteScale),
+      {
+        // The palette's key rather than the item's own: the block is written in
+        // whatever the strip is currently offering, and carries that from here on.
+        ...paletteItemToSegment(item, DROP_DURATION_BEATS, paletteScale),
+        // The row it was dropped on, so a block can be stacked over one already
+        // sounding rather than shoving it along.
+        lane,
+      },
       selectedTrackId
     );
     selectBar(bar.id);
@@ -507,7 +570,7 @@ export const ChordTimeline: React.FC = () => {
     );
     if (barIndex < 0) return null;
     const segment = barChords(bars[barIndex], selectedTrackId).find(c => c.id === segmentId)!;
-    return { barIndex, startBeat: segment.startBeat ?? 0 };
+    return { barIndex, startBeat: segment.startBeat ?? 0, lane: laneOf(segment) };
   };
 
   /**
@@ -582,34 +645,56 @@ export const ChordTimeline: React.FC = () => {
 
   /** Move a block by one grid step, the visible meaning of the arrow keys. */
   const nudge = (bar: Bar, segment: ChordSegment, startBeat: number, direction: -1 | 1) => {
-    moveSegment(segment.id, bar.id, Math.max(0, startBeat + direction * snapBeats));
+    moveSegment(
+      segment.id,
+      bar.id,
+      Math.max(0, startBeat + direction * snapBeats),
+      laneOf(segment)
+    );
   };
 
   /**
-   * The blocks a lane draws: its own, with any being dragged re-drawn wherever the
-   * pointer currently puts them — which may be another lane.
+   * The blocks one sub-lane of one bar draws: its own, with any being dragged
+   * re-drawn wherever the pointer currently puts them — which may be another bar,
+   * another sub-lane, or both.
    *
-   * A block that stays in its own lane keeps its position in the array. That is not
-   * cosmetic: reordering here moves the DOM node, and a node that moves between a
-   * pointerdown and a pointerup takes the click event with it. Blocks that lift
-   * above their neighbours do so via z-index instead.
+   * A block that stays put keeps its position in the array. That is not cosmetic:
+   * reordering here moves the DOM node, and a node that moves between a pointerdown
+   * and a pointerup takes the click event with it. Blocks that lift above their
+   * neighbours do so via z-index instead.
    */
-  const laneSegments = (bar: Bar, barIndex: number): ChordSegment[] => {
+  const laneSegments = (bar: Bar, barIndex: number, lane: number): ChordSegment[] => {
     const chords = barChords(bar, selectedTrackId);
-    if (!drag) return chords;
+    if (!drag) return chords.filter(s => laneOf(s) === lane);
 
+    /** Where a block would land right now, or undefined when it is not being dragged. */
     const at = (segmentId: string) => drag.preview.get(segmentId);
+    const lands = (s: ChordSegment) => {
+      const placement = at(s.id);
+      return placement
+        ? placement.barIndex === barIndex && placement.lane === lane
+        : laneOf(s) === lane;
+    };
+    const moved = (s: ChordSegment) => {
+      const placement = at(s.id);
+      return placement ? { ...s, startBeat: placement.startBeat, lane: placement.lane } : s;
+    };
 
-    const own = chords
-      .filter(s => (at(s.id) ? at(s.id)!.barIndex === barIndex : true))
-      .map(s => (at(s.id) ? { ...s, startBeat: at(s.id)!.startBeat } : s));
+    const own = chords.filter(lands).map(moved);
 
-    // Blocks dragged in from another bar, which this lane has no copy of yet.
+    // Blocks dragged in from another bar or another sub-lane, which this row has no
+    // copy of yet.
     const incoming = bars
-      .filter((_, index) => index !== barIndex)
-      .flatMap(other => barChords(other, selectedTrackId))
-      .filter(s => at(s.id)?.barIndex === barIndex)
-      .map(s => ({ ...s, startBeat: at(s.id)!.startBeat }));
+      .flatMap((other, index) =>
+        barChords(other, selectedTrackId).map(s => ({ segment: s, barIndex: index }))
+      )
+      .filter(
+        ({ segment, barIndex: from }) =>
+          (from !== barIndex || laneOf(segment) !== lane) &&
+          at(segment.id)?.barIndex === barIndex &&
+          at(segment.id)?.lane === lane
+      )
+      .map(({ segment }) => moved(segment));
 
     return [...own, ...incoming];
   };
@@ -694,6 +779,56 @@ export const ChordTimeline: React.FC = () => {
         style={{ width: `${PIANO_KEYS_WIDTH}px` }}
         className="shrink-0 bg-gray-800 border-r border-gray-700 flex flex-col justify-end"
       >
+        {/* One label per sub-lane row, aligned with the rows themselves, plus the
+            buttons that add and remove one. A lane is only ever needed to hold
+            something that must sound at the same time as something else, so most
+            instruments show exactly one row and no numbering at all. */}
+        <div className="flex-1 flex flex-col justify-end">
+          {laneIndices.map(lane => (
+            <div
+              key={lane}
+              data-testid={`lane-label-${lane}`}
+              style={{ height: `${SUBLANE_HEIGHT}px` }}
+              className={`flex items-center justify-between gap-1 px-2 text-[10px] text-gray-500 ${
+                lane > 0 ? 'border-t border-gray-700' : ''
+              }`}
+            >
+              {/* Just the number: the gutter is only as wide as the piano roll's
+                  key column, and "Lane 2" alongside the buttons wraps in it. */}
+              <span title={`Lane ${lane + 1}`}>{laneCount > 1 ? lane + 1 : ''}</span>
+
+              {/* On the last row, so the pair sits next to the lane they act on. */}
+              {lane === laneCount - 1 && selectedTrack && (
+                <span className="flex gap-0.5">
+                  <button
+                    type="button"
+                    aria-label="Remove lane"
+                    title={
+                      canRemoveLane
+                        ? 'Remove the bottom lane'
+                        : 'The bottom lane still holds blocks'
+                    }
+                    disabled={!canRemoveLane}
+                    onClick={() => setTrackLaneCount(selectedTrack.id, laneCount - 1)}
+                    className="px-1 rounded text-gray-400 hover:bg-gray-700 hover:text-gray-200 disabled:opacity-30 disabled:hover:bg-transparent"
+                  >
+                    −
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Add lane"
+                    title="Add a lane, for blocks that sound at the same time as these"
+                    onClick={() => setTrackLaneCount(selectedTrack.id, laneCount + 1)}
+                    className="px-1 rounded text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+                  >
+                    +
+                  </button>
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+
         {/* Bottom-aligned so it lines up with the automation lane across the two
             columns, both being the last row of the same stretched flex row. */}
         {showAutomation && selectedTrack && (
@@ -830,78 +965,87 @@ export const ChordTimeline: React.FC = () => {
                 </div>
               </div>
 
-              {/* Segment lane */}
-              <div
-                data-testid={`timeline-lane-${bar.id}`}
-                data-timeline-lane={bar.id}
-                // A press on empty lane space selects the bar and drops the block
-                // selection — the discoverable way out of a multi-selection. Blocks
-                // stop propagation, so this only ever hears the background.
-                onPointerDown={() => {
-                  selectBar(bar.id);
-                  clearSegmentSelection();
-                }}
-                onDragOver={e => handleDragOver(e, bar)}
-                onDrop={e => handleDrop(e, bar)}
-                className="relative h-20 bg-gray-900"
-              >
-                {/* Beat gridlines, on the metre's pulse */}
-                {pulses.map((beat, i) => (
-                  <div
-                    key={beat}
-                    data-testid="beat-line"
-                    style={{ left: `${beat * pixelsPerBeat}px` }}
-                    className={`absolute top-0 bottom-0 w-px ${
-                      i === 0 ? 'bg-transparent' : 'bg-gray-700'
-                    }`}
-                  />
-                ))}
-
-                {/* Where a finer grid will land, drawn faintly so the beats still read */}
-                {subdivisions.map(beat => (
-                  <div
-                    key={beat}
-                    data-testid="subdivision-line"
-                    style={{ left: `${beat * pixelsPerBeat}px` }}
-                    className="absolute top-0 bottom-0 w-px bg-gray-800"
-                  />
-                ))}
-
-                {/* Insertion caret */}
-                {dropIndicator?.barId === bar.id && (
-                  <div
-                    data-testid="drop-indicator"
-                    style={{ left: `${dropIndicator.beat * pixelsPerBeat}px` }}
-                    className="absolute top-0 bottom-0 w-0.5 bg-indigo-400 pointer-events-none"
-                  />
-                )}
-
-                {laneSegments(bar, barIndex).map(segment => {
-                  const startBeat = segment.startBeat ?? 0;
-
-                  return (
-                    <ChordSegmentBlock
-                      key={segment.id}
-                      segment={segment}
-                      isSelected={selectedSegmentIds.includes(segment.id)}
-                      isDragging={drag?.preview.has(segment.id) ?? false}
-                      startBeat={startBeat}
-                      pixelsPerBeat={pixelsPerBeat}
-                      onSelect={id => {
-                        selectBar(bar.id);
-                        selectSegment(id);
-                      }}
-                      onRemove={removeSegment}
-                      onResize={(id, duration) =>
-                        resizeSegmentDuration(id, duration, snapBeats)
-                      }
-                      onMoveStart={e => handleMoveStart(e, bar, segment, startBeat)}
-                      onMoveLeft={() => nudge(bar, segment, startBeat, -1)}
-                      onMoveRight={() => nudge(bar, segment, startBeat, 1)}
+              {/* Segment lanes: one row per sub-lane, stacked. Blocks may not
+                  overlap within a row, so a second row is what lets two of them
+                  sound at once. Most instruments have exactly one. */}
+              {laneIndices.map(lane => (
+                <div
+                  key={lane}
+                  data-testid={`timeline-lane-${bar.id}-${lane}`}
+                  data-timeline-lane={bar.id}
+                  data-timeline-sublane={lane}
+                  // A press on empty lane space selects the bar and drops the block
+                  // selection — the discoverable way out of a multi-selection. Blocks
+                  // stop propagation, so this only ever hears the background.
+                  onPointerDown={() => {
+                    selectBar(bar.id);
+                    clearSegmentSelection();
+                  }}
+                  onDragOver={e => handleDragOver(e, bar, lane)}
+                  onDrop={e => handleDrop(e, bar, lane)}
+                  style={{ height: `${SUBLANE_HEIGHT}px` }}
+                  className={`relative bg-gray-900 ${
+                    lane > 0 ? 'border-t border-gray-800' : ''
+                  }`}
+                >
+                  {/* Beat gridlines, on the metre's pulse */}
+                  {pulses.map((beat, i) => (
+                    <div
+                      key={beat}
+                      data-testid="beat-line"
+                      style={{ left: `${beat * pixelsPerBeat}px` }}
+                      className={`absolute top-0 bottom-0 w-px ${
+                        i === 0 ? 'bg-transparent' : 'bg-gray-700'
+                      }`}
                     />
-                  );
-                })}
-              </div>
+                  ))}
+
+                  {/* Where a finer grid will land, drawn faintly so the beats still read */}
+                  {subdivisions.map(beat => (
+                    <div
+                      key={beat}
+                      data-testid="subdivision-line"
+                      style={{ left: `${beat * pixelsPerBeat}px` }}
+                      className="absolute top-0 bottom-0 w-px bg-gray-800"
+                    />
+                  ))}
+
+                  {/* Insertion caret */}
+                  {dropIndicator?.barId === bar.id && dropIndicator.lane === lane && (
+                    <div
+                      data-testid="drop-indicator"
+                      style={{ left: `${dropIndicator.beat * pixelsPerBeat}px` }}
+                      className="absolute top-0 bottom-0 w-0.5 bg-indigo-400 pointer-events-none"
+                    />
+                  )}
+
+                  {laneSegments(bar, barIndex, lane).map(segment => {
+                    const startBeat = segment.startBeat ?? 0;
+
+                    return (
+                      <ChordSegmentBlock
+                        key={segment.id}
+                        segment={segment}
+                        isSelected={selectedSegmentIds.includes(segment.id)}
+                        isDragging={drag?.preview.has(segment.id) ?? false}
+                        startBeat={startBeat}
+                        pixelsPerBeat={pixelsPerBeat}
+                        onSelect={id => {
+                          selectBar(bar.id);
+                          selectSegment(id);
+                        }}
+                        onRemove={removeSegment}
+                        onResize={(id, duration) =>
+                          resizeSegmentDuration(id, duration, snapBeats)
+                        }
+                        onMoveStart={e => handleMoveStart(e, bar, segment, startBeat)}
+                        onMoveLeft={() => nudge(bar, segment, startBeat, -1)}
+                        onMoveRight={() => nudge(bar, segment, startBeat, 1)}
+                      />
+                    );
+                  })}
+                </div>
+              ))}
 
               {/* The bar line, and on the last bar the closing one. An overlay
                   rather than a border on the bar: a border sits inside the box, so

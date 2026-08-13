@@ -17,13 +17,6 @@ function blocks(): ChordSegment[] {
   return project.bars.flatMap(bar => barChords(bar, trackId()));
 }
 
-/** `pitch@start+length` for the notes inside the one block on the timeline. */
-function notesOf(index = 0): string[] {
-  return (blocks()[index]?.customNotes ?? []).map(
-    n => `${n.pitch}@${n.startBeat}+${n.duration}`
-  );
-}
-
 /** Where each block sits, as `absoluteBeat+length`. */
 function layout(): string[] {
   const project = state().project!;
@@ -32,6 +25,22 @@ function layout(): string[] {
   for (const bar of project.bars) {
     for (const c of barChords(bar, trackId())) {
       result.push(`${barStart + (c.startBeat ?? 0)}+${c.duration}`);
+    }
+    barStart += (bar.timeSignature ?? project.timeSignature).beatsPerMeasure;
+  }
+  return result;
+}
+
+/** The same, naming the pitch and the sub-lane: `pitch@beat+length/lane`. */
+function played(): string[] {
+  const project = state().project!;
+  const result: string[] = [];
+  let barStart = 0;
+  for (const bar of project.bars) {
+    for (const c of barChords(bar, trackId())) {
+      result.push(
+        `${c.pitch}@${barStart + (c.startBeat ?? 0)}+${c.duration}/${c.lane ?? 0}`
+      );
     }
     barStart += (bar.timeSignature ?? project.timeSignature).beatsPerMeasure;
   }
@@ -198,7 +207,7 @@ describe('useMidiInput', () => {
   });
 
   describe('recording takes', () => {
-    it('writes a held chord as one block holding all its notes', async () => {
+    it('writes a held chord as one note block per key, stacked in lanes', async () => {
       await mountReady();
       beatsIn(4);
       noteOn(60, 90);
@@ -209,23 +218,37 @@ describe('useMidiInput', () => {
       noteOff(64);
       noteOff(67);
 
-      expect(blocks()).toHaveLength(1);
-      expect(blocks()[0].kind).toBe('custom');
-      expect(notesOf()).toEqual(['60@0+2', '64@0+2', '67@0+2']);
-      expect(layout()).toEqual(['4+2']);
+      expect(blocks()).toHaveLength(3);
+      expect(blocks().every(b => b.kind === 'note')).toBe(true);
+      // Three named notes on one beat, each with its own row — the chord as it
+      // was actually played, rather than one opaque block naming nothing.
+      expect(played()).toEqual(['60@4+2/0', '64@4+2/1', '67@4+2/2']);
     });
 
-    it('keeps the velocity each note was played at', async () => {
+    it('grows the instrument to hold the whole chord', async () => {
+      await mountReady();
+      noteOn(60);
+      noteOn(64);
+      noteOn(67);
+      noteOn(71);
+      noteOn(74);
+
+      expect(state().project!.tracks[0].laneCount).toBe(5);
+    });
+
+    it('keeps the velocity each key was played at', async () => {
       await mountReady();
       noteOn(60, 90);
       noteOn(64, 41);
       noteOff(60);
       noteOff(64);
 
-      expect(blocks()[0].customNotes?.map(n => n.velocity)).toEqual([90, 41]);
+      expect(blocks().map(b => b.velocity)).toEqual([90, 41]);
     });
 
-    it('opens a new block for a note played after everything is released', async () => {
+    it('reuses the lowest lane once the key holding it is up', async () => {
+      // A melody played one note at a time never leaves lane 0, so an instrument
+      // stays one row tall until something genuinely overlaps.
       await mountReady();
       beatsIn(0);
       noteOn(60);
@@ -237,15 +260,13 @@ describe('useMidiInput', () => {
       beatsIn(3);
       noteOff(62);
 
-      expect(blocks()).toHaveLength(2);
-      expect(layout()).toEqual(['0+1', '2+1']);
-      expect(notesOf(0)).toEqual(['60@0+1']);
-      expect(notesOf(1)).toEqual(['62@0+1']);
+      expect(played()).toEqual(['60@0+1/0', '62@2+1/0']);
+      expect(state().project!.tracks[0].laneCount).toBeUndefined();
     });
 
-    it('keeps overlapping notes together — the last key up ends the block', async () => {
-      // C is still down when E arrives, so E joins C's block rather than opening
-      // one of its own. That is what legato grouping means.
+    it('stacks an overlapping note rather than rippling it along', async () => {
+      // C is still down when E arrives, so E takes the next free lane and keeps
+      // the beat it was played on.
       await mountReady();
       beatsIn(0);
       noteOn(60);
@@ -256,9 +277,7 @@ describe('useMidiInput', () => {
       beatsIn(3);
       noteOff(64);
 
-      expect(blocks()).toHaveLength(1);
-      expect(notesOf()).toEqual(['60@0+2', '64@1+2']);
-      expect(layout()).toEqual(['0+3']);
+      expect(played()).toEqual(['60@0+2/0', '64@1+2/1']);
     });
 
     it('commits on the first note-on, so the block is visible while it is played', async () => {
@@ -308,10 +327,11 @@ describe('useMidiInput', () => {
       expect(blocks()).toHaveLength(0);
     });
 
-    it('lands the whole take in the history as one step', async () => {
-      // Only the last write of a take goes through the plain `recordSegment` the
-      // undo middleware is subscribed to; every earlier one is gated, so however
-      // many notes are played the take is a single Ctrl+Z.
+    it('lands the whole gesture in the history as one step', async () => {
+      // Only the write that empties the held map goes through the plain
+      // `recordSegment` the undo middleware is subscribed to; every earlier one is
+      // gated. The middleware snapshots the whole project, so that one write
+      // captures every block of a chord and it takes a single Ctrl+Z to undo.
       await mountReady();
 
       const gated: number[] = [];
@@ -347,7 +367,7 @@ describe('useMidiInput', () => {
 
       // Two note-ons and the first note-off are gated; the last key up is not.
       expect(gated).toHaveLength(3);
-      expect(blocks()).toHaveLength(1);
+      expect(blocks()).toHaveLength(2);
     });
 
     it('releases everything and abandons the take when playback stops', async () => {

@@ -44,32 +44,14 @@ export interface Scale {
 }
 
 /**
- * What a timeline segment represents: a single note, a stacked chord, or a
- * `custom` block carrying whatever notes were played into it.
+ * What a timeline segment represents: a single note, or a stacked chord.
  *
- * The first two are *named* material — a pitch, or a harmony with a root and a
- * quality — which is why they can be transposed by degree and re-voiced. A custom
- * block is none of those things: it is a recording, a list of notes with their own
- * onsets and dynamics, and it exists because a live performance has no name.
+ * Both are *named* material — a pitch, or a harmony with a root and a quality —
+ * which is why they can be transposed by degree and re-voiced. A live performance
+ * needs nothing further: sub-lanes let a played chord be the three overlapping note
+ * blocks it actually is, rather than one opaque block that names nothing.
  */
-export type SegmentKind = 'note' | 'chord' | 'custom';
-
-/**
- * One note inside a custom block.
- *
- * `startBeat` is measured from the start of the *segment*, not of the bar, so
- * moving the block moves everything in it and nothing has to be rewritten.
- */
-export interface SegmentNote {
-  /** MIDI pitch, 0-127. */
-  pitch: number;
-  /** Beats from the start of the segment. */
-  startBeat: number;
-  /** Sounding length in beats. */
-  duration: number;
-  /** MIDI velocity, 0-127. Absent falls back to the segment's, then to 100. */
-  velocity?: number;
-}
+export type SegmentKind = 'note' | 'chord';
 
 /** How a chord's tones are spread across registers. Absent reads as 'close'. */
 export type SpacingPreset = 'close' | 'open' | 'drop2' | 'drop3';
@@ -134,24 +116,23 @@ export interface ChordSegment {
    * `withStartBeats` fills those in on load.
    */
   startBeat?: number;
+  /**
+   * Which of its instrument's stacked sub-lanes this block sits in.
+   *
+   * Blocks may not overlap *within a lane*, and that is the only reason a lane
+   * exists: material that merely follows on shares lane 0, and a second lane is
+   * needed only when two blocks have to sound at the same time. Absent reads as 0,
+   * which is every project written before sub-lanes — a single lane per instrument.
+   */
+  lane?: number;
   /** Defaults to 'chord' when absent, so pre-existing projects keep working. */
   kind?: SegmentKind;
   /** MIDI pitch — only meaningful when kind === 'note'. */
   pitch?: number;
   /**
-   * The notes a custom block sounds. Custom segments only — a note segment has one
-   * pitch and a chord segment derives its own from its harmony.
-   *
-   * This is the one place a segment states pitches outright rather than naming
-   * material to be interpreted, which is what lets a recorded take hold arbitrary
-   * polyphony without breaking the rule that `TrackContent.notes` is derived.
-   */
-  customNotes?: SegmentNote[];
-  /**
    * MIDI velocity for everything this block sounds, 0-127. Absent reads as 100 —
    * the fixed velocity every note carried before recording could capture one — so
-   * projects written before this sound identical. A custom block's notes may each
-   * override it.
+   * projects written before this sound identical.
    */
   velocity?: number;
   /**
@@ -219,6 +200,15 @@ export interface Track {
    * read from files written before instruments could choose a sound.
    */
   instrument: string;
+  /**
+   * How many stacked sub-lanes this instrument shows on the timeline.
+   *
+   * Absent reads as 1 — the single lane every instrument had before sub-lanes, so
+   * existing projects look exactly as they did. It only ever grows on its own, when
+   * a recording needs somewhere to put a simultaneous note; emptying a lane does not
+   * take it away again, so the strip's height never changes under the cursor.
+   */
+  laneCount?: number;
   volume: number;
   /**
    * Volume over time: breakpoints with linear ramps between them, sorted by beat

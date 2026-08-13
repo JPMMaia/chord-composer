@@ -406,12 +406,11 @@ export function withoutVoicing(segment: ChordSegment): ChordSegment {
 /**
  * Only a chord has a voicing to edit.
  *
- * A note segment carries one pitch, and a custom block carries the notes it was
- * played with — neither has tones to space, double or break, and an absent `kind`
- * has always meant a chord.
+ * A note segment carries one pitch and so has no tones to space, double or break,
+ * and an absent `kind` has always meant a chord.
  */
 function isChord(segment: ChordSegment): boolean {
-  return segment.kind !== 'note' && segment.kind !== 'custom';
+  return segment.kind !== 'note';
 }
 
 function clampOffset(value: number | undefined): number {

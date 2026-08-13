@@ -2,6 +2,8 @@ import React, { useEffect, useRef } from 'react';
 import type { ChordSegment } from '@/types/music';
 import { MIN_SEGMENT_BEATS } from '@/engine/timeline';
 import { midiToNoteLabel } from '@/engine/chords';
+import { displayVelocity } from '@/engine/chordOperations';
+import { DEFAULT_VELOCITY } from '@/engine/voicing';
 
 interface ChordSegmentBlockProps {
   segment: ChordSegment;
@@ -27,6 +29,31 @@ interface ChordSegmentBlockProps {
 
 /** How many of a recorded block's pitches are named before the label gives up counting. */
 const CUSTOM_LABEL_PITCHES = 3;
+
+/** Brightness at the quietest and loudest a block can be. */
+const QUIETEST_BRIGHTNESS = 0.6;
+const LOUDEST_BRIGHTNESS = 1.18;
+
+/**
+ * How brightly a block draws: quiet blocks recede, loud ones stand out.
+ *
+ * Hinged on the default velocity rather than run straight from 1 to 127, so a
+ * block that has never been given one comes out at exactly 1 — every project
+ * written before velocity could be edited looks precisely as it did.
+ *
+ * Deliberately a narrow range. This is a second reading of a block whose colour
+ * already says which kind it is, and dimming far enough to make the dynamics
+ * obvious would take the label with it.
+ */
+function velocityBrightness(segment: ChordSegment): number {
+  const velocity = displayVelocity(segment);
+  if (velocity >= DEFAULT_VELOCITY) {
+    const t = (velocity - DEFAULT_VELOCITY) / (127 - DEFAULT_VELOCITY);
+    return 1 + t * (LOUDEST_BRIGHTNESS - 1);
+  }
+  const t = (DEFAULT_VELOCITY - velocity) / (DEFAULT_VELOCITY - 1);
+  return 1 - t * (1 - QUIETEST_BRIGHTNESS);
+}
 
 /**
  * What a recorded block reads: the pitches it holds, lowest first.
@@ -154,7 +181,11 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
       data-testid={`chord-block-${segment.id}`}
       role="button"
       tabIndex={0}
-      aria-label={
+      // The velocity is stated only once it has been set. Brightness is the only
+      // other thing saying it, and colour alone is not a way to say anything —
+      // but appending "velocity 100" to every untouched block would be noise in
+      // every screen reader for a value nobody chose.
+      aria-label={`${
         isNote
           ? `Note ${primaryLabel(segment)}`
           : isCustom
@@ -162,7 +193,7 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
             : `Chord ${primaryLabel(segment)} octave ${chordOctave(segment)}${
                 inversionLabel(segment) ? ` ${inversionLabel(segment)} inversion` : ''
               }`
-      }
+      }${segment.velocity === undefined ? '' : ` velocity ${displayVelocity(segment)}`}`}
       onKeyDown={handleKeyDown}
       // Selection happens here rather than on click. A click is dispatched on the
       // nearest common ancestor of the press and the release, so any re-render that
@@ -183,6 +214,7 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
         // One declaration rather than three utility classes, so the three states
         // cannot depend on the order Tailwind happens to emit them in.
         zIndex: isDragging ? 20 : isSelected ? 10 : 1,
+        filter: `brightness(${velocityBrightness(segment)})`,
       }}
       className={`
         absolute top-0 bottom-0 flex flex-col items-center justify-center overflow-hidden

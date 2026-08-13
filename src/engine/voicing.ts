@@ -375,6 +375,23 @@ export function withInversion(
   return { ...segment, inversion: wrapped };
 }
 
+/**
+ * Set how hard the whole block sounds.
+ *
+ * The one transform here that is *not* guarded by `isChord`: a note segment and a
+ * recorded block both carry a velocity, and only a chord has tones to space. On a
+ * custom block this sets the fallback its own notes may each override, which is
+ * what `generateNotesFromSegments` already reads it as.
+ *
+ * A velocity equal to the default is written out rather than cleared. Absence
+ * means "never stated", and erasing an explicit choice would leave the field
+ * unable to be set back to 100 once it had held anything else.
+ */
+export function withVelocity(segment: ChordSegment, velocity: number): ChordSegment {
+  if (!Number.isFinite(velocity)) return segment;
+  return { ...segment, velocity: Math.max(1, Math.min(127, Math.round(velocity))) };
+}
+
 /** Strip the voicing entirely, returning the chord to close position, sounded as a block. */
 export function withoutVoicing(segment: ChordSegment): ChordSegment {
   if (segment.voicing === undefined) return segment;

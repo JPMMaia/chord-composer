@@ -729,6 +729,48 @@ describe('ChordTimeline', () => {
     });
   });
 
+  describe('velocity shading', () => {
+    it('draws a block that has never been given one at full brightness', () => {
+      // The guarantee that matters: every project written before velocity could
+      // be edited looks exactly as it did.
+      render(<ChordTimeline />);
+      dropAt(bars()[0].id, cMajorChords()[0], 0);
+
+      expect(screen.getByTestId(`chord-block-${segments()[0].id}`)).toHaveStyle({
+        filter: 'brightness(1)',
+      });
+    });
+
+    it('dims a quiet block and lifts a loud one', () => {
+      render(<ChordTimeline />);
+      dropAt(bars()[0].id, cMajorChords()[0], 0);
+      dropAt(bars()[0].id, cMajorChords()[4], 1);
+      const [quiet, loud] = segments();
+
+      act(() => projectStore.getState().setSegmentVelocity(quiet.id, 20));
+      act(() => projectStore.getState().setSegmentVelocity(loud.id, 127));
+
+      const brightness = (id: string) =>
+        Number(
+          /brightness\(([\d.]+)\)/.exec(
+            screen.getByTestId(`chord-block-${id}`).style.filter
+          )![1]
+        );
+      expect(brightness(quiet.id)).toBeLessThan(1);
+      expect(brightness(loud.id)).toBeGreaterThan(1);
+    });
+
+    it('states the velocity in the label, so it is not said by colour alone', () => {
+      render(<ChordTimeline />);
+      dropAt(bars()[0].id, cMajorChords()[0], 0);
+      const id = segments()[0].id;
+
+      act(() => projectStore.getState().setSegmentVelocity(id, 40));
+
+      expect(screen.getByTestId(`chord-block-${id}`)).toHaveAccessibleName(/velocity 40$/);
+    });
+  });
+
   it('positions a block dropped into empty space at its own beat', () => {
     render(<ChordTimeline />);
     dropAt(bars()[0].id, cMajorChords()[0], 3);

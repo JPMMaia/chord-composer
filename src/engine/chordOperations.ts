@@ -157,10 +157,30 @@ export function reorderChords(
  * identical. A nonsensical value is treated as absent rather than passed on to a
  * sampler that would have to guess.
  */
-function segmentVelocity(segment: ChordSegment): number {
+export function segmentVelocity(segment: ChordSegment): number {
   const velocity = segment.velocity;
   if (velocity === undefined || !Number.isFinite(velocity)) return DEFAULT_VELOCITY;
   return Math.max(1, Math.min(127, Math.round(velocity)));
+}
+
+/**
+ * The velocity a block *sounds* at, as a single number — what a display shows when
+ * it has one block-wide swatch to spend.
+ *
+ * Differs from `segmentVelocity` only for a recorded block, whose notes each carry
+ * their own velocity and mostly override the block's. Showing the fallback there
+ * would describe a value hardly any of the notes use, so the mean of what actually
+ * sounds is shown instead. A block holding no notes has nothing to average and
+ * falls back to its own.
+ */
+export function displayVelocity(segment: ChordSegment): number {
+  const played = segment.customNotes;
+  if (segment.kind !== 'custom' || played === undefined || played.length === 0) {
+    return segmentVelocity(segment);
+  }
+
+  const total = played.reduce((sum, n) => sum + (n.velocity ?? segmentVelocity(segment)), 0);
+  return Math.max(1, Math.min(127, Math.round(total / played.length)));
 }
 
 export function generateNotesFromSegments(

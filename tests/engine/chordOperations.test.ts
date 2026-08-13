@@ -12,6 +12,7 @@ import {
   convertSegmentKind,
   convertCustomSegment,
   currentKind,
+  displayVelocity,
 } from "@/engine/chordOperations";
 import { Bar, Scale, ChordSegment, Note, SegmentNote, TimeSignature } from "@/types/music";
 import { generateId } from "@/utils/id";
@@ -1454,6 +1455,56 @@ describe("chordOperations", () => {
         const notes = generateNotesFromSegments([segment], barWith([segment]), C_MAJOR, TS_4_4);
         expect(notes).toHaveLength(3);
         expect(notes.every((n) => n.velocity === 55)).toBe(true);
+      });
+
+      it("carries a velocity through an arpeggiated chord", () => {
+        // A broken chord takes the same route as a block one but through
+        // `breakChord`, which is the branch a velocity could go missing in.
+        const segment: ChordSegment = {
+          id: generateId(),
+          kind: "chord",
+          startBeat: 0,
+          root: "C",
+          quality: "major",
+          duration: 3,
+          velocity: 40,
+          voicing: { break: { mode: "arpeggio", pattern: "up" } },
+        };
+        const notes = generateNotesFromSegments([segment], barWith([segment]), C_MAJOR, TS_4_4);
+        expect(notes).toHaveLength(3);
+        expect(notes.every((n) => n.velocity === 40)).toBe(true);
+      });
+    });
+
+    describe("displayVelocity", () => {
+      it("reads a chord's or a note's own velocity", () => {
+        expect(displayVelocity({ id: "a", duration: 1, velocity: 55 })).toBe(55);
+        expect(displayVelocity({ id: "b", kind: "note", pitch: 60, duration: 1 })).toBe(100);
+      });
+
+      it("averages what a recorded block actually sounds", () => {
+        // The block's own value is a fallback almost none of its notes use, so
+        // showing it would describe a velocity nothing in the take plays at.
+        const take = custom(
+          [
+            { pitch: 60, startBeat: 0, duration: 1, velocity: 40 },
+            { pitch: 64, startBeat: 0, duration: 1, velocity: 80 },
+          ],
+          { velocity: 127 }
+        );
+        expect(displayVelocity(take)).toBe(60);
+      });
+
+      it("falls back to the block for notes stating none, and for an empty block", () => {
+        const mixed = custom(
+          [
+            { pitch: 60, startBeat: 0, duration: 1, velocity: 20 },
+            { pitch: 64, startBeat: 0, duration: 1 },
+          ],
+          { velocity: 60 }
+        );
+        expect(displayVelocity(mixed)).toBe(40);
+        expect(displayVelocity(custom([], { velocity: 33 }))).toBe(33);
       });
     });
 

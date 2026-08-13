@@ -50,6 +50,7 @@ import {
   withSpacing,
   withToggledDoubling,
   withToneOffset,
+  withVelocity,
 } from '@/engine/voicing';
 import { projectScale, segmentScale } from '@/engine/scales';
 import {
@@ -147,12 +148,21 @@ interface ProjectState {
   setSegmentToneOffset: (segmentId: string, tone: number, offsetOctaves: number) => void;
   toggleSegmentDoubling: (segmentId: string, tone: number, octaves: 1 | -1) => void;
   setSegmentBreak: (segmentId: string, spec: SegmentBreak | null) => void;
+  setSegmentVelocity: (segmentId: string, velocity: number) => void;
   clearSegmentVoicing: (segmentId: string) => void;
   setSegmentsInversion: (segmentIds: string[], inversion: number) => void;
   setSegmentsSpacing: (segmentIds: string[], preset: SpacingPreset) => void;
   setSegmentsToneOffset: (segmentIds: string[], tone: number, offsetOctaves: number) => void;
   toggleSegmentsDoubling: (segmentIds: string[], tone: number, octaves: 1 | -1) => void;
   setSegmentsBreak: (segmentIds: string[], spec: SegmentBreak | null) => void;
+  /**
+   * How hard every named segment sounds, 1-127.
+   *
+   * Unlike the voicing edits above this applies to every kind: a note and a
+   * recorded block both carry a velocity. On a recorded block it sets the
+   * fallback its own notes may each override.
+   */
+  setSegmentsVelocity: (segmentIds: string[], velocity: number) => void;
   clearSegmentsVoicing: (segmentIds: string[]) => void;
   convertSegmentsKind: (
     segmentIds: string[],
@@ -906,6 +916,16 @@ export const projectStore = create<ProjectState>((set, get) => ({
     if (next) set({ project: next });
   },
 
+  /** Set how hard each segment sounds — chords, notes and recorded blocks alike. */
+  setSegmentsVelocity: (segmentIds: string[], velocity: number) => {
+    const project = get().project;
+    if (!project) return;
+    const next = withTransformedSegments(project, segmentIds, segment =>
+      withVelocity(segment, velocity)
+    );
+    if (next) set({ project: next });
+  },
+
   /** Return each chord to close position, sounded as a block. */
   clearSegmentsVoicing: (segmentIds: string[]) => {
     const project = get().project;
@@ -998,6 +1018,10 @@ export const projectStore = create<ProjectState>((set, get) => ({
 
   setSegmentBreak: (segmentId: string, spec: SegmentBreak | null) => {
     get().setSegmentsBreak([segmentId], spec);
+  },
+
+  setSegmentVelocity: (segmentId: string, velocity: number) => {
+    get().setSegmentsVelocity([segmentId], velocity);
   },
 
   clearSegmentVoicing: (segmentId: string) => {

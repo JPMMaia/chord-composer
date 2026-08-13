@@ -10,6 +10,7 @@ import {
   withSpacing,
   withToggledDoubling,
   withToneOffset,
+  withVelocity,
   withoutVoicing,
 } from '@/engine/voicing';
 import type { VoicedTone } from '@/engine/voicing';
@@ -302,5 +303,40 @@ describe('segment transforms', () => {
     expect(withToggledDoubling(note, 0, 1)).toBe(note);
     expect(withBreak(note, null)).toBe(note);
     expect(withInversion(note, C_MAJOR, 1)).toBe(note);
+  });
+});
+
+describe('withVelocity', () => {
+  it('clamps to the MIDI range and rounds', () => {
+    expect(withVelocity(chord(), 0).velocity).toBe(1);
+    expect(withVelocity(chord(), -20).velocity).toBe(1);
+    expect(withVelocity(chord(), 400).velocity).toBe(127);
+    expect(withVelocity(chord(), 63.6).velocity).toBe(64);
+  });
+
+  it('applies to every kind, unlike the voicing transforms', () => {
+    // The property that sets this one apart: a note and a recorded block both
+    // sound at some velocity, and only a chord has tones to space.
+    const note = chord({ kind: 'note', pitch: 60 });
+    const take = chord({
+      kind: 'custom',
+      customNotes: [{ pitch: 60, startBeat: 0, duration: 1, velocity: 88 }],
+    });
+    expect(withVelocity(note, 40).velocity).toBe(40);
+    expect(withVelocity(take, 40).velocity).toBe(40);
+    // The take's own notes are its business — the block value is only their fallback.
+    expect(withVelocity(take, 40).customNotes).toEqual(take.customNotes);
+  });
+
+  it('writes the default out rather than clearing the field', () => {
+    // Otherwise a segment could never be put back to 100 once it had held
+    // anything else: the edit would silently become "never stated".
+    const quiet = withVelocity(chord(), 40);
+    expect(withVelocity(quiet, 100).velocity).toBe(100);
+  });
+
+  it('ignores a velocity that is not a number', () => {
+    const source = chord();
+    expect(withVelocity(source, Number.NaN)).toBe(source);
   });
 });

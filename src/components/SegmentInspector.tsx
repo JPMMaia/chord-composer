@@ -1,7 +1,12 @@
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { findSegment } from '@/engine/timeline';
-import { convertCustomSegment, currentKind, resolveSegmentChord } from '@/engine/chordOperations';
+import {
+  convertCustomSegment,
+  currentKind,
+  resolveSegmentChord,
+  segmentVelocity,
+} from '@/engine/chordOperations';
 import type { CustomConversion, SegmentKindTarget } from '@/engine/chordOperations';
 import { projectScale, segmentScale } from '@/engine/scales';
 import { ScaleSelect } from '@/components/ScaleSelect';
@@ -9,7 +14,7 @@ import { DEFAULT_VELOCITY, voicedPitches } from '@/engine/voicing';
 import { CHORD_INTERVALS, midiToNoteLabel } from '@/engine/chords';
 import { describePosition, formatNoteValue } from '@/engine/meterDisplay';
 import { DEFAULT_TIME_SIGNATURE, PIANO_ROLL_MAX_MIDI, PIANO_ROLL_MIN_MIDI } from '@/utils/constants';
-import type { ReactNode } from 'react';
+import { useRef, type ReactNode } from 'react';
 import type {
   ArpeggioPattern,
   ChordSegment,
@@ -132,6 +137,8 @@ export function SegmentInspector() {
   const toggleSegmentsDoubling = projectStore(s => s.toggleSegmentsDoubling);
   const setSegmentsBreak = projectStore(s => s.setSegmentsBreak);
   const clearSegmentsVoicing = projectStore(s => s.clearSegmentsVoicing);
+  const setSegmentsVelocity = projectStore(s => s.setSegmentsVelocity);
+  const withRecording = projectStore(s => s.withRecording);
   const convertSegmentsKind = projectStore(s => s.convertSegmentsKind);
   const convertCustomSegments = projectStore(s => s.convertCustomSegments);
   const setSegmentsScale = projectStore(s => s.setSegmentsScale);
@@ -228,6 +235,18 @@ export function SegmentInspector() {
           />
         </Section>
       )}
+
+      {/* Offered for every kind, unlike the two above: a note and a recorded block
+          both sound at some velocity, and only a chord has tones to voice. */}
+      <VelocitySection
+        shared={sharedValue(segments.map(s => segmentVelocity(s)))}
+        allCustom={segments.every(s => s.kind === 'custom')}
+        onChange={(velocity, live) =>
+          live
+            ? withRecording(() => setSegmentsVelocity(ids, velocity))
+            : setSegmentsVelocity(ids, velocity)
+        }
+      />
 
       {/* The one place a block's actual notes are shown, because a recorded block
           is the one kind whose notes cannot be read off its name. */}
@@ -422,6 +441,79 @@ function Identity({
         {describePosition(segment.startBeat ?? 0, timeSignature)}
       </div>
     </div>
+  );
+}
+
+/**
+ * How hard the selection sounds.
+ *
+ * The slider commits on every move so the piano roll, the block shading and the
+ * next note played all follow the drag. Those intermediate writes go through the
+ * store's recording gate, which silences the undo middleware — otherwise one drag
+ * across the track would bury the history under a hundred entries. The release
+ * commits once ungated, so the whole gesture is a single undo. A keyboard arrow
+ * fires `change` with no drag in progress and commits normally.
+ *
+ * A blank readout means the selection disagrees, matching the segmented controls
+ * below; the slider parks at the default rather than picking one block's value to
+ * speak for the rest.
+ */
+function VelocitySection({
+  shared,
+  allCustom,
+  onChange,
+}: {
+  shared: number | undefined;
+  allCustom: boolean;
+  /** `live` marks a mid-drag write, to be gated out of the undo history. */
+  onChange: (velocity: number, live: boolean) => void;
+}) {
+  const dragging = useRef(false);
+
+  return (
+    <Section label="Velocity">
+      <div className="flex items-center gap-2">
+        <input
+          type="range"
+          min={1}
+          max={127}
+          value={shared ?? DEFAULT_VELOCITY}
+          data-testid="segment-velocity"
+          aria-label="Velocity"
+          className="flex-1 accent-indigo-500"
+          onPointerDown={() => {
+            dragging.current = true;
+          }}
+          onChange={e => onChange(Number(e.target.value), dragging.current)}
+          // `lostpointercapture` as well as `pointerup`: a drag released outside
+          // the window never reports the up, and the gate has to close either way
+          // or the next edit would go unrecorded.
+          onPointerUp={e => {
+            dragging.current = false;
+            onChange(Number(e.currentTarget.value), false);
+          }}
+          onLostPointerCapture={e => {
+            if (!dragging.current) return;
+            dragging.current = false;
+            onChange(Number(e.currentTarget.value), false);
+          }}
+        />
+        <span
+          data-testid="segment-velocity-value"
+          className="text-xs text-gray-400 tabular-nums w-7 text-right"
+        >
+          {shared ?? '—'}
+        </span>
+      </div>
+      {/* Said outright, because the slider plainly does less here than it looks
+          like it does: almost every note in a take states its own velocity. */}
+      {allCustom && (
+        <p className="text-xs text-gray-500 mt-1">
+          Recorded notes keep the velocity they were played with. This sets the one
+          used by any that state none.
+        </p>
+      )}
+    </Section>
   );
 }
 

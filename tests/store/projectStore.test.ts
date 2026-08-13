@@ -1475,6 +1475,60 @@ describe('projectStore', () => {
         state().clearSegmentVoicing('nope');
         expect(state().project).toBe(before);
       });
+
+      describe('velocity', () => {
+        const velocitiesOf = (id: string) =>
+          barNotes(barOf(id)!, trackId()).map(n => n.velocity);
+
+        it('applies to every kind in one selection, and regenerates the notes', () => {
+          // The one segment edit that is not chords-only: a note and a recorded
+          // block both sound at some velocity.
+          const chord = chordSegment({ octave: 4 });
+          const note: ChordSegment = { id: 'note-vel', kind: 'note', pitch: 60, duration: 1 };
+          const take: ChordSegment = {
+            id: 'take-vel',
+            kind: 'custom',
+            duration: 1,
+            customNotes: [{ pitch: 67, startBeat: 0, duration: 1 }],
+          };
+          appendSegment(chord);
+          appendSegment(note);
+          appendSegment(take);
+
+          state().setSegmentsVelocity([chord.id, note.id, take.id], 40);
+
+          expect(segmentOf(chord.id).velocity).toBe(40);
+          expect(segmentOf(note.id).velocity).toBe(40);
+          expect(segmentOf(take.id).velocity).toBe(40);
+          // Derived notes are what actually reaches the sampler, so the edit is
+          // only real once they carry it. All three pack into one bar, so this is
+          // the triad's three plus one each for the note and the take.
+          expect(velocitiesOf(chord.id)).toEqual([40, 40, 40, 40, 40]);
+        });
+
+        it('leaves a recorded note that states its own velocity alone', () => {
+          const take: ChordSegment = {
+            id: 'take-own',
+            kind: 'custom',
+            duration: 1,
+            customNotes: [
+              { pitch: 60, startBeat: 0, duration: 1, velocity: 88 },
+              { pitch: 64, startBeat: 0, duration: 1 },
+            ],
+          };
+          appendSegment(take);
+
+          state().setSegmentVelocity(take.id, 40);
+
+          expect(velocitiesOf(take.id)).toEqual([88, 40]);
+        });
+
+        it('ignores an unknown segment id', () => {
+          const before = state().project;
+          state().setSegmentVelocity('nope', 40);
+          expect(state().project).toBe(before);
+        });
+      });
     });
   });
 

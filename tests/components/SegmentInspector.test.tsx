@@ -403,6 +403,54 @@ describe('SegmentInspector', () => {
     });
   });
 
+  describe('velocity', () => {
+    it('shows the shared value and commits a move', () => {
+      const segment = placeAndSelect(chordSegment({ velocity: 55 }));
+      render(<SegmentInspector />);
+
+      expect(screen.getByTestId('segment-velocity')).toHaveValue('55');
+      expect(screen.getByTestId('segment-velocity-value')).toHaveTextContent('55');
+
+      fireEvent.change(screen.getByTestId('segment-velocity'), { target: { value: '40' } });
+
+      expect(segmentOf(segment.id).velocity).toBe(40);
+      expect(barNotes(bars()[0], trackId()).every(n => n.velocity === 40)).toBe(true);
+    });
+
+    it('reads 100 for a segment that has never been given one', () => {
+      placeAndSelect(chordSegment());
+      render(<SegmentInspector />);
+
+      expect(screen.getByTestId('segment-velocity-value')).toHaveTextContent('100');
+    });
+
+    it('goes blank when the selection disagrees, and still sets both', () => {
+      const quiet = chordSegment({ velocity: 40 });
+      const loud = chordSegment({ velocity: 110 });
+      state().insertSegment(bars()[0].id, 0, quiet, trackId());
+      state().insertSegment(bars()[1].id, 0, loud, trackId());
+      selectionStore.getState().setSelectedSegments([quiet.id, loud.id]);
+
+      render(<SegmentInspector />);
+      expect(screen.getByTestId('segment-velocity-value')).toHaveTextContent('—');
+
+      fireEvent.change(screen.getByTestId('segment-velocity'), { target: { value: '70' } });
+
+      expect(segmentOf(quiet.id).velocity).toBe(70);
+      expect(segmentOf(loud.id).velocity).toBe(70);
+    });
+
+    it('is offered for a note, which has no voicing controls at all', () => {
+      const note: ChordSegment = { id: generateId(), kind: 'note', pitch: 60, duration: 1 };
+      placeAndSelect(note);
+
+      render(<SegmentInspector />);
+
+      expect(screen.getByTestId('segment-velocity')).toBeInTheDocument();
+      expect(screen.queryByTestId('spacing-drop2')).not.toBeInTheDocument();
+    });
+  });
+
   it('offers no voicing controls for a single note', () => {
     const note: ChordSegment = { id: generateId(), kind: 'note', pitch: 60, duration: 1 };
     placeAndSelect(note);
@@ -573,6 +621,27 @@ describe('SegmentInspector', () => {
       render(<SegmentInspector />);
 
       expect(screen.getByTestId('convert-custom')).toBeDisabled();
+    });
+
+    it('says the velocity slider is only a fallback for its notes', () => {
+      placeAndSelect(customSegment());
+      render(<SegmentInspector />);
+
+      expect(screen.getByTestId('segment-velocity')).toBeInTheDocument();
+      expect(screen.getByText(/Recorded notes keep the velocity/)).toBeInTheDocument();
+    });
+
+    it('withholds that caption once anything else is selected too', () => {
+      // The slider then means what it plainly says for the chord alongside it.
+      const chord = chordSegment();
+      const take = customSegment();
+      state().insertSegment(bars()[0].id, 0, chord, trackId());
+      state().insertSegment(bars()[1].id, 0, take, trackId());
+      selectionStore.getState().setSelectedSegments([chord.id, take.id]);
+
+      render(<SegmentInspector />);
+
+      expect(screen.queryByText(/Recorded notes keep the velocity/)).not.toBeInTheDocument();
     });
 
     it('keeps the kind dropdown away from a selection that includes one', () => {

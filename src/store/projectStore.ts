@@ -60,6 +60,7 @@ import {
   trackColorAt,
 } from '@/utils/constants';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
+import type { TemplateInstrument } from '@/engine/instrumentTemplate';
 
 /** Gate set by App.tsx to silence middleware pushState during recording takes. */
 let recordingGate: ((active: boolean) => void) | undefined;
@@ -109,6 +110,17 @@ interface ProjectState {
   // ride along with undo, autosave and project load like everything else.
   /** Returns the new instrument's id, so the caller can select it. */
   addTrack: (name?: string) => string | null;
+  /**
+   * Add a saved instrument set alongside the ones already here.
+   *
+   * Append rather than replace: a template is a starting point, not a project, and
+   * removing instruments would take their music with them. Every appended instrument
+   * gets a fresh id, so loading a template captured from this same project produces
+   * copies rather than collisions.
+   *
+   * @returns the first new instrument's id, or null when there was nothing to add.
+   */
+  appendInstruments: (instruments: TemplateInstrument[]) => string | null;
   removeTrack: (trackId: string) => void;
   renameTrack: (trackId: string, name: string) => void;
   setTrackInstrument: (trackId: string, instrument: string) => void;
@@ -1011,6 +1023,41 @@ export const projectStore = create<ProjectState>((set, get) => ({
     return track.id;
   },
 
+  appendInstruments: (instruments: TemplateInstrument[]) => {
+    const project = get().project;
+    if (!project) return null;
+    if (instruments.length === 0) return null;
+
+    const offset = project.tracks.length;
+    const added: Track[] = instruments.map((entry, i) => ({
+      id: generateId(),
+      name: entry.name,
+      instrument: entry.instrument,
+      volume: entry.volume,
+      pan: entry.pan,
+      // Session state, not part of the instrument: a template must never arrive
+      // pre-muted or soloed, which would look like the app had gone silent.
+      muted: false,
+      solo: false,
+      visible: true,
+      // A template written before colours were captured falls back to the palette
+      // position the instrument lands in, the way `addTrack` colours a new one.
+      color: entry.color ?? trackColorAt(offset + i),
+      vst3State: entry.vst3State,
+    }));
+
+    // Bars are deliberately untouched. A track with no key in `Bar.content` reads as
+    // silence, so the appended instruments simply start empty.
+    set({
+      project: {
+        ...project,
+        tracks: [...project.tracks, ...added],
+        updatedAt: new Date(),
+      },
+    });
+    return added[0].id;
+  },
+
   /** Remove an instrument and everything it played. */
   removeTrack: (trackId: string) => {
     const project = get().project;
@@ -1101,6 +1148,9 @@ export const projectStore = create<ProjectState>((set, get) => ({
       solo: source.solo,
       visible: source.visible,
       color: trackColorAt(sourceIndex + 1),
+      // The plugin's preset is part of the instrument, so a copy that dropped it
+      // would sound like the plugin's defaults rather than like the original.
+      vst3State: source.vst3State,
     };
 
     // Build the tracks array with the copy inserted after the source.

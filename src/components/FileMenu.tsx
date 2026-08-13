@@ -45,6 +45,9 @@ export const FileMenu: React.FC = () => {
     handleExportMidi,
     handleExportMusicXML,
     handleImportMidi,
+    handleSaveInstruments,
+    handleLoadInstruments,
+    handleLoadInstrumentsFile,
     recovery,
     acceptRecovery,
     discardRecovery,
@@ -53,6 +56,7 @@ export const FileMenu: React.FC = () => {
   const [isOpen, setIsOpen] = useState(false);
   const projectInputRef = useRef<HTMLInputElement>(null);
   const midiInputRef = useRef<HTMLInputElement>(null);
+  const templateInputRef = useRef<HTMLInputElement>(null);
 
   const runAndClose = (action: () => void | Promise<void>) => () => {
     setIsOpen(false);
@@ -74,6 +78,16 @@ export const FileMenu: React.FC = () => {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (file) await handleImportMidi(file);
+  };
+
+  const loadInstruments = canPickFiles()
+    ? handleLoadInstruments
+    : () => templateInputRef.current?.click();
+
+  const onTemplatePicked = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (file) await handleLoadInstrumentsFile(file);
   };
 
   return (
@@ -154,6 +168,29 @@ export const FileMenu: React.FC = () => {
               Import MIDI…
             </button>
           </li>
+          <li role="none" className="my-1 border-t border-gray-700" />
+          <li role="none">
+            <button
+              role="menuitem"
+              aria-label="Save Instruments"
+              onClick={runAndClose(handleSaveInstruments)}
+              className={ITEM_CLASS}
+              title="Save this project's instruments, with their sounds and plugin presets, for reuse"
+            >
+              Save Instruments…
+            </button>
+          </li>
+          <li role="none">
+            <button
+              role="menuitem"
+              aria-label="Load Instruments"
+              onClick={runAndClose(loadInstruments)}
+              className={ITEM_CLASS}
+              title="Add a saved instrument set alongside this project's instruments"
+            >
+              Load Instruments…
+            </button>
+          </li>
         </ul>
       )}
 
@@ -213,6 +250,14 @@ export const FileMenu: React.FC = () => {
         className="hidden"
         onChange={onMidiPicked}
         data-testid="midi-file-input"
+      />
+      <input
+        ref={templateInputRef}
+        type="file"
+        accept=".cctemplate,application/json"
+        className="hidden"
+        onChange={onTemplatePicked}
+        data-testid="template-file-input"
       />
     </div>
   );

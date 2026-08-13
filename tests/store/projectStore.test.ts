@@ -3,6 +3,7 @@ import { projectStore } from '@/store/projectStore';
 import { Bar, ChordSegment, NoteName, ScaleType, TimeSignature } from '@/types/music';
 import { barChords, barNotes } from '@/engine/timeline';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
+import type { TemplateInstrument } from '@/engine/instrumentTemplate';
 
 /**
  * The instrument these tests write to: the Piano every project is created with.
@@ -1604,7 +1605,9 @@ describe('projectStore', () => {
       expect(copy.instrument).toBe(DEFAULT_INSTRUMENT_ID);
     });
 
-    it('does not copy vst3State', () => {
+    // The preset is part of the instrument: a copy without it would sound like the
+    // plugin's defaults rather than like the instrument that was duplicated.
+    it('copies vst3State', () => {
       const sourceId = trackId();
       state().project = {
         ...state().project!,
@@ -1615,7 +1618,7 @@ describe('projectStore', () => {
       state().duplicateTrack(sourceId);
 
       const copy = tracks().find(t => t.name === 'Piano (copy)')!;
-      expect(copy.vst3State).toBeUndefined();
+      expect(copy.vst3State).toBe('some-base64-data');
     });
 
     it('assigns a distinct colour', () => {
@@ -1740,6 +1743,89 @@ describe('projectStore', () => {
       state().resetProject();
       const result = state().duplicateTrack('anything');
       expect(result).toBeNull();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // appendInstruments
+  // ---------------------------------------------------------------------------
+
+  describe('appendInstruments', () => {
+    const state = () => projectStore.getState();
+    const tracks = () => state().project!.tracks;
+
+    const entry = (over: Partial<TemplateInstrument> = {}): TemplateInstrument => ({
+      name: 'Strings',
+      instrument: DEFAULT_INSTRUMENT_ID,
+      volume: 0.6,
+      pan: -0.25,
+      ...over,
+    });
+
+    beforeEach(() => {
+      state().createProject();
+      state().addBar();
+    });
+
+    it('adds the instruments after the ones already there', () => {
+      const first = state().appendInstruments([entry({ name: 'Strings' }), entry({ name: 'Bass' })]);
+
+      expect(tracks().map(t => t.name)).toEqual(['Piano', 'Strings', 'Bass']);
+      expect(first).toBe(tracks()[1].id);
+    });
+
+    it('carries the sound, mix settings and plugin state', () => {
+      state().appendInstruments([
+        entry({ instrument: 'vst3:565354416d736e6f53757267652058ab', vst3State: 'AQID', color: '#abc' }),
+      ]);
+
+      expect(tracks()[1]).toMatchObject({
+        instrument: 'vst3:565354416d736e6f53757267652058ab',
+        vst3State: 'AQID',
+        volume: 0.6,
+        pan: -0.25,
+        color: '#abc',
+      });
+    });
+
+    it('starts every instrument audible and visible', () => {
+      state().toggleTrackMute(trackId());
+      state().appendInstruments([entry()]);
+
+      expect(tracks()[1]).toMatchObject({ muted: false, solo: false, visible: true });
+      expect(tracks()[1].volumeAutomation).toBeUndefined();
+    });
+
+    // A template captured from this very project must produce copies, not collisions.
+    it('gives every appended instrument a fresh id', () => {
+      state().appendInstruments([entry(), entry()]);
+
+      const ids = tracks().map(t => t.id);
+      expect(new Set(ids).size).toBe(ids.length);
+    });
+
+    it('colours an instrument that arrives without one', () => {
+      state().appendInstruments([entry({ color: undefined })]);
+      expect(tracks()[1].color).toBeDefined();
+      expect(tracks()[1].color).not.toBe(tracks()[0].color);
+    });
+
+    it('leaves the existing instruments and all bar content untouched', () => {
+      const barId = state().project!.bars[0].id;
+      state().insertSegment(barId, 0, chordSegment({ id: 'a' }), trackId());
+      const before = state().project!.bars.map(b => b.content);
+
+      state().appendInstruments([entry()]);
+
+      expect(tracks()[0].name).toBe('Piano');
+      expect(state().project!.bars.map(b => b.content)).toEqual(before);
+      expect(state().project!.bars[0].content[tracks()[1].id]).toBeUndefined();
+    });
+
+    it('returns null for an empty template or no project', () => {
+      expect(state().appendInstruments([])).toBeNull();
+      state().resetProject();
+      expect(state().appendInstruments([entry()])).toBeNull();
     });
   });
 

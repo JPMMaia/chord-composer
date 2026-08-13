@@ -64,11 +64,41 @@ export function isReusable(ref: ProjectFileRef | null): ref is ProjectFileRef {
   return ref !== null && ref.kind !== 'download';
 }
 
-const FILE_FILTER = { name: 'Chord Composer Project', extensions: ['json'] };
+/**
+ * What a picker offers to save or open.
+ *
+ * A parameter rather than a constant because the pickers below are not only the
+ * project's: an instrument template goes through the same three-kinds-of-reference
+ * plumbing and differs only in what the dialog should call it.
+ */
+export interface FileFilter {
+  name: string;
+  extensions: string[];
+}
+
+export const PROJECT_FILTER: FileFilter = {
+  name: 'Chord Composer Project',
+  extensions: ['json'],
+};
 
 /** The user cancelling a picker is not an error; it is answered with `null`. */
 function isCancellation(err: unknown): boolean {
   return err instanceof DOMException && err.name === 'AbortError';
+}
+
+/**
+ * A filter in the shape the File System Access API wants.
+ *
+ * Everything the app writes is JSON, whatever the extension says, so the MIME type is
+ * fixed and only the suffixes vary.
+ */
+function fsaTypes(filter: FileFilter) {
+  return [
+    {
+      description: filter.name,
+      accept: { 'application/json': filter.extensions.map(e => `.${e}`) },
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -114,10 +144,13 @@ export function autosaveRef(ref: ProjectFileRef | null): ProjectFileRef | null {
  * broken one and fell through to a download either way, so backing out of Save As
  * still dropped a file in the Downloads folder.
  */
-export async function pickSaveRef(suggestedName: string): Promise<ProjectFileRef | null> {
+export async function pickSaveRef(
+  suggestedName: string,
+  filter: FileFilter = PROJECT_FILTER
+): Promise<ProjectFileRef | null> {
   if (isTauri()) {
     const { save } = await import('@tauri-apps/plugin-dialog');
-    const path = await save({ defaultPath: suggestedName, filters: [FILE_FILTER] });
+    const path = await save({ defaultPath: suggestedName, filters: [filter] });
     return path ? { kind: 'path', path } : null;
   }
 
@@ -126,7 +159,7 @@ export async function pickSaveRef(suggestedName: string): Promise<ProjectFileRef
     try {
       const handle = await showSaveFilePicker.call(window, {
         suggestedName,
-        types: [{ description: FILE_FILTER.name, accept: { 'application/json': ['.json'] } }],
+        types: fsaTypes(filter),
       });
       return { kind: 'handle', handle };
     } catch (err) {
@@ -140,10 +173,12 @@ export async function pickSaveRef(suggestedName: string): Promise<ProjectFileRef
 }
 
 /** Ask the user which project to open. Returns null when they cancel. */
-export async function pickOpenRef(): Promise<ProjectFileRef | null> {
+export async function pickOpenRef(
+  filter: FileFilter = PROJECT_FILTER
+): Promise<ProjectFileRef | null> {
   if (isTauri()) {
     const { open } = await import('@tauri-apps/plugin-dialog');
-    const path = await open({ multiple: false, directory: false, filters: [FILE_FILTER] });
+    const path = await open({ multiple: false, directory: false, filters: [filter] });
     return typeof path === 'string' ? { kind: 'path', path } : null;
   }
 
@@ -153,7 +188,7 @@ export async function pickOpenRef(): Promise<ProjectFileRef | null> {
   try {
     const [handle] = await showOpenFilePicker.call(window, {
       multiple: false,
-      types: [{ description: FILE_FILTER.name, accept: { 'application/json': ['.json'] } }],
+      types: fsaTypes(filter),
     });
     return handle ? { kind: 'handle', handle } : null;
   } catch (err) {

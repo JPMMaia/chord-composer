@@ -106,6 +106,41 @@ describe('FileMenu', () => {
     expect(screen.getByRole('menuitem', { name: /export midi/i })).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: /export musicxml/i })).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: /import midi/i })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Save Instruments' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Load Instruments' })).toBeInTheDocument();
+  });
+
+  it('saves the instruments through the picker, leaving the project untouched', async () => {
+    const { written } = stubSavePicker('orchestra.cctemplate');
+    render(<Harness />);
+    openMenu();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Save Instruments' }));
+
+    await waitFor(() => expect(written).toHaveLength(1));
+    const contents = JSON.parse(written[0]);
+    expect(contents.instruments).toHaveLength(1);
+    expect(contents.bars).toBeUndefined();
+    // Saving a template must not adopt a file for the project.
+    expect(screen.getByTestId('current-file')).toHaveTextContent('Untitled');
+  });
+
+  // Firefox and Safari have no Open dialog, so the menu item clicks the hidden input.
+  it('appends instruments picked through the hidden input', async () => {
+    render(<Harness />);
+    openMenu();
+
+    const template = JSON.stringify({
+      instruments: [{ name: 'Strings', instrument: 'string_ensemble_1', volume: 0.7, pan: 0 }],
+    });
+    const input = screen.getByTestId('template-file-input') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [new File([template], 'set.cctemplate')] } });
+
+    await waitFor(() =>
+      expect(projectStore.getState().project!.tracks.map(t => t.name)).toEqual([
+        'Piano',
+        'Strings',
+      ])
+    );
   });
 
   it('shows the auto-save status indicator', () => {

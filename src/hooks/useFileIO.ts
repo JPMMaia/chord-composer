@@ -23,10 +23,17 @@ import {
   writeRef,
   type ProjectFileRef,
 } from '@/engine/projectFile';
+import {
+  TEMPLATE_FILTER,
+  deserializeTemplate,
+  serializeTemplate,
+  templateFromProject,
+} from '@/engine/instrumentTemplate';
 import { midiToProject, projectToMidi } from '@/engine/midiExporter';
 import { projectToMusicXML } from '@/engine/musicxmlExporter';
 import { projectStore } from '@/store/projectStore';
 import { projectFileStore } from '@/store/projectFileStore';
+import { selectionStore } from '@/store/selectionStore';
 import { captureVst3State } from '@/engine/vst3Instrument';
 
 /** How long to wait after the last change before writing an auto-save. */
@@ -70,6 +77,12 @@ export interface UseFileIOResult {
   handleExportMidi: () => void;
   handleExportMusicXML: () => void;
   handleImportMidi: (file: File) => Promise<void>;
+  /** Write the project's instruments — and nothing else — to a template file. */
+  handleSaveInstruments: () => Promise<void>;
+  /** Append a saved instrument set through the shell's own dialog. */
+  handleLoadInstruments: () => Promise<void>;
+  /** Append from a `File` off the hidden input, for shells with no dialog. */
+  handleLoadInstrumentsFile: (file: File) => Promise<void>;
   /** Unsaved work found on start-up or on open, awaiting a decision. */
   recovery: RecoveryOffer | null;
   acceptRecovery: () => void;
@@ -408,6 +421,62 @@ export function useFileIO(): UseFileIOResult {
     [adopt]
   );
 
+  /**
+   * Write the instruments out on their own.
+   *
+   * Deliberately not a project save: no `markSaved`, no auto-save state, no clearing
+   * of the sidecar. Writing a template says nothing about the project's own file, and
+   * a project with unsaved work must stay exactly as dirty as it was.
+   */
+  const handleSaveInstruments = useCallback(async () => {
+    const current = projectStore.getState().project;
+    if (!current) return;
+    setError(null);
+    try {
+      // A plugin's preset lives inside the plugin, so it has to be asked for; the
+      // store's copy is only as fresh as the last save.
+      const captured = await captureVst3State(current);
+      const target = await pickSaveRef(
+        toFilename(`${current.name} Instruments`, 'cctemplate'),
+        TEMPLATE_FILTER
+      );
+      if (!target) return; // Cancelled — not an error, and nothing written.
+      await writeRef(target, serializeTemplate(templateFromProject(captured, current.name)));
+    } catch (err) {
+      setError(toMessage(err, 'Failed to save the instruments.'));
+    }
+  }, []);
+
+  /** Append a template's instruments and select the first of them. */
+  const applyTemplate = useCallback((json: string) => {
+    const template = deserializeTemplate(json);
+    const firstId = projectStore.getState().appendInstruments(template.instruments);
+    if (firstId) selectionStore.getState().selectTrack(firstId);
+  }, []);
+
+  const handleLoadInstruments = useCallback(async () => {
+    setError(null);
+    try {
+      const target = await pickOpenRef(TEMPLATE_FILTER);
+      if (!target) return;
+      applyTemplate(await readRef(target));
+    } catch (err) {
+      setError(toMessage(err, 'Failed to load the instruments file.'));
+    }
+  }, [applyTemplate]);
+
+  const handleLoadInstrumentsFile = useCallback(
+    async (file: File) => {
+      setError(null);
+      try {
+        applyTemplate(await file.text());
+      } catch (err) {
+        setError(toMessage(err, 'Failed to load the instruments file.'));
+      }
+    },
+    [applyTemplate]
+  );
+
   const acceptRecovery = useCallback(() => {
     if (!recovery) return;
     // The file itself is unchanged, so the project stays dirty against it — which
@@ -436,6 +505,9 @@ export function useFileIO(): UseFileIOResult {
     handleExportMidi,
     handleExportMusicXML,
     handleImportMidi,
+    handleSaveInstruments,
+    handleLoadInstruments,
+    handleLoadInstrumentsFile,
     recovery,
     acceptRecovery,
     discardRecovery,

@@ -5,6 +5,7 @@ import { projectStore } from '@/store/projectStore';
 import { editorStore } from '@/store/editorStore';
 import { selectionStore } from '@/store/selectionStore';
 import { DEFAULT_SNAP_BEATS, getTotalBeats } from '@/engine/timeline';
+import { laneKey, VOLUME_LANE_KEY } from '@/engine/parameterAutomation';
 import { PIXELS_PER_BEAT } from '@/utils/constants';
 
 /**
@@ -28,17 +29,40 @@ function points() {
   return projectStore.getState().project!.tracks[0].volumeAutomation;
 }
 
-/** Render the lane for the project's one instrument. */
+/**
+ * Render the volume lane for the project's one instrument.
+ *
+ * The lane is target-agnostic, so the wiring that makes it *the volume lane*
+ * lives in the caller — here, and in `ChordTimeline`. Keeping that wiring in one
+ * helper is what lets these cases go on being written in terms of the curve.
+ */
 function renderLane() {
   const project = projectStore.getState().project!;
+  const track = project.tracks[0];
+  const store = () => projectStore.getState();
+
   return render(
     <AutomationLane
-      track={project.tracks[0]}
+      laneKey={VOLUME_LANE_KEY}
+      label="Volume"
+      points={track.volumeAutomation ?? []}
+      flatLevel={track.volume}
+      readPoints={() => points() ?? []}
+      onAdd={(beat, value) => store().addVolumePoint(track.id, beat, value)}
+      onMove={(i, beat, value) => store().moveVolumePoint(track.id, i, beat, value)}
+      onRemove={i => store().removeVolumePoint(track.id, i)}
       bars={project.bars}
       projectTs={project.timeSignature}
       totalBeats={getTotalBeats(project.bars, project.timeSignature)}
     />
   );
+}
+
+/** Pick a point in the volume lane, the way the component itself would. */
+function selectVolumePoint(index: number | null) {
+  selectionStore
+    .getState()
+    .selectAutomationPoint(index === null ? null : { laneKey: VOLUME_LANE_KEY, index });
 }
 
 /** Press, move and release — the drag gesture, in lane coordinates. */
@@ -199,7 +223,14 @@ describe('AutomationLane', () => {
     const project = projectStore.getState().project!;
     rerender(
       <AutomationLane
-        track={project.tracks[0]}
+        laneKey={VOLUME_LANE_KEY}
+        label="Volume"
+        points={points() ?? []}
+        flatLevel={project.tracks[0].volume}
+        readPoints={() => points() ?? []}
+        onAdd={() => {}}
+        onMove={() => {}}
+        onRemove={() => {}}
         bars={project.bars}
         projectTs={project.timeSignature}
         totalBeats={getTotalBeats(project.bars, project.timeSignature)}
@@ -229,7 +260,7 @@ describe('AutomationLane', () => {
   });
 
   describe('selecting and erasing a point', () => {
-    const selected = () => selectionStore.getState().selectedVolumePointIndex;
+    const selected = () => selectionStore.getState().selectedAutomationPoint?.index ?? null;
     const key = (k: string, target: EventTarget = window) =>
       fireEvent.keyDown(target, { key: k });
 
@@ -237,7 +268,7 @@ describe('AutomationLane', () => {
       projectStore.getState().addVolumePoint(trackId(), 0, 1);
       projectStore.getState().addVolumePoint(trackId(), 4, 0.5);
       projectStore.getState().addVolumePoint(trackId(), 8, 0);
-      selectionStore.getState().selectVolumePoint(null);
+      selectVolumePoint(null);
     });
 
     it('selects the point that was pressed', () => {
@@ -248,7 +279,7 @@ describe('AutomationLane', () => {
     });
 
     it('marks the selected point so it can be seen', () => {
-      selectionStore.getState().selectVolumePoint(1);
+      selectVolumePoint(1);
       renderLane();
 
       expect(screen.getByTestId('automation-point-1')).toHaveAttribute('data-selected', 'true');
@@ -256,7 +287,7 @@ describe('AutomationLane', () => {
     });
 
     it('erases only the selected point on Delete', () => {
-      selectionStore.getState().selectVolumePoint(1);
+      selectVolumePoint(1);
       renderLane();
 
       key('Delete');
@@ -268,7 +299,7 @@ describe('AutomationLane', () => {
     });
 
     it('accepts Backspace as well as Delete', () => {
-      selectionStore.getState().selectVolumePoint(0);
+      selectVolumePoint(0);
       renderLane();
 
       key('Backspace');
@@ -280,7 +311,7 @@ describe('AutomationLane', () => {
     });
 
     it('drops the selection with the point it erased', () => {
-      selectionStore.getState().selectVolumePoint(1);
+      selectVolumePoint(1);
       renderLane();
 
       key('Delete');
@@ -299,7 +330,7 @@ describe('AutomationLane', () => {
     });
 
     it('lets the point go on Escape without erasing it', () => {
-      selectionStore.getState().selectVolumePoint(1);
+      selectVolumePoint(1);
       renderLane();
 
       key('Escape');
@@ -320,7 +351,7 @@ describe('AutomationLane', () => {
     });
 
     it('ignores Delete typed into a field', () => {
-      selectionStore.getState().selectVolumePoint(1);
+      selectVolumePoint(1);
       renderLane();
 
       const input = document.createElement('input');
@@ -332,7 +363,7 @@ describe('AutomationLane', () => {
     });
 
     it('ignores Delete held with a modifier', () => {
-      selectionStore.getState().selectVolumePoint(1);
+      selectVolumePoint(1);
       renderLane();
 
       fireEvent.keyDown(window, { key: 'Delete', ctrlKey: true });
@@ -350,7 +381,7 @@ describe('AutomationLane', () => {
     });
 
     it('follows a point the sort moved when a drag crosses its neighbour', () => {
-      selectionStore.getState().selectVolumePoint(0);
+      selectVolumePoint(0);
       renderLane();
 
       drag('automation-point-0', { beat: 6, value: 0.25 });
@@ -365,14 +396,21 @@ describe('AutomationLane', () => {
     });
 
     it('lets go of an index the curve has shrunk past', () => {
-      selectionStore.getState().selectVolumePoint(2);
+      selectVolumePoint(2);
       const { rerender } = renderLane();
 
       projectStore.getState().clearVolumeAutomation(trackId());
       const project = projectStore.getState().project!;
       rerender(
         <AutomationLane
-          track={project.tracks[0]}
+          laneKey={VOLUME_LANE_KEY}
+          label="Volume"
+          points={points() ?? []}
+          flatLevel={project.tracks[0].volume}
+          readPoints={() => points() ?? []}
+          onAdd={() => {}}
+          onMove={() => {}}
+          onRemove={() => {}}
           bars={project.bars}
           projectTs={project.timeSignature}
           totalBeats={getTotalBeats(project.bars, project.timeSignature)}
@@ -380,6 +418,110 @@ describe('AutomationLane', () => {
       );
 
       expect(selected()).toBeNull();
+    });
+  });
+
+  /**
+   * The lane knows nothing about volume — the point of generalising it. These
+   * drive it through a plugin parameter instead, which is the same component with
+   * different callbacks behind it.
+   */
+  describe('driving a plugin parameter instead', () => {
+    const PARAM = 42;
+    const TARGET = { kind: 'param', paramId: PARAM } as const;
+    const KEY = laneKey(TARGET);
+
+    /** The parameter lane's stored points, straight from the store. */
+    const paramPoints = () =>
+      projectStore.getState().project!.tracks[0].parameterAutomation?.[0].points ?? [];
+
+    function renderParamLane() {
+      const project = projectStore.getState().project!;
+      const track = project.tracks[0];
+      const store = () => projectStore.getState();
+
+      return render(
+        <AutomationLane
+          laneKey={KEY}
+          label="Cutoff"
+          points={paramPoints()}
+          // A parameter has no fader behind it, so there is no flat level to draw.
+          flatLevel={null}
+          readPoints={paramPoints}
+          onAdd={(beat, value) => store().addLanePoint(track.id, KEY, beat, value)}
+          onMove={(i, beat, value) => store().moveLanePoint(track.id, KEY, i, beat, value)}
+          onRemove={i => store().removeLanePoint(track.id, KEY, i)}
+          bars={project.bars}
+          projectTs={project.timeSignature}
+          totalBeats={getTotalBeats(project.bars, project.timeSignature)}
+        />
+      );
+    }
+
+    beforeEach(() => {
+      projectStore.getState().addLane(trackId(), TARGET, 'Cutoff');
+    });
+
+    // Nothing is driving the parameter, so a line at any level would be a claim
+    // the app made up.
+    it('draws no flat line when there is no curve', () => {
+      renderParamLane();
+
+      expect(screen.queryByTestId('automation-flat-line')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('automation-curve')).not.toBeInTheDocument();
+    });
+
+    it('adds a point to the parameter, not to the volume curve', () => {
+      renderParamLane();
+      fireEvent.pointerDown(
+        screen.getByTestId('automation-lane').querySelector('rect')!,
+        at(2, 0.5)
+      );
+
+      expect(paramPoints()).toEqual([{ beat: 2, value: 0.5 }]);
+      expect(points()).toBeUndefined();
+    });
+
+    it('names itself and its points after the parameter', () => {
+      projectStore.getState().addLanePoint(trackId(), KEY, 4, 0.5);
+      renderParamLane();
+
+      expect(screen.getByLabelText('Cutoff automation lane')).toBeInTheDocument();
+      expect(screen.getByLabelText('Cutoff point at beat 4, 50%')).toBeInTheDocument();
+    });
+
+    it('drags a point on release, like the volume lane does', () => {
+      projectStore.getState().addLanePoint(trackId(), KEY, 0, 1);
+      renderParamLane();
+
+      drag('automation-point-0', { beat: 2, value: 0.5 });
+
+      expect(paramPoints()).toEqual([{ beat: 2, value: 0.5 }]);
+    });
+
+    // The reason the selection carries a lane key at all: an index picked in one
+    // lane must not read as picked in another, or Delete would erase from both.
+    it('does not answer to a point selected in the volume lane', () => {
+      projectStore.getState().addLanePoint(trackId(), KEY, 0, 1);
+      selectVolumePoint(0);
+      renderParamLane();
+
+      expect(screen.getByTestId('automation-point-0')).not.toHaveAttribute('data-selected');
+
+      fireEvent.keyDown(window, { key: 'Delete' });
+      expect(paramPoints()).toHaveLength(1);
+    });
+
+    it('erases its own selected point on Delete', () => {
+      projectStore.getState().addLanePoint(trackId(), KEY, 0, 1);
+      projectStore.getState().addLanePoint(trackId(), KEY, 4, 0.5);
+      renderParamLane();
+
+      fireEvent.pointerDown(screen.getByTestId('automation-point-1'), at(4, 0.5));
+      fireEvent.pointerUp(window, at(4, 0.5));
+      fireEvent.keyDown(window, { key: 'Delete' });
+
+      expect(paramPoints()).toEqual([{ beat: 0, value: 1 }]);
     });
   });
 

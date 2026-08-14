@@ -200,6 +200,53 @@ export interface AutomationPoint {
 }
 
 /**
+ * What a curve drives.
+ *
+ * Both kinds reach the plugin the same way, because in VST3 they *are* the same
+ * thing: a MIDI controller has no stream of its own, and arrives as a parameter
+ * change on whatever id the plugin names for it through `IMidiMapping`. The
+ * difference is only which of them the plugin will tell you the name of.
+ */
+export type AutomationTarget =
+  /** A parameter the plugin publishes, by its `ParamID`. */
+  | { kind: 'param'; paramId: number }
+  /**
+   * A MIDI controller, 0-127.
+   *
+   * Stored as the controller number rather than the id it resolves to, because
+   * the id belongs to this installed version of this plugin while the controller
+   * is what the user bound — resolution happens natively, on the way in.
+   *
+   * No channel: the host emits every note on channel 0 and nothing can vary
+   * that, so a controller on any other channel would arrive somewhere the notes
+   * did not.
+   */
+  | { kind: 'cc'; controller: number };
+
+/**
+ * One target's curve over time.
+ *
+ * Values are the same 0-1 as every other level in this app, which is also VST3's
+ * own normalised range — so a breakpoint travels from the lane to the plugin
+ * unconverted.
+ */
+export interface ParameterAutomation {
+  target: AutomationTarget;
+  /**
+   * What the lane calls itself.
+   *
+   * Stored rather than looked up so a lane still names itself when the plugin is
+   * not installed on this machine, or before the native enumeration has come
+   * back — the same reason the instrument picker keeps offering a ref it cannot
+   * resolve rather than quietly replacing it. Seeded from the plugin's own title
+   * for a parameter and from the controller number for a CC, and renameable
+   * either way, since neither "Kontakt" nor "CC 20" says much later on.
+   */
+  name: string;
+  points: AutomationPoint[];
+}
+
+/**
  * A named span of the arrangement: "Intro", "Verse", "Chorus".
  *
  * Positioned in absolute beats from the start of the project, like the play range
@@ -249,6 +296,19 @@ export interface Track {
    * mode to explain. Absent in every project written before automation existed.
    */
   volumeAutomation?: AutomationPoint[];
+  /**
+   * Plugin parameter curves, at most one per `paramId`.
+   *
+   * Absent or empty in every project written before parameter automation, and on
+   * every track that is not a plugin — a General MIDI or SFZ sound has nothing to
+   * automate but its volume, which has `volumeAutomation` above.
+   *
+   * Unlike `volumeAutomation` there is no flat fallback field beside it: a
+   * parameter with no curve is simply not driven, and keeps whatever its preset
+   * or the plugin's own editor last set it to. There is no value the app could
+   * put there that would not be an invention.
+   */
+  parameterAutomation?: ParameterAutomation[];
   pan: number;
   /**
    * Temporarily silenced. Its notes still draw in the piano roll — muting is

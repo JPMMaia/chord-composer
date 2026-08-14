@@ -11,6 +11,7 @@ pub mod engine;
 pub mod events;
 pub mod host;
 pub mod module;
+pub mod params;
 pub mod plugin;
 pub mod scan;
 pub mod stream;
@@ -182,6 +183,151 @@ pub fn vst3_schedule(
         }
         Ok(())
     })
+}
+
+/// The parameters a track's plugin offers as automation targets.
+///
+/// Loads the plugin if the track has one but has not needed it yet, for the same
+/// reason `vst3_open_editor` does: a plugin is otherwise only instantiated at the
+/// first Play, and being unable to pick a parameter until you have pressed Play
+/// would be a strange way to have to work.
+#[tauri::command]
+pub fn vst3_list_params(
+    state: tauri::State<'_, Vst3State>,
+    track_id: String,
+    class_id: String,
+) -> Result<Vec<plugin::ParamInfo>, String> {
+    let path = state
+        .path_of(&class_id)
+        .ok_or_else(|| format!("no installed plugin with class id {class_id}"))?;
+
+    state.with_engine(|engine| {
+        if !engine.is_loaded(&track_id) {
+            engine.load(&track_id, &path.clone().into(), &class_id)?;
+        }
+        Ok(engine.list_params(&track_id))
+    })
+}
+
+/// The MIDI controllers a track's plugin accepts.
+///
+/// Loads on demand exactly as `vst3_list_params` does, and for the same reason.
+/// An empty list means the plugin implements no `IMidiMapping` — it cannot be
+/// sent CC at all, and the UI offers no MIDI learn.
+#[tauri::command]
+pub fn vst3_list_cc(
+    state: tauri::State<'_, Vst3State>,
+    track_id: String,
+    class_id: String,
+) -> Result<Vec<plugin::CcInfo>, String> {
+    let path = state
+        .path_of(&class_id)
+        .ok_or_else(|| format!("no installed plugin with class id {class_id}"))?;
+
+    state.with_engine(|engine| {
+        if !engine.is_loaded(&track_id) {
+            engine.load(&track_id, &path.clone().into(), &class_id)?;
+        }
+        Ok(engine.list_cc(&track_id))
+    })
+}
+
+/// What a curve drives.
+///
+/// Both kinds end up as a parameter change on a `ParamID`, which is why they
+/// share a command: in VST3 a MIDI controller *is* a parameter, one the plugin
+/// names through `IMidiMapping` rather than through its parameter list.
+#[derive(serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Target {
+    Param { param_id: u32 },
+    Cc { controller: u16 },
+}
+
+impl Target {
+    /// The parameter to actually drive, or `None` when the plugin maps no such
+    /// controller.
+    ///
+    /// A refusal is dropped rather than guessed at: falling back to any id would
+    /// drive an unrelated parameter, which is worse than doing nothing and much
+    /// harder to notice.
+    fn resolve(self, engine: &engine::Engine, track_id: &str) -> Option<u32> {
+        match self {
+            Target::Param { param_id } => Some(param_id),
+            Target::Cc { controller } => engine.cc_param_id(track_id, controller),
+        }
+    }
+}
+
+/// One scheduled change, as the webview describes it.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledTarget {
+    pub target: Target,
+    /// Normalised 0..=1 — the range `AutomationPoint.value` already uses, so a
+    /// point travels from the curve to the plugin unconverted.
+    pub value: f64,
+    /// Absolute time on the webview's clock, in seconds.
+    pub when: f64,
+}
+
+/// Schedule a batch of changes.
+///
+/// A batch for the same reason `vst3_schedule` is one: a scheduling pass emits
+/// every due point of every curve in one synchronous loop, and a round trip each
+/// would put the whole automation stack in the path of every tick.
+#[tauri::command]
+pub fn vst3_automate(
+    state: tauri::State<'_, Vst3State>,
+    track_id: String,
+    params: Vec<ScheduledTarget>,
+) -> Result<(), String> {
+    state.with_engine(|engine| {
+        for param in &params {
+            let Some(id) = param.target.resolve(engine, &track_id) else {
+                continue;
+            };
+            engine.automate(&track_id, id, param.value, param.when)?;
+        }
+        Ok(())
+    })
+}
+
+/// Drive a target now, rather than at a moment in the future.
+///
+/// What states a level rather than scheduling one: the pin at Play, and a
+/// preview while the curve is being drawn.
+#[tauri::command]
+pub fn vst3_set_target(
+    state: tauri::State<'_, Vst3State>,
+    track_id: String,
+    target: Target,
+    value: f64,
+) -> Result<(), String> {
+    state.with_engine(|engine| {
+        let Some(id) = target.resolve(engine, &track_id) else {
+            return Ok(());
+        };
+        engine.set_param(&track_id, id, value)
+    })
+}
+
+/// Wiggle a MIDI controller so an armed plugin control binds to it.
+///
+/// This is the app standing in for the hardware knob a plugin's "learn MIDI CC"
+/// expects: the user arms a control in the plugin's own editor, and this sends
+/// the controller it should learn.
+///
+/// Returns as soon as the sweep is queued rather than when it is heard. It is
+/// placed on the audio thread's own frame counter, so it needs neither a clock
+/// anchor nor a running transport — only the stream, which is always running.
+#[tauri::command]
+pub fn vst3_learn_cc(
+    state: tauri::State<'_, Vst3State>,
+    track_id: String,
+    controller: u16,
+) -> Result<(), String> {
+    state.with_engine(|engine| engine.learn_cc(&track_id, controller))
 }
 
 /// Sound a note now and hold it until `vst3_release`.

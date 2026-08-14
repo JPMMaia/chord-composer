@@ -4,6 +4,8 @@ import type {
   Bar,
   ChordSegment,
   NoteName,
+  AutomationTarget,
+  ParameterAutomation,
   Project,
   Scale,
   Section,
@@ -16,6 +18,14 @@ import type { CopiedSegment } from './clipboardStore';
 import { clearLocalStorage } from '@/engine/fileIO';
 import { generateId } from '@/utils/id';
 import { movePoint, normalizePoints, withPoint, withoutPoint } from '@/engine/volumeAutomation';
+import {
+  laneKey,
+  normalizeParameterAutomation,
+  withLane,
+  withLaneName,
+  withLanePoints,
+  withoutLane,
+} from '@/engine/parameterAutomation';
 import { nextSectionName, normalizeSections, sectionColorAt } from '@/engine/sections';
 import {
   barChords,
@@ -152,6 +162,23 @@ interface ProjectState {
   moveVolumePoint: (trackId: string, index: number, beat: number, value: number) => void;
   removeVolumePoint: (trackId: string, index: number) => void;
   clearVolumeAutomation: (trackId: string) => void;
+  // Plugin targets over time, on the same absolute-beat axis and the same 0-1
+  // scale as the volume curve — which is also VST3's normalised range, so a
+  // breakpoint reaches a plugin unconverted. Only `addLane` needs the target
+  // itself; every later edit names the lane by its key, which is what the
+  // timeline and the selection already hold.
+  addLane: (trackId: string, target: AutomationTarget, name: string) => void;
+  removeLane: (trackId: string, key: string) => void;
+  renameLane: (trackId: string, key: string, name: string) => void;
+  addLanePoint: (trackId: string, key: string, beat: number, value: number) => void;
+  moveLanePoint: (
+    trackId: string,
+    key: string,
+    index: number,
+    beat: number,
+    value: number
+  ) => void;
+  removeLanePoint: (trackId: string, key: string, index: number) => void;
   setTrackPan: (trackId: string, pan: number) => void;
   toggleTrackMute: (trackId: string) => void;
   toggleTrackSolo: (trackId: string) => void;
@@ -473,6 +500,57 @@ function updateVolumeAutomation(
   updateTrack(get, set, trackId, () => ({
     volumeAutomation: next.length > 0 ? next : undefined,
   }));
+}
+
+/**
+ * Rewrite one instrument's plugin parameter lanes.
+ *
+ * The counterpart to `updateVolumeAutomation`, with one deliberate difference:
+ * an empty *lane* is kept where an empty volume curve is dropped. Dropping the
+ * volume curve hands control back to the fader, which is a real destination; a
+ * parameter has no fader to hand back to, and a lane the user just added would
+ * vanish before they could draw on it.
+ *
+ * A no-op edit returns the project untouched, so a stray drag never lands an
+ * entry on the undo stack.
+ */
+function updateParameterAutomation(
+  get: () => ProjectState,
+  set: (partial: Partial<ProjectState>) => void,
+  trackId: string,
+  edit: (lanes: ParameterAutomation[]) => ParameterAutomation[]
+): void {
+  const track = get().project?.tracks.find(t => t.id === trackId);
+  if (!track) return;
+
+  const current = track.parameterAutomation ?? [];
+  const next = normalizeParameterAutomation(edit(current));
+  if (sameParameterAutomation(current, next)) return;
+
+  updateTrack(get, set, trackId, () => ({
+    parameterAutomation: next.length > 0 ? next : undefined,
+  }));
+}
+
+/** Whether two lane lists say the same thing, down to every breakpoint. */
+function sameParameterAutomation(
+  a: ParameterAutomation[],
+  b: ParameterAutomation[]
+): boolean {
+  return (
+    a.length === b.length &&
+    a.every((lane, i) => {
+      const other = b[i];
+      return (
+        laneKey(lane.target) === laneKey(other.target) &&
+        lane.name === other.name &&
+        lane.points.length === other.points.length &&
+        lane.points.every(
+          (p, j) => p.beat === other.points[j].beat && p.value === other.points[j].value
+        )
+      );
+    })
+  );
 }
 
 /**
@@ -1284,6 +1362,44 @@ export const projectStore = create<ProjectState>((set, get) => ({
     updateVolumeAutomation(get, set, trackId, () => []);
   },
 
+  addLane: (trackId: string, target: AutomationTarget, name: string) => {
+    updateParameterAutomation(get, set, trackId, lanes =>
+      withLane(lanes, { target, name, points: [] })
+    );
+  },
+
+  removeLane: (trackId: string, key: string) => {
+    updateParameterAutomation(get, set, trackId, lanes => withoutLane(lanes, key));
+  },
+
+  renameLane: (trackId: string, key: string, name: string) => {
+    updateParameterAutomation(get, set, trackId, lanes => withLaneName(lanes, key, name));
+  },
+
+  addLanePoint: (trackId: string, key: string, beat: number, value: number) => {
+    updateParameterAutomation(get, set, trackId, lanes =>
+      withLanePoints(lanes, key, points => withPoint(points, { beat, value }))
+    );
+  },
+
+  moveLanePoint: (
+    trackId: string,
+    key: string,
+    index: number,
+    beat: number,
+    value: number
+  ) => {
+    updateParameterAutomation(get, set, trackId, lanes =>
+      withLanePoints(lanes, key, points => movePoint(points, index, { beat, value }))
+    );
+  },
+
+  removeLanePoint: (trackId: string, key: string, index: number) => {
+    updateParameterAutomation(get, set, trackId, lanes =>
+      withLanePoints(lanes, key, points => withoutPoint(points, index))
+    );
+  },
+
   toggleTrackMute: (trackId: string) => {
     updateTrack(get, set, trackId, t => ({ muted: !t.muted }));
   },
@@ -1314,6 +1430,9 @@ export const projectStore = create<ProjectState>((set, get) => ({
       laneCount: source.laneCount,
       volume: source.volume,
       volumeAutomation: source.volumeAutomation,
+      // Same reasoning as the preset below: the curves are part of how this
+      // instrument sounds, and a copy without them is a different instrument.
+      parameterAutomation: source.parameterAutomation,
       pan: source.pan,
       muted: source.muted,
       solo: source.solo,

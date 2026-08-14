@@ -1,12 +1,17 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { projectStore } from '@/store/projectStore';
 import { editorStore } from '@/store/editorStore';
 import { selectionStore } from '@/store/selectionStore';
 import { getBarStartBeat, snapBeat } from '@/engine/timeline';
-import type { AutomationPoint, Bar, TimeSignature, Track } from '@/types/music';
+import type { AutomationPoint, Bar, TimeSignature } from '@/types/music';
 
 /**
- * One instrument's volume over time, drawn on the chord timeline's beat axis.
+ * One curve over time, drawn on the chord timeline's beat axis.
+ *
+ * Target-agnostic: the selected instrument stacks one of these per curve — its
+ * volume first, then one per automated plugin parameter — and the lane itself
+ * knows only that it is drawing points between 0 and 1. What a point *means* is
+ * the caller's business, carried in through `onAdd`/`onMove`/`onRemove`, which is
+ * what lets a plugin parameter reuse every gesture the volume curve has.
  *
  * Drawn in SVG rather than on a canvas like the piano roll: the points have to be
  * individually hit-testable and draggable, which the DOM gives for free, and a
@@ -37,7 +42,30 @@ interface PointDrag {
 }
 
 interface AutomationLaneProps {
-  track: Track;
+  /** This lane's identity, from `@/engine/parameterAutomation`. */
+  laneKey: string;
+  /** For the accessible name — "Volume", or the parameter's own title. */
+  label: string;
+  points: AutomationPoint[];
+  /**
+   * The level to draw as a dashed flat line when there are no points.
+   *
+   * Null for a plugin parameter, which has no flat value to show: an empty
+   * parameter lane drives nothing, and the plugin keeps whatever its preset or
+   * its own editor last said. Drawing a line at some invented level would claim
+   * otherwise.
+   */
+  flatLevel: number | null;
+  /**
+   * Read the stored points back after a commit.
+   *
+   * A commit re-sorts, so where a point landed in the list is not something this
+   * component can work out for itself — it has to ask.
+   */
+  readPoints: () => AutomationPoint[];
+  onAdd: (beat: number, value: number) => void;
+  onMove: (index: number, beat: number, value: number) => void;
+  onRemove: (index: number) => void;
   bars: Bar[];
   projectTs: TimeSignature;
   /** Width of the lane in beats — the project's full length. */
@@ -45,23 +73,46 @@ interface AutomationLaneProps {
 }
 
 export const AutomationLane: React.FC<AutomationLaneProps> = ({
-  track,
+  laneKey,
+  label,
+  points,
+  flatLevel,
+  readPoints,
+  onAdd,
+  onMove,
+  onRemove,
   bars,
   projectTs,
   totalBeats,
 }) => {
-  const addVolumePoint = projectStore(s => s.addVolumePoint);
-  const moveVolumePoint = projectStore(s => s.moveVolumePoint);
-  const removeVolumePoint = projectStore(s => s.removeVolumePoint);
-
   const pixelsPerBeat = editorStore(s => s.pixelsPerBeat);
   const snapBeats = editorStore(s => s.snapBeats);
 
-  const selectedIndex = selectionStore(s => s.selectedVolumePointIndex);
-  const selectVolumePoint = selectionStore(s => s.selectVolumePoint);
+  const selection = selectionStore(s => s.selectedAutomationPoint);
+  const selectAutomationPoint = selectionStore(s => s.selectAutomationPoint);
+
+  /** The picked index, but only when it was picked *in this lane*. */
+  const selectedIndex = selection?.laneKey === laneKey ? selection.index : null;
+
+  /** Pick a point in this lane, or let go of the pick. */
+  const select = (index: number | null) =>
+    selectAutomationPoint(index === null ? null : { laneKey, index });
 
   const [drag, setDrag] = useState<PointDrag | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+
+  /**
+   * The caller's callbacks, for the window listeners and the key handler.
+   *
+   * Those are installed once per lane, but the parent rebuilds these props on
+   * every render — so closing over them directly would tear the listeners down
+   * and reinstall them inside every pointer move of a drag. The ref is the same
+   * answer `dragRef` below gives to the same problem, and is written during
+   * render rather than in an effect so a listener firing before the next commit
+   * still reaches the current callbacks.
+   */
+  const handlers = useRef({ onMove, onRemove, readPoints });
+  handlers.current = { onMove, onRemove, readPoints };
 
   /**
    * The live drag, for the window listeners, which are installed once and would
@@ -88,7 +139,6 @@ export const AutomationLane: React.FC<AutomationLaneProps> = ({
     setDrag(next);
   };
 
-  const points = track.volumeAutomation ?? [];
   const width = Math.max(1, totalBeats * pixelsPerBeat);
 
   const xOf = (beat: number) => beat * pixelsPerBeat;
@@ -133,16 +183,13 @@ export const AutomationLane: React.FC<AutomationLaneProps> = ({
       // Committed once, on release, rather than on every move: the store re-sorts,
       // so a per-move commit would invalidate the index mid-gesture, and the whole
       // drag is one entry on the undo stack this way.
-      moveVolumePoint(track.id, state.index, state.beat, state.value);
+      handlers.current.onMove(state.index, state.beat, state.value);
 
       // That sort may have moved the point in the list — dragging one past its
       // neighbour does exactly that — so the selection follows it to where it
       // landed rather than staying on whatever now holds the old index.
-      const stored =
-        projectStore.getState().project?.tracks.find(t => t.id === track.id)
-          ?.volumeAutomation ?? [];
-      const landed = stored.findIndex(p => p.beat === state.beat);
-      selectVolumePoint(landed >= 0 ? landed : null);
+      const landed = handlers.current.readPoints().findIndex(p => p.beat === state.beat);
+      select(landed >= 0 ? landed : null);
     };
 
     window.addEventListener('pointermove', handleMove);
@@ -151,9 +198,10 @@ export const AutomationLane: React.FC<AutomationLaneProps> = ({
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
     };
-    // `positionAt` is rebuilt every render but only reads the two values below.
+    // `positionAt` and `select` are rebuilt every render but read only the values
+    // below; the caller's callbacks come through `handlers` for that same reason.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pixelsPerBeat, snapBeats, moveVolumePoint, selectVolumePoint, track.id]);
+  }, [pixelsPerBeat, snapBeats, laneKey, selectAutomationPoint]);
 
   /**
    * Delete erases the selected point; Escape lets it go.
@@ -175,27 +223,30 @@ export const AutomationLane: React.FC<AutomationLaneProps> = ({
       if (e.ctrlKey || e.metaKey || e.altKey) return;
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        removeVolumePoint(track.id, selectedIndex);
-        selectVolumePoint(null);
+        handlers.current.onRemove(selectedIndex);
+        select(null);
         e.preventDefault();
         return;
       }
 
       if (e.key === 'Escape') {
-        selectVolumePoint(null);
+        select(null);
         e.preventDefault();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedIndex, removeVolumePoint, selectVolumePoint, track.id]);
+    // `select` is rebuilt every render but reads only `laneKey`, below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIndex, selectAutomationPoint, laneKey]);
 
   // A curve that shrank under the selection — a Clear, an undo, a point removed
   // from elsewhere — must not leave the index pointing past the end of the list.
   useEffect(() => {
-    if (selectedIndex !== null && selectedIndex >= points.length) selectVolumePoint(null);
-  }, [selectedIndex, points.length, selectVolumePoint]);
+    if (selectedIndex !== null && selectedIndex >= points.length) select(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIndex, points.length, selectAutomationPoint, laneKey]);
 
   /**
    * A press on the lane background adds a point where it landed — and grabs it, so
@@ -206,19 +257,16 @@ export const AutomationLane: React.FC<AutomationLaneProps> = ({
     if (e.button !== 0) return;
 
     const { beat, value } = positionAt(e.clientX, e.clientY);
-    addVolumePoint(track.id, beat, value);
+    onAdd(beat, value);
 
     // Read back rather than assume: the store sorts, so where the new point landed
     // in the list depends on what was already there.
-    const stored =
-      projectStore.getState().project?.tracks.find(t => t.id === track.id)
-        ?.volumeAutomation ?? [];
-    const index = stored.findIndex(p => p.beat === beat);
+    const index = readPoints().findIndex(p => p.beat === beat);
     if (index < 0) return;
 
     // The new point comes up selected, so it can be erased with Delete straight
     // away rather than having to be aimed at a second time.
-    selectVolumePoint(index);
+    select(index);
     applyDrag({ index, beat, value, moved: false });
   };
 
@@ -227,7 +275,7 @@ export const AutomationLane: React.FC<AutomationLaneProps> = ({
     // Or the press would also add a second point underneath the one being grabbed.
     e.stopPropagation();
 
-    selectVolumePoint(index);
+    select(index);
 
     const point = points[index];
     applyDrag({ index, beat: point.beat, value: point.value, moved: false });
@@ -267,7 +315,7 @@ export const AutomationLane: React.FC<AutomationLaneProps> = ({
         height={AUTOMATION_LANE_HEIGHT}
         className="block"
         role="group"
-        aria-label={`Volume automation for ${track.name}`}
+        aria-label={`${label} automation lane`}
       >
         {/* Bar lines, at the same beats the ruler ticks and the lanes above use. */}
         {bars.map((bar, barIndex) => (
@@ -307,19 +355,24 @@ export const AutomationLane: React.FC<AutomationLaneProps> = ({
         />
 
         {drawn.length === 0 ? (
-          // No curve: the flat level the instrument actually plays at, dashed to say
-          // it is the fader's value rather than something drawn here.
-          <line
-            data-testid="automation-flat-line"
-            x1={0}
-            x2={width}
-            y1={yOf(track.volume)}
-            y2={yOf(track.volume)}
-            className="stroke-indigo-500/60"
-            strokeWidth={2}
-            strokeDasharray="6 4"
-            pointerEvents="none"
-          />
+          // No curve. For volume that means the flat level the instrument actually
+          // plays at, dashed to say it is the fader's value rather than something
+          // drawn here. For a plugin parameter there is no such level to show —
+          // nothing is driving it — so the lane is left empty rather than
+          // asserting a value the app made up.
+          flatLevel !== null && (
+            <line
+              data-testid="automation-flat-line"
+              x1={0}
+              x2={width}
+              y1={yOf(flatLevel)}
+              y2={yOf(flatLevel)}
+              className="stroke-indigo-500/60"
+              strokeWidth={2}
+              strokeDasharray="6 4"
+              pointerEvents="none"
+            />
+          )
         ) : (
           <polyline
             data-testid="automation-curve"
@@ -338,7 +391,7 @@ export const AutomationLane: React.FC<AutomationLaneProps> = ({
               key={index}
               data-testid={`automation-point-${index}`}
               data-selected={isSelected || undefined}
-              aria-label={`Volume point at beat ${point.beat}, ${Math.round(point.value * 100)}%`}
+              aria-label={`${label} point at beat ${point.beat}, ${Math.round(point.value * 100)}%`}
               cx={xOf(point.beat)}
               cy={yOf(point.value)}
               // The selected point is drawn larger as well as ringed: a colour
@@ -353,7 +406,7 @@ export const AutomationLane: React.FC<AutomationLaneProps> = ({
               }
               strokeWidth={isSelected ? 2 : 1.5}
               onPointerDown={e => handlePointPointerDown(e, index)}
-              onDoubleClick={() => removeVolumePoint(track.id, index)}
+              onDoubleClick={() => onRemove(index)}
             />
           );
         })}

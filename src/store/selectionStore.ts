@@ -1,5 +1,18 @@
 import { create } from 'zustand';
 
+/**
+ * Which automation lane a picked point belongs to, and where in it.
+ *
+ * `laneKey` comes from `@/engine/parameterAutomation` — `'volume'` for the
+ * instrument's level, `param:<paramId>` for a plugin parameter. A plain string
+ * rather than a tagged union because its only job is to tell two lanes apart;
+ * nothing here ever has to take it back apart.
+ */
+export interface AutomationPointSelection {
+  laneKey: string;
+  index: number;
+}
+
 interface SelectionState {
   /** Bar whose scale drives the palette and the properties panel. */
   selectedBarId: string | null;
@@ -13,13 +26,18 @@ interface SelectionState {
   /** Where a Shift+click range measures from — the last block picked on its own. */
   anchorSegmentId: string | null;
   /**
-   * Index of the selected point in the automation lane, or null.
+   * The picked automation point, or null.
    *
    * An index rather than an id because a point has none: it is a beat and a level,
-   * and the store keeps the list sorted. Valid only against the selected
-   * instrument's curve, which is the only one the lane ever shows.
+   * and the store keeps the list sorted. `laneKey` says which curve that index
+   * counts into — `'volume'`, or `param:<id>` for a plugin parameter — because
+   * the selected instrument now stacks several lanes and an index alone would be
+   * ambiguous between them.
+   *
+   * Valid only against the selected instrument, which is the only one whose lanes
+   * are ever shown.
    */
-  selectedVolumePointIndex: number | null;
+  selectedAutomationPoint: AutomationPointSelection | null;
   /** The section picked in the band above the ruler, or null. */
   selectedSectionId: string | null;
   selectBar: (barId: string | null) => void;
@@ -32,8 +50,8 @@ interface SelectionState {
   /** Ctrl/Cmd+click: add the block, or drop it if it was already in. */
   toggleSegment: (segmentId: string) => void;
   clearSegmentSelection: () => void;
-  /** Pick a point in the automation lane, or clear the pick with null. */
-  selectVolumePoint: (index: number | null) => void;
+  /** Pick a point in an automation lane, or clear the pick with null. */
+  selectAutomationPoint: (point: AutomationPointSelection | null) => void;
   /** Pick a section in the band, or clear the pick with null. */
   selectSection: (sectionId: string | null) => void;
   clearSelection: () => void;
@@ -58,7 +76,7 @@ export const selectionStore = create<SelectionState>((set, get) => ({
   selectedTrackId: null,
   selectedSegmentIds: [],
   anchorSegmentId: null,
-  selectedVolumePointIndex: null,
+  selectedAutomationPoint: null,
   selectedSectionId: null,
 
   selectBar: (barId: string | null) => {
@@ -72,13 +90,13 @@ export const selectionStore = create<SelectionState>((set, get) => ({
    */
   selectTrack: (trackId: string | null) => {
     if (get().selectedTrackId === trackId) return;
-    // The point index goes too: it names a position in the curve of the instrument
-    // being left, and the lane is about to draw a different one.
+    // The point goes too: it names a position in a curve of the instrument being
+    // left, and the lanes are about to draw a different instrument's.
     set({
       selectedTrackId: trackId,
       selectedSegmentIds: [],
       anchorSegmentId: null,
-      selectedVolumePointIndex: null,
+      selectedAutomationPoint: null,
     });
   },
 
@@ -86,7 +104,7 @@ export const selectionStore = create<SelectionState>((set, get) => ({
     set({
       selectedSegmentIds: segmentId ? [segmentId] : [],
       anchorSegmentId: segmentId,
-      selectedVolumePointIndex: null,
+      selectedAutomationPoint: null,
       selectedSectionId: null,
     });
   },
@@ -94,7 +112,7 @@ export const selectionStore = create<SelectionState>((set, get) => ({
   setSelectedSegments: (segmentIds: string[]) => {
     set({
       selectedSegmentIds: [...new Set(segmentIds)],
-      selectedVolumePointIndex: null,
+      selectedAutomationPoint: null,
       selectedSectionId: null,
     });
   },
@@ -112,7 +130,7 @@ export const selectionStore = create<SelectionState>((set, get) => ({
         : [...current, segmentId],
       // A block that was just removed is a poor place to measure a range from.
       anchorSegmentId: isSelected ? get().anchorSegmentId : segmentId,
-      selectedVolumePointIndex: null,
+      selectedAutomationPoint: null,
       selectedSectionId: null,
     });
   },
@@ -121,13 +139,16 @@ export const selectionStore = create<SelectionState>((set, get) => ({
     set({ selectedSegmentIds: [], anchorSegmentId: null });
   },
 
-  selectVolumePoint: (index: number | null) => {
+  selectAutomationPoint: (point: AutomationPointSelection | null) => {
     set({
-      selectedVolumePointIndex: index,
+      selectedAutomationPoint: point,
       // Picking a point drops the blocks, so Delete has exactly one meaning.
-      selectedSegmentIds: index === null ? get().selectedSegmentIds : [],
-      anchorSegmentId: index === null ? get().anchorSegmentId : null,
-      selectedSectionId: index === null ? get().selectedSectionId : null,
+      // Picking one in *another lane* replaces this selection outright, for the
+      // same reason: two points selected at once would make Delete ambiguous
+      // again, just one lane further down.
+      selectedSegmentIds: point === null ? get().selectedSegmentIds : [],
+      anchorSegmentId: point === null ? get().anchorSegmentId : null,
+      selectedSectionId: point === null ? get().selectedSectionId : null,
     });
   },
 
@@ -138,8 +159,8 @@ export const selectionStore = create<SelectionState>((set, get) => ({
       // so the blocks and the curve point let go of the key.
       selectedSegmentIds: sectionId === null ? get().selectedSegmentIds : [],
       anchorSegmentId: sectionId === null ? get().anchorSegmentId : null,
-      selectedVolumePointIndex:
-        sectionId === null ? get().selectedVolumePointIndex : null,
+      selectedAutomationPoint:
+        sectionId === null ? get().selectedAutomationPoint : null,
     });
   },
 
@@ -149,7 +170,7 @@ export const selectionStore = create<SelectionState>((set, get) => ({
       selectedTrackId: null,
       selectedSegmentIds: [],
       anchorSegmentId: null,
-      selectedVolumePointIndex: null,
+      selectedAutomationPoint: null,
       selectedSectionId: null,
     });
   },

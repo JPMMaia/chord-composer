@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { Instrument, ScheduledNote } from '@/engine/instrument';
-import type { Project } from '@/types/music';
+import type { AutomationTarget, Project } from '@/types/music';
 
 /**
  * A natively-hosted VST3 plugin, behind the same `Instrument` interface as the
@@ -150,6 +150,20 @@ export class Vst3Instrument implements Instrument {
   private batch: ScheduledNote[] = [];
   private flushQueued = false;
 
+  /**
+   * Parameter changes waiting to go over IPC, batched like the notes above and
+   * for the same reason: one scheduling pass emits every due breakpoint of every
+   * curve in one synchronous loop, and a round trip each would put the whole
+   * automation stack in the path of every tick.
+   *
+   * Separate from `batch` rather than interleaved with it: the two go to
+   * different commands, and a note and a parameter change have nothing to say
+   * about each other's ordering — the native side places both on the same frame
+   * counter, so the order they arrive in does not matter.
+   */
+  private paramBatch: { target: AutomationTarget; value: number; when: number }[] = [];
+  private paramFlushQueued = false;
+
   /** The preset to restore once the plugin exists, from the project file. */
   private initialState: string | undefined;
 
@@ -261,6 +275,52 @@ export class Vst3Instrument implements Instrument {
   }
 
   /**
+   * Place a parameter change on the plugin's timeline.
+   *
+   * Sample-accurate, unlike `setVolume`: a parameter goes through VST3's own
+   * change queue, which carries a sample offset per point, so this command can
+   * and does carry a time. That is why there is an `automateTarget` at all where
+   * there is no `rampVolume` — the host-side gain multiply has nowhere to put a
+   * time, and a plugin parameter does.
+   */
+  automateTarget(target: AutomationTarget, value: number, when: number): void {
+    if (this.disposed || !this.loaded) return;
+
+    this.paramBatch.push({ target, value, when });
+    if (this.paramFlushQueued) return;
+
+    this.paramFlushQueued = true;
+    queueMicrotask(() => this.flushParams());
+  }
+
+  private flushParams(): void {
+    this.paramFlushQueued = false;
+    if (this.disposed || this.paramBatch.length === 0) return;
+
+    const params = this.paramBatch;
+    this.paramBatch = [];
+
+    invoke('vst3_automate', { trackId: this.trackId, params }).catch(err => {
+      console.error('vst3: could not automate parameters', err);
+    });
+  }
+
+  /**
+   * State a parameter now.
+   *
+   * Goes out on its own rather than through the batch: what this expresses is
+   * "the value is this, as of now", and holding that behind a microtask while
+   * queued future points went ahead of it would invert the two.
+   */
+  setTarget(target: AutomationTarget, value: number): void {
+    if (this.disposed || !this.loaded) return;
+
+    invoke('vst3_set_target', { trackId: this.trackId, target, value }).catch(err => {
+      console.error('vst3: could not set a parameter', err);
+    });
+  }
+
+  /**
    * Sound a note for as long as the returned function goes uncalled.
    *
    * Not expressible through `schedule`, which wants a length up front: a held
@@ -299,8 +359,9 @@ export class Vst3Instrument implements Instrument {
   stopAll(): void {
     if (this.disposed) return;
     // Drop anything not yet sent as well, or a Stop is immediately followed by
-    // the notes it was meant to cancel.
+    // the notes it was meant to cancel — and by the curve it was meant to end.
     this.batch = [];
+    this.paramBatch = [];
     invoke('vst3_stop', { trackId: this.trackId }).catch(() => {});
   }
 
@@ -322,6 +383,7 @@ export class Vst3Instrument implements Instrument {
     if (this.disposed) return;
     this.disposed = true;
     this.batch = [];
+    this.paramBatch = [];
 
     if (this.loaded) sharedClock.release();
     this.loaded = false;

@@ -13,7 +13,10 @@ use vst3::Steinberg::Vst::{
     BusDirections_::{kInput, kOutput},
     Event, IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentHandler, IComponentTrait,
     IConnectionPoint, IConnectionPointTrait, IEditController, IEditControllerTrait, IEventList,
+    IMidiMapping, IMidiMappingTrait, IParameterChanges,
     MediaTypes_::{kAudio, kEvent},
+    ParamID, ParameterInfo,
+    ParameterInfo_::ParameterFlags_::{kCanAutomate, kIsHidden, kIsReadOnly},
     ProcessData, ProcessModes_::kRealtime, ProcessSetup, SymbolicSampleSizes_::kSample32,
 };
 use vst3::Steinberg::{
@@ -23,8 +26,9 @@ use vst3::Steinberg::{
 use vst3::{ComPtr, ComWrapper, Interface};
 
 use super::events::{Event as NoteEvent, EventKind, Scheduler};
-use super::host::{ComponentHandler, EventList, HostApplication};
+use super::host::{read_wstring, ComponentHandler, EventList, HostApplication, ParameterChanges};
 use super::module::{tuid_from_hex, Module};
+use super::params::ParamScheduler;
 use super::stream::MemoryStream;
 
 /// How many note events may be in flight for one plugin.
@@ -33,6 +37,24 @@ use super::stream::MemoryStream;
 /// so this is far above anything a real arrangement produces. It exists to
 /// bound the audio thread's memory, not to be reached.
 const EVENT_CAPACITY: usize = 512;
+
+/// How many parameter changes may be in flight for one plugin.
+///
+/// Larger than `EVENT_CAPACITY` because a curve is *sampled* rather than sent
+/// breakpoint by breakpoint — nothing downstream interpolates a plugin
+/// parameter, so a ramp reaches it as a series of points. At the webview's
+/// 10 ms grid over a 200 ms look-ahead window that is twenty points per lane per
+/// pass, and this leaves room for a hundred lanes at once.
+const PARAM_CAPACITY: usize = 2048;
+
+/// How many distinct parameters may change within one block.
+///
+/// One lane per parameter in the timeline, and a block is a few milliseconds —
+/// automating thirty-two at once is already far past what anyone draws.
+const PARAM_QUEUE_CAPACITY: usize = 32;
+
+/// How many changes one parameter may carry within one block.
+const PARAM_POINT_CAPACITY: usize = 64;
 
 /// The most channels one bus may have. Anything past the first two is rendered
 /// but not listened to.
@@ -66,6 +88,7 @@ pub struct Plugin {
     /// Absent only for a plugin that offers neither, which is rare but legal.
     controller: Option<ComPtr<IEditController>>,
     event_list: ComWrapper<EventList>,
+    param_changes: ComWrapper<ParameterChanges>,
 
     /// Per-channel output, reused every block.
     buffers: Vec<Vec<f32>>,
@@ -76,6 +99,7 @@ pub struct Plugin {
     channels: usize,
 
     pub scheduler: Scheduler,
+    pub param_scheduler: ParamScheduler,
     max_block: usize,
     gain: f32,
     /// What the last `process` returned. Silence with a failing result is a
@@ -165,10 +189,15 @@ impl Plugin {
                 _handler: handler,
                 controller,
                 event_list: ComWrapper::new(EventList::new(EVENT_CAPACITY)),
+                param_changes: ComWrapper::new(ParameterChanges::new(
+                    PARAM_QUEUE_CAPACITY,
+                    PARAM_POINT_CAPACITY,
+                )),
                 buffers: vec![vec![0.0; max_block]; channels],
                 channel_ptrs: vec![ptr::null_mut(); channels],
                 channels,
                 scheduler: Scheduler::new(EVENT_CAPACITY),
+                param_scheduler: ParamScheduler::new(PARAM_CAPACITY),
                 max_block,
                 gain: 1.0,
                 last_process: kResultOk,
@@ -224,7 +253,9 @@ impl Plugin {
             return;
         }
 
-        // SAFETY: the event list is only touched here, on the audio thread.
+        // SAFETY: the event list and the parameter changes are only touched
+        // here, on the audio thread, and the plugin has finished reading the
+        // previous block's copies before this call returns to us.
         unsafe {
             self.event_list.clear();
 
@@ -233,6 +264,17 @@ impl Plugin {
                 .take_due(block_start, block_start + frames as i64, |offset, event| {
                     list.add(to_vst_event(offset, event));
                 });
+
+            self.param_changes.clear();
+
+            let changes = &self.param_changes;
+            self.param_scheduler.take_due(
+                block_start,
+                block_start + frames as i64,
+                |offset, id, value| {
+                    changes.add_point(id, offset as i32, value);
+                },
+            );
         }
 
         for buffer in &mut self.buffers {
@@ -259,6 +301,12 @@ impl Plugin {
                 .map(|p| p.as_ptr())
                 .unwrap_or(ptr::null_mut());
 
+            let param_changes_ptr = self
+                .param_changes
+                .to_com_ptr::<IParameterChanges>()
+                .map(|p| p.as_ptr())
+                .unwrap_or(ptr::null_mut());
+
             let mut data = ProcessData {
                 processMode: kRealtime as i32,
                 symbolicSampleSize: kSample32 as i32,
@@ -267,7 +315,7 @@ impl Plugin {
                 numOutputs: 1,
                 inputs: ptr::null_mut(),
                 outputs: &mut bus,
-                inputParameterChanges: ptr::null_mut(),
+                inputParameterChanges: param_changes_ptr,
                 outputParameterChanges: ptr::null_mut(),
                 inputEvents: event_list_ptr,
                 outputEvents: ptr::null_mut(),
@@ -383,6 +431,130 @@ unsafe fn build_controller(
     }
 
     Some(controller)
+}
+
+/// One automatable parameter, as the webview needs to describe it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParamInfo {
+    /// VST3's `ParamID`. Stable for a given plugin version, and what a curve
+    /// stores — the index is not, because the list can be filtered.
+    pub id: u32,
+    pub title: String,
+    /// "Hz", "dB", "%" — often empty, and only ever shown beside the title.
+    pub units: String,
+    /// Normalised 0..=1: what the parameter reads before anything drives it.
+    pub default_normalized: f64,
+    /// 0 for a continuous parameter, N for a switch or list with N+1 positions.
+    pub step_count: i32,
+}
+
+/// The parameters worth offering as automation targets.
+///
+/// Filtered, not merely listed. A plugin routinely publishes hundreds of
+/// entries — internal state, meters, program slots — and the ones that answer
+/// "what can I automate" are those flagged `kCanAutomate` and not flagged
+/// read-only or hidden. An unfiltered list is not a menu anyone can use.
+pub fn list_params(controller: &ComPtr<IEditController>) -> Vec<ParamInfo> {
+    // SAFETY: the controller is live for the duration of the call, and every
+    // pointer handed to it points at a local.
+    unsafe {
+        let count = controller.getParameterCount().max(0);
+        let mut out = Vec::new();
+
+        for index in 0..count {
+            let mut info: ParameterInfo = std::mem::zeroed();
+            if controller.getParameterInfo(index, &mut info) != kResultOk {
+                continue;
+            }
+
+            let automatable = info.flags & kCanAutomate != 0;
+            let excluded = info.flags & (kIsReadOnly | kIsHidden) != 0;
+            if !automatable || excluded {
+                continue;
+            }
+
+            out.push(ParamInfo {
+                id: info.id,
+                title: read_wstring(&info.title),
+                units: read_wstring(&info.units),
+                default_normalized: info.defaultNormalizedValue,
+                step_count: info.stepCount,
+            });
+        }
+
+        out
+    }
+}
+
+/// The MIDI controller numbers a host may ask a plugin about.
+///
+/// 0..=127 are the continuous controllers. VST3 continues past them —
+/// `kAfterTouch` is 128 and `kPitchBend` 129 — but those are not what a plugin's
+/// MIDI-learn binds and offering them would be a different feature.
+const CC_COUNT: u16 = 128;
+
+/// The event bus and channel every CC is addressed on.
+///
+/// Notes go out on bus 0, channel 0 and nothing here can vary that
+/// (`to_vst_event`, and `events::Event` carries no channel at all). A CC
+/// resolved for any other channel would arrive somewhere the notes did not.
+const CC_BUS: i32 = 0;
+const CC_CHANNEL: i16 = 0;
+
+/// A MIDI controller this plugin accepts, and the parameter it arrives as.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CcInfo {
+    /// The controller number, 0..=127.
+    pub controller: u16,
+    /// The `ParamID` a change on that controller must be sent as.
+    pub param_id: u32,
+}
+
+/// The controllers this plugin has a mapping for.
+///
+/// In VST3 there is no MIDI stream into a plugin: a host that wants to send CC
+/// asks `IMidiMapping` which parameter stands for it, and then sends an ordinary
+/// parameter change on that id. So this is the whole of the CC support — after
+/// it, a controller is just another `ParamID` and rides machinery that already
+/// exists.
+///
+/// Empty when the plugin implements no `IMidiMapping`, which is also how the UI
+/// learns not to offer a MIDI-learn panel it could not follow through on.
+///
+/// The ids here are deliberately *not* cross-checked against `list_params`: a
+/// plugin normally flags its CC proxies hidden, so the two sets barely overlap
+/// and reconciling them would only hide working targets.
+pub fn list_cc(controller: &ComPtr<IEditController>) -> Vec<CcInfo> {
+    // SAFETY: the controller is live for the duration of the call, and `id`
+    // points at a local that outlives every use of it.
+    unsafe {
+        let Some(mapping) = controller.cast::<IMidiMapping>() else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        for cc in 0..CC_COUNT {
+            let mut id: ParamID = 0;
+            // The result is what says whether there is a mapping. A plugin that
+            // refuses leaves `id` untouched, so reading it anyway would bind the
+            // controller to whatever parameter 0 happens to be — silently, and
+            // audibly wrong.
+            if mapping.getMidiControllerAssignment(CC_BUS, CC_CHANNEL, cc as i16, &mut id)
+                != kResultOk
+            {
+                continue;
+            }
+
+            out.push(CcInfo {
+                controller: cc,
+                param_id: id,
+            });
+        }
+
+        out
+    }
 }
 
 /// The output bus to actually listen to.

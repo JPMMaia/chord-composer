@@ -15,20 +15,53 @@ use std::ffi::{c_char, c_void, CString};
 
 use vst3::Steinberg::Vst::{
     BusDirections_, BusInfo, BusInfo_, BusTypes_, Event_::EventTypes_, IAudioProcessor,
-    IAudioProcessorTrait, IComponent, IComponentTrait, IEventListTrait, IoMode, MediaType,
-    BusDirection, MediaTypes_, ProcessData, ProcessSetup, RoutingInfo, SpeakerArrangement,
-    SymbolicSampleSizes_::kSample32, TChar,
+    IAudioProcessorTrait, IComponent, IComponentHandler, IComponentTrait, IEditController,
+    IEditControllerTrait, IEventListTrait, IMidiMapping, IMidiMappingTrait, IParamValueQueueTrait,
+    IParameterChangesTrait, IoMode,
+    CtrlNumber, MediaType, BusDirection, MediaTypes_, ParamID, ParamValue, ParameterInfo,
+    ParameterInfo_::ParameterFlags_::{kCanAutomate, kIsHidden, kIsReadOnly},
+    ProcessData, ProcessSetup, RoutingInfo, SpeakerArrangement,
+    SymbolicSampleSizes_::kSample32, String128, TChar,
 };
 use vst3::Steinberg::{
-    int32, kInvalidArgument, kResultFalse, kResultOk, tresult, uint32, FIDString,
+    int16, int32, kInvalidArgument, kResultFalse, kResultOk, tresult, uint32, FIDString,
     FUnknown, IBStream, IBStreamTrait, IPluginBase, IPluginBaseTrait, IPluginFactory,
-    IPluginFactoryTrait,
+    IPluginFactoryTrait, IPlugView,
     PClassInfo, PClassInfo_, PFactoryInfo, PFactoryInfo_, TBool, TUID,
 };
 use vst3::{uid, Class, ComRef, ComWrapper};
 
 const PLUGIN_NAME: &str = "Chord Composer Test Synth";
 const VOICES: usize = 16;
+
+/// The one parameter a host is meant to be able to automate.
+///
+/// A plain output gain, because its effect on the rendered buffer is unambiguous
+/// and can be asserted **per sample** — which is what makes it possible to prove
+/// a host honoured the sample offset a change carried, rather than slamming the
+/// value at the start of the block.
+pub const GAIN_PARAM: ParamID = 0;
+
+/// A read-only parameter, and a hidden one. Neither is an automation target, and
+/// they exist so a host's filtering has something to get wrong.
+pub const METER_PARAM: ParamID = 1;
+pub const SECRET_PARAM: ParamID = 2;
+
+/// A second gain, reachable only as a MIDI controller.
+///
+/// Hidden, so it is absent from the parameter list a host offers — which is how
+/// real plugins publish their CC proxies, and what makes a host's CC path worth
+/// testing separately. It multiplies the output alongside `GAIN_PARAM`, so a CC
+/// change is observable in the rendered buffer at the sample it was placed on.
+pub const CC_GAIN_PARAM: ParamID = 3;
+
+/// The controllers this fixture maps, and the parameter each arrives as.
+///
+/// Two, mapping to *different* parameters, so a host that mixed them up would be
+/// caught: only CC 20 is audible. Far from all 128, so there is something for a
+/// host to be refused on — and a host that read the out-parameter without
+/// checking the result would bind those to parameter 0 and change the gain.
+pub const MAPPED_CC: [(u16, ParamID); 2] = [(1, SECRET_PARAM), (20, CC_GAIN_PARAM)];
 
 fn copy_cstring(src: &str, dst: &mut [c_char]) {
     let c_string = CString::new(src).unwrap_or_default();
@@ -74,6 +107,13 @@ struct State {
     sample_rate: f32,
     voices: [Voice; VOICES],
     blob: [u8; 4],
+    /// The gain parameter's current value, normalised. Carried across blocks, so
+    /// a change in one block still applies in the next.
+    gain: f32,
+    /// The same, for the gain reachable only through a MIDI controller. A second
+    /// multiplier rather than the same one, so a test can tell which path a
+    /// change arrived by.
+    cc_gain: f32,
 }
 
 pub struct TestSynth {
@@ -93,13 +133,45 @@ impl TestSynth {
                 sample_rate: 48_000.0,
                 voices: [Voice::default(); VOICES],
                 blob: DEFAULT_BLOB,
+                gain: 1.0,
+                cc_gain: 1.0,
             }),
         }
     }
 }
 
 impl Class for TestSynth {
-    type Interfaces = (IComponent, IAudioProcessor);
+    type Interfaces = (IComponent, IAudioProcessor, IEditController, IMidiMapping);
+}
+
+/// How a host may send this plugin MIDI CC.
+///
+/// VST3 gives a plugin no MIDI stream: a host that wants to send a controller
+/// asks here which parameter stands for it and then sends an ordinary parameter
+/// change. Refusing correctly matters as much as accepting — a host that ignores
+/// the result and reads `id` anyway finds whatever was already in it.
+impl IMidiMappingTrait for TestSynth {
+    unsafe fn getMidiControllerAssignment(
+        &self,
+        bus: int32,
+        channel: int16,
+        controller: CtrlNumber,
+        id: *mut ParamID,
+    ) -> tresult {
+        if bus != 0 || channel != 0 || id.is_null() {
+            return kResultFalse;
+        }
+
+        match MAPPED_CC.iter().find(|(cc, _)| *cc as CtrlNumber == controller) {
+            Some((_, param)) => {
+                *id = *param;
+                kResultOk
+            }
+            // Left untouched on purpose, so a host that trusts `id` over the
+            // result gets a stale value rather than a plausible one.
+            None => kResultFalse,
+        }
+    }
 }
 
 impl IPluginBaseTrait for TestSynth {
@@ -209,6 +281,114 @@ impl IComponentTrait for TestSynth {
     }
 }
 
+/// The three parameters this fixture publishes, and how each is flagged.
+///
+/// Only the first is an automation target. The other two are here so that a host
+/// filtering its parameter list has something to filter *out* — a list that came
+/// back with three entries would be a host offering the user a meter to draw a
+/// curve on.
+const PARAMS: [(ParamID, &str, &str, int32); 4] = [
+    (GAIN_PARAM, "Gain", "dB", kCanAutomate),
+    (METER_PARAM, "Meter", "", kCanAutomate | kIsReadOnly),
+    (SECRET_PARAM, "Secret", "", kCanAutomate | kIsHidden),
+    (CC_GAIN_PARAM, "MIDI Gain", "", kCanAutomate | kIsHidden),
+];
+
+impl IEditControllerTrait for TestSynth {
+    unsafe fn setComponentState(&self, _state: *mut IBStream) -> tresult {
+        kResultOk
+    }
+
+    unsafe fn setState(&self, _state: *mut IBStream) -> tresult {
+        kResultOk
+    }
+
+    unsafe fn getState(&self, _state: *mut IBStream) -> tresult {
+        kResultOk
+    }
+
+    unsafe fn getParameterCount(&self) -> int32 {
+        PARAMS.len() as int32
+    }
+
+    unsafe fn getParameterInfo(&self, index: int32, info: *mut ParameterInfo) -> tresult {
+        let Some((id, title, units, flags)) =
+            usize::try_from(index).ok().and_then(|i| PARAMS.get(i))
+        else {
+            return kInvalidArgument;
+        };
+        if info.is_null() {
+            return kInvalidArgument;
+        }
+
+        let info = &mut *info;
+        *info = std::mem::zeroed();
+        info.id = *id;
+        copy_wstring(title, &mut info.title);
+        copy_wstring(title, &mut info.shortTitle);
+        copy_wstring(units, &mut info.units);
+        info.stepCount = 0;
+        info.defaultNormalizedValue = 1.0;
+        info.unitId = 0;
+        info.flags = *flags;
+        kResultOk
+    }
+
+    unsafe fn getParamStringByValue(
+        &self,
+        _id: ParamID,
+        _value: ParamValue,
+        _string: *mut String128,
+    ) -> tresult {
+        kResultFalse
+    }
+
+    unsafe fn getParamValueByString(
+        &self,
+        _id: ParamID,
+        _string: *mut TChar,
+        _value: *mut ParamValue,
+    ) -> tresult {
+        kResultFalse
+    }
+
+    unsafe fn normalizedParamToPlain(&self, _id: ParamID, value: ParamValue) -> ParamValue {
+        value
+    }
+
+    unsafe fn plainParamToNormalized(&self, _id: ParamID, value: ParamValue) -> ParamValue {
+        value
+    }
+
+    unsafe fn getParamNormalized(&self, id: ParamID) -> ParamValue {
+        match id {
+            GAIN_PARAM => (*self.state.get()).gain as ParamValue,
+            CC_GAIN_PARAM => (*self.state.get()).cc_gain as ParamValue,
+            _ => 0.0,
+        }
+    }
+
+    /// The control-thread way in, as distinct from the queue the audio thread
+    /// reads. A host uses this to keep an editor in step; here it lets a test
+    /// prove the host made the call at all.
+    unsafe fn setParamNormalized(&self, id: ParamID, value: ParamValue) -> tresult {
+        match id {
+            GAIN_PARAM => (*self.state.get()).gain = value as f32,
+            CC_GAIN_PARAM => (*self.state.get()).cc_gain = value as f32,
+            _ => {}
+        }
+        kResultOk
+    }
+
+    unsafe fn setComponentHandler(&self, _handler: *mut IComponentHandler) -> tresult {
+        kResultOk
+    }
+
+    unsafe fn createView(&self, _name: FIDString) -> *mut IPlugView {
+        std::ptr::null_mut()
+    }
+}
+
 impl IAudioProcessorTrait for TestSynth {
     unsafe fn setBusArrangements(
         &self,
@@ -299,7 +479,43 @@ impl IAudioProcessorTrait for TestSynth {
             }
         }
 
+        // Gain changes for this block, as (frame, value). Collected before the
+        // audio is touched, and applied *at the offsets they carry* rather than
+        // all at once — the whole reason this fixture has a parameter is to make
+        // a host's sample-accurate placement observable in the output.
+        //
+        // Allocating here would be unforgivable in a real plugin; this one is a
+        // test fixture and never runs on anyone's audio device.
+        let mut gain_changes: Vec<(usize, f32)> = Vec::new();
+        let mut cc_gain_changes: Vec<(usize, f32)> = Vec::new();
+        if let Some(changes) = ComRef::from_raw(data.inputParameterChanges) {
+            for q in 0..changes.getParameterCount() {
+                let Some(queue) = ComRef::from_raw(changes.getParameterData(q)) else {
+                    continue;
+                };
+                let into = match queue.getParameterId() {
+                    GAIN_PARAM => &mut gain_changes,
+                    CC_GAIN_PARAM => &mut cc_gain_changes,
+                    _ => continue,
+                };
+                for p in 0..queue.getPointCount() {
+                    let (mut offset, mut value) = (0i32, 0f64);
+                    if queue.getPoint(p, &mut offset, &mut value) == kResultOk {
+                        into.push((offset.max(0) as usize, value as f32));
+                    }
+                }
+            }
+        }
+
         if data.numOutputs < 1 || data.outputs.is_null() {
+            // The changes still have to land, or a block that rendered no audio
+            // would silently lose them.
+            if let Some((_, value)) = gain_changes.last() {
+                state.gain = *value;
+            }
+            if let Some((_, value)) = cc_gain_changes.last() {
+                state.cc_gain = *value;
+            }
             return kResultOk;
         }
         let bus = &mut *data.outputs;
@@ -336,6 +552,32 @@ impl IAudioProcessorTrait for TestSynth {
             }
             voice.phase = phase;
         }
+
+        // The gain, frame by frame, stepping at each change's own offset. A host
+        // that ignored the offset and applied the value at frame 0 produces a
+        // different buffer, which is exactly what the host-side test asserts on.
+        let (mut next, mut next_cc) = (0, 0);
+        let mut gain = state.gain;
+        let mut cc_gain = state.cc_gain;
+        for frame in 0..frames {
+            while next < gain_changes.len() && gain_changes[next].0 <= frame {
+                gain = gain_changes[next].1;
+                next += 1;
+            }
+            while next_cc < cc_gain_changes.len() && cc_gain_changes[next_cc].0 <= frame {
+                cc_gain = cc_gain_changes[next_cc].1;
+                next_cc += 1;
+            }
+            for channel in buffers.iter().take(channels) {
+                if !channel.is_null() {
+                    *(*channel).add(frame) *= gain * cc_gain;
+                }
+            }
+        }
+        // Anything placed past the end of this block still counts as having
+        // happened, rather than being silently forgotten.
+        state.gain = gain_changes.last().map_or(gain, |(_, value)| *value);
+        state.cc_gain = cc_gain_changes.last().map_or(cc_gain, |(_, value)| *value);
 
         bus.silenceFlags = 0;
         kResultOk

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import type { Bar, ChordSegment, TimeSignature } from '@/types/music';
+import type { AutomationPoint, Bar, ChordSegment, TimeSignature, Track } from '@/types/music';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { editorStore, ZOOM_LEVELS } from '@/store/editorStore';
@@ -30,6 +30,11 @@ import type { CopiedSegment } from '@/store/clipboardStore';
 import { PALETTE_DRAG_TYPE } from '@/components/ScalePalette';
 import { ChordSegmentBlock } from '@/components/ChordSegmentBlock';
 import { AutomationLane, AUTOMATION_LANE_HEIGHT } from '@/components/AutomationLane';
+import { laneFor, laneKey, VOLUME_LANE_KEY } from '@/engine/parameterAutomation';
+import { nextFreeCc } from '@/engine/vst3Cc';
+import { useVst3Cc } from '@/hooks/useVst3Cc';
+import { LaneLabel } from '@/components/LaneLabel';
+import { LearnCcPanel } from '@/components/LearnCcPanel';
 import { SectionBand } from '@/components/SectionBand';
 import { BAR_LINE_WIDTH, PIANO_KEYS_WIDTH, PIXELS_PER_BEAT } from '@/utils/constants';
 
@@ -91,6 +96,36 @@ function gridPositions(beats: number, steps: number[], covered: number[]): numbe
   }
 
   return positions.sort((a, b) => a - b);
+}
+
+/**
+ * One row of the automation stack: what to draw, and what a gesture on it means.
+ *
+ * The volume curve and a plugin parameter differ only in which store actions they
+ * reach, so they are described in one shape and rendered by one component.
+ */
+interface AutomationLaneDef {
+  key: string;
+  label: string;
+  points: AutomationPoint[];
+  /** The dashed level shown when there are no points; null for a parameter. */
+  flatLevel: number | null;
+  readPoints: () => AutomationPoint[];
+  onAdd: (beat: number, value: number) => void;
+  onMove: (index: number, beat: number, value: number) => void;
+  onRemove: (index: number) => void;
+  /**
+   * Whether the lane can be taken away and renamed.
+   *
+   * True for a plugin target, false for volume — which has a fader behind it, so
+   * it is cleared rather than removed, and is not the user's to rename.
+   */
+  removable?: boolean;
+}
+
+/** The live copy of a track, for reading a curve back after a commit re-sorted it. */
+function trackInStore(trackId: string): Track | undefined {
+  return projectStore.getState().project?.tracks.find(t => t.id === trackId);
 }
 
 /** Where a block sat when a drag began, or would land if released now. */
@@ -171,6 +206,15 @@ export const ChordTimeline: React.FC = () => {
   const setBarTimeSignature = projectStore(s => s.setBarTimeSignature);
   const setTrackLaneCount = projectStore(s => s.setTrackLaneCount);
   const clearVolumeAutomation = projectStore(s => s.clearVolumeAutomation);
+  const addVolumePoint = projectStore(s => s.addVolumePoint);
+  const moveVolumePoint = projectStore(s => s.moveVolumePoint);
+  const removeVolumePoint = projectStore(s => s.removeVolumePoint);
+  const addLane = projectStore(s => s.addLane);
+  const removeLane = projectStore(s => s.removeLane);
+  const renameLane = projectStore(s => s.renameLane);
+  const addLanePoint = projectStore(s => s.addLanePoint);
+  const moveLanePoint = projectStore(s => s.moveLanePoint);
+  const removeLanePoint = projectStore(s => s.removeLanePoint);
   const setLoopRegion = projectStore(s => s.setLoopRegion);
 
   const moveSegments = projectStore(s => s.moveSegments);
@@ -179,6 +223,14 @@ export const ChordTimeline: React.FC = () => {
   // The timeline is the *editing* surface, so it shows one instrument at a time.
   // Other instruments stay visible on the piano roll below, in their own colours.
   const selectedTrackId = selectionStore(s => s.selectedTrackId);
+  // Read up here rather than after the guard below, because the controller list
+  // is a hook and hooks cannot be called conditionally. The reference is stable —
+  // `find` hands back the object already in the store — so this does not
+  // re-render on every state change.
+  const selectedTrack = projectStore(s =>
+    s.project?.tracks.find(t => t.id === selectedTrackId)
+  );
+  const supportedCc = useVst3Cc(selectedTrack);
   const selectedSegmentIds = selectionStore(s => s.selectedSegmentIds);
   const selectBar = selectionStore(s => s.selectBar);
   const selectSegment = selectionStore(s => s.selectSegment);
@@ -480,9 +532,67 @@ export const ChordTimeline: React.FC = () => {
 
   const { bars, timeSignature: projectTs } = project;
   const totalBeats = getTotalBeats(bars, projectTs);
-  const selectedTrack = project.tracks.find(t => t.id === selectedTrackId);
-  /** Whether the selected instrument has a curve, and so something to clear. */
+  /** Whether the selected instrument has a volume curve, and so something to clear. */
   const hasAutomation = (selectedTrack?.volumeAutomation?.length ?? 0) > 0;
+
+  /**
+   * The curves the selected instrument shows, top to bottom: its volume, then one
+   * lane per automated plugin parameter.
+   *
+   * Built once and read by both halves of the layout — the label column and the
+   * lanes themselves live in different scroll containers, and the only thing
+   * keeping their rows aligned is that they are driven from the same list.
+   */
+  const automationLanes: AutomationLaneDef[] = selectedTrack
+    ? [
+        {
+          key: VOLUME_LANE_KEY,
+          label: 'Volume',
+          points: selectedTrack.volumeAutomation ?? [],
+          // The fader's value: what the instrument plays at with no curve drawn.
+          flatLevel: selectedTrack.volume,
+          readPoints: () => trackInStore(selectedTrack.id)?.volumeAutomation ?? [],
+          onAdd: (beat, value) => addVolumePoint(selectedTrack.id, beat, value),
+          onMove: (i, beat, value) => moveVolumePoint(selectedTrack.id, i, beat, value),
+          onRemove: i => removeVolumePoint(selectedTrack.id, i),
+        },
+        ...(selectedTrack.parameterAutomation ?? []).map(lane => {
+          const key = laneKey(lane.target);
+          return {
+            key,
+            // What the lane was named when it was made, or renamed to since — so
+            // a lane still names itself with the plugin missing.
+            label: lane.name || key,
+            points: lane.points,
+            // Nothing drives a target with no points, so there is no level to
+            // draw. See `AutomationLane`'s `flatLevel`.
+            flatLevel: null,
+            readPoints: () =>
+              laneFor(trackInStore(selectedTrack.id)?.parameterAutomation ?? [], key)
+                ?.points ?? [],
+            onAdd: (beat: number, value: number) =>
+              addLanePoint(selectedTrack.id, key, beat, value),
+            onMove: (i: number, beat: number, value: number) =>
+              moveLanePoint(selectedTrack.id, key, i, beat, value),
+            onRemove: (i: number) => removeLanePoint(selectedTrack.id, key, i),
+            removable: true,
+          };
+        }),
+      ]
+    : [];
+
+  /**
+   * The controller the learn panel offers, or null when there is none to offer.
+   *
+   * Recomputed from the lanes rather than held in state, so adding a lane moves
+   * the suggestion on by itself. `learnCc` overrides it while the user is typing.
+   */
+  const suggestedCc = nextFreeCc(
+    supportedCc,
+    (selectedTrack?.parameterAutomation ?? [])
+      .map(lane => (lane.target.kind === 'cc' ? lane.target.controller : -1))
+      .filter(cc => cc >= 0)
+  );
 
   /**
    * The sub-lane rows to draw, as indices.
@@ -814,10 +924,10 @@ export const ChordTimeline: React.FC = () => {
 
         <button
           type="button"
-          aria-label="Volume automation"
+          aria-label="Automation lanes"
           aria-pressed={showAutomation}
           onClick={() => setShowAutomation(!showAutomation)}
-          title="Show the volume curve for the selected instrument"
+          title="Show the curves for the selected instrument — its volume, and any plugin parameters"
           className={`px-1.5 rounded border ${
             showAutomation
               ? 'bg-indigo-600 border-indigo-500 text-white'
@@ -900,31 +1010,60 @@ export const ChordTimeline: React.FC = () => {
           ))}
         </div>
 
-        {/* Bottom-aligned so it lines up with the automation lane across the two
-            columns, both being the last row of the same stretched flex row. */}
-        {showAutomation && selectedTrack && (
-          <div
-            style={{ height: `${AUTOMATION_LANE_HEIGHT}px` }}
-            className="flex items-center justify-between gap-1 px-2 text-xs text-gray-400 border-t border-gray-700"
-          >
-            <span>Volume</span>
+        {/* Bottom-aligned so these line up with the automation lanes across the two
+            columns, both being the last rows of the same stretched flex row. One
+            row per lane, driven by the same list, which is what keeps them in
+            step as parameters are added and removed. */}
+        {showAutomation &&
+          selectedTrack &&
+          automationLanes.map(lane => (
+            <div
+              key={lane.key}
+              style={{ height: `${AUTOMATION_LANE_HEIGHT}px` }}
+              className="flex items-center justify-between gap-1 px-2 text-xs text-gray-400 border-t border-gray-700"
+            >
+              <LaneLabel
+                label={lane.label}
+                onRename={
+                  lane.removable
+                    ? name => renameLane(selectedTrack.id, lane.key, name)
+                    : undefined
+                }
+              />
 
-            {/* Only once there is a curve to clear: an always-present button that
-                does nothing most of the time reads as broken, and dropping the last
-                point by hand is the only other way back to the fader. */}
-            {hasAutomation && (
-              <button
-                type="button"
-                aria-label={`Clear volume curve for ${selectedTrack.name}`}
-                title="Remove every point and go back to the instrument's fader"
-                onClick={() => clearVolumeAutomation(selectedTrack.id)}
-                className="px-1 rounded text-[11px] text-gray-500 hover:text-red-400 hover:bg-gray-700 transition-colors"
-              >
-                Clear
-              </button>
-            )}
-          </div>
-        )}
+              {!lane.removable
+                ? // Volume. Only once there is a curve to clear: an always-present
+                  // button that does nothing most of the time reads as broken, and
+                  // dropping the last point by hand is the only other way back to
+                  // the fader.
+                  hasAutomation && (
+                    <button
+                      type="button"
+                      aria-label={`Clear volume curve for ${selectedTrack.name}`}
+                      title="Remove every point and go back to the instrument's fader"
+                      onClick={() => clearVolumeAutomation(selectedTrack.id)}
+                      className="px-1 rounded text-[11px] text-gray-500 hover:text-red-400 hover:bg-gray-700 transition-colors"
+                    >
+                      Clear
+                    </button>
+                  )
+                : // A plugin lane goes away entirely rather than being cleared:
+                  // there is no fader behind it to hand control back to, so an
+                  // empty lane would only be a row that does nothing.
+                  (
+                    <button
+                      type="button"
+                      aria-label={`Remove ${lane.label} automation`}
+                      title="Stop automating this and remove its lane"
+                      onClick={() => removeLane(selectedTrack.id, lane.key)}
+                      className="shrink-0 px-1 rounded text-[11px] text-gray-500 hover:text-red-400 hover:bg-gray-700 transition-colors"
+                    >
+                      ✕
+                    </button>
+                  )}
+            </div>
+          ))}
+
       </div>
 
       {/* Still a scroll container, so wheel and trackpad work over the lanes, but
@@ -1157,21 +1296,54 @@ export const ChordTimeline: React.FC = () => {
         })}
         </div>
 
-        {/* Volume over time for the instrument being edited. Inside the scroll
-            container and after the bar row, so it rides the same beat axis, zoom
-            and scroll offset as everything above it with no plumbing of its own —
-            and one continuous strip, so a ramp crosses a bar line in one piece. */}
-        {showAutomation && selectedTrack && (
-          <AutomationLane
-            track={selectedTrack}
-            bars={bars}
-            projectTs={projectTs}
-            totalBeats={totalBeats}
-          />
-        )}
+        {/* The curves for the instrument being edited — its volume, then one lane
+            per automated plugin parameter. Inside the scroll container and after
+            the bar row, so they ride the same beat axis, zoom and scroll offset as
+            everything above them with no plumbing of their own — and each one
+            continuous, so a ramp crosses a bar line in one piece. */}
+        {showAutomation &&
+          selectedTrack &&
+          automationLanes.map(lane => (
+            <AutomationLane
+              key={lane.key}
+              laneKey={lane.key}
+              label={lane.label}
+              points={lane.points}
+              flatLevel={lane.flatLevel}
+              readPoints={lane.readPoints}
+              onAdd={lane.onAdd}
+              onMove={lane.onMove}
+              onRemove={lane.onRemove}
+              bars={bars}
+              projectTs={projectTs}
+              totalBeats={totalBeats}
+            />
+          ))}
         </div>
       </div>
       </div>
+
+      {/* What adds a lane, in a strip of its own under the whole timeline.
+          Not in the gutter: that column is only as wide as the piano roll's key
+          column, and anything but a row of the same height as a lane there both
+          cramps itself and pushes the labels out of step with the curves they
+          name. Full width, so the learn steps read across.
+
+          Only for a plugin that answers `IMidiMapping` at all: one that does not
+          cannot be sent a controller, so there is no learn to offer — and a
+          browser build has no plugins. */}
+      {showAutomation && selectedTrack && supportedCc.length > 0 && (
+        <div className="flex items-center px-2 py-1 border-t border-gray-800">
+          <LearnCcPanel
+            trackId={selectedTrack.id}
+            supported={supportedCc}
+            suggested={suggestedCc}
+            onLearned={controller =>
+              addLane(selectedTrack.id, { kind: 'cc', controller }, `CC ${controller}`)
+            }
+          />
+        </div>
+      )}
     </div>
   );
 };

@@ -38,6 +38,19 @@ const MAX_BLOCK: usize = 2048;
 /// A slot index in the audio thread's plugin table.
 type SlotId = u32;
 
+/// The values sent to make a plugin's MIDI learn notice a controller.
+///
+/// A single value would not do: a control resting where it already is has not
+/// moved, and a plugin waiting to learn is waiting for movement. Ending in the
+/// middle leaves the control it binds somewhere usable rather than at an extreme.
+const LEARN_SWEEP: [f64; 5] = [0.0, 1.0, 0.0, 1.0, 0.5];
+
+/// The gap between them, in seconds.
+///
+/// Several audio blocks apart, so they reach the plugin as five changes over
+/// time rather than five points crowded into one block.
+const LEARN_STEP_SECONDS: f64 = 0.04;
+
 /// What a track currently hosts.
 struct Hosted {
     slot: SlotId,
@@ -72,6 +85,20 @@ enum Command {
     Hold { slot: SlotId, pitch: i16, velocity: u8 },
     Release { slot: SlotId, pitch: i16 },
     Gain { slot: SlotId, gain: f32 },
+    /// Drive one plugin parameter to `value`, normalised 0..=1.
+    ///
+    /// `host_time` of `None` means "in the next block" — what a preview from the
+    /// picker and the pin at Play both want, neither of which has a moment in
+    /// the future to aim at.
+    Param { slot: SlotId, id: u32, value: f64, host_time: Option<f64> },
+    /// Wiggle one parameter across the next few blocks.
+    ///
+    /// Its own command rather than a handful of `Param`s because the values have
+    /// to be *spread in time*: sent untimed they would all land in the block
+    /// being assembled, arriving as one change at one offset — a value, not the
+    /// movement a plugin waiting to learn a controller is listening for. `step`
+    /// is the gap between them in frames.
+    LearnSweep { slot: SlotId, id: u32, step: i64 },
     /// Release everything sounding on one plugin.
     Stop { slot: SlotId },
     /// Release everything sounding, everywhere.
@@ -96,6 +123,12 @@ pub struct Engine {
     components: Mutex<HashMap<String, SendComponent>>,
     /// Control-side controller references, for the editor.
     controllers: Mutex<HashMap<String, SendController>>,
+    /// Which `ParamID` each track's plugin receives a given MIDI controller as.
+    ///
+    /// Filled once per track from `IMidiMapping` and dropped with the plugin.
+    /// Cached because a CC curve resolves the same controller twenty times per
+    /// look-ahead pass and each resolution is a COM call on a Tauri thread.
+    cc_maps: Mutex<HashMap<String, HashMap<u16, u32>>>,
     /// Loudest sample rendered since this was last read, as `f32` bits.
     ///
     /// The only way to ask "did anything actually come out" from outside the
@@ -162,6 +195,7 @@ impl Engine {
             slots: Mutex::new(HashMap::new()),
             components: Mutex::new(HashMap::new()),
             controllers: Mutex::new(HashMap::new()),
+            cc_maps: Mutex::new(HashMap::new()),
             peak,
             sample_rate,
             switches: Mutex::new(switch_tx),
@@ -246,6 +280,11 @@ impl Engine {
             .unwrap()
             .insert(track_id.to_string(), SendComponent(plugin.component_handle()));
 
+        // A different plugin is in the slot now, so whatever the last one mapped
+        // its controllers to says nothing about this one. Past the early return
+        // above, the plugin is always a new instance.
+        self.cc_maps.lock().unwrap().remove(track_id);
+
         let mut controllers = self.controllers.lock().unwrap();
         match plugin.controller_handle() {
             Some(controller) => {
@@ -298,6 +337,7 @@ impl Engine {
     pub fn unload(&self, track_id: &str) -> Result<(), String> {
         self.components.lock().unwrap().remove(track_id);
         self.controllers.lock().unwrap().remove(track_id);
+        self.cc_maps.lock().unwrap().remove(track_id);
 
         let hosted = self.slots.lock().unwrap().remove(track_id);
         if let Some(hosted) = hosted {
@@ -411,6 +451,125 @@ impl Engine {
             return Ok(());
         };
         self.send(Command::Release { slot, pitch })
+    }
+
+    /// The parameters a track's plugin offers as automation targets.
+    ///
+    /// Empty for a track with no plugin, or one whose plugin has no controller —
+    /// both are ordinary states, not errors: the picker simply has nothing to
+    /// offer.
+    pub fn list_params(&self, track_id: &str) -> Vec<crate::vst3::plugin::ParamInfo> {
+        match self.controller(track_id) {
+            Some(controller) => crate::vst3::plugin::list_params(&controller),
+            None => Vec::new(),
+        }
+    }
+
+    /// The MIDI controllers a track's plugin accepts, and what they arrive as.
+    ///
+    /// Empty for a track with no plugin, and for a plugin that implements no
+    /// `IMidiMapping` — neither is an error, it just means there is no MIDI
+    /// learn to offer.
+    pub fn list_cc(&self, track_id: &str) -> Vec<crate::vst3::plugin::CcInfo> {
+        match self.controller(track_id) {
+            Some(controller) => crate::vst3::plugin::list_cc(&controller),
+            None => Vec::new(),
+        }
+    }
+
+    /// The `ParamID` a controller arrives as, or `None` if it is not mapped.
+    ///
+    /// Resolved for the whole plugin at once on the first miss rather than one
+    /// controller at a time: the answer comes from a single pass over
+    /// `IMidiMapping`, and a track's curves ask about the same few controllers
+    /// over and over.
+    pub fn cc_param_id(&self, track_id: &str, controller: u16) -> Option<u32> {
+        if let Some(map) = self.cc_maps.lock().unwrap().get(track_id) {
+            return map.get(&controller).copied();
+        }
+
+        // Built with the lock released: `list_cc` is 128 COM calls, and two
+        // threads racing to it would only compute the same answer twice rather
+        // than hold each other up behind a call into a plugin.
+        let built: HashMap<u16, u32> = self
+            .list_cc(track_id)
+            .into_iter()
+            .map(|cc| (cc.controller, cc.param_id))
+            .collect();
+
+        self.cc_maps
+            .lock()
+            .unwrap()
+            .entry(track_id.to_string())
+            .or_insert(built)
+            .get(&controller)
+            .copied()
+    }
+
+    /// Wiggle a controller so a plugin control armed to learn one binds to it.
+    ///
+    /// Fails rather than going quiet when the plugin maps no such controller:
+    /// the panel that offers this can then say so, where a silent no-op would
+    /// look exactly like a plugin that was never armed.
+    pub fn learn_cc(&self, track_id: &str, controller: u16) -> Result<(), String> {
+        let param_id = self
+            .cc_param_id(track_id, controller)
+            .ok_or_else(|| format!("this plugin has no mapping for CC {controller}"))?;
+
+        let Some(slot) = self.slot_of(track_id) else {
+            return Ok(());
+        };
+        self.send(Command::LearnSweep {
+            slot,
+            id: param_id,
+            step: (self.sample_rate * LEARN_STEP_SECONDS) as i64,
+        })
+    }
+
+    /// Drive a parameter at a moment on the webview's clock.
+    pub fn automate(
+        &self,
+        track_id: &str,
+        param_id: u32,
+        value: f64,
+        host_time: f64,
+    ) -> Result<(), String> {
+        let Some(slot) = self.slot_of(track_id) else {
+            return Ok(());
+        };
+        self.send(Command::Param {
+            slot,
+            id: param_id,
+            value,
+            host_time: Some(host_time),
+        })
+    }
+
+    /// Drive a parameter in the next block, and tell the controller about it.
+    ///
+    /// The controller half is what makes a knob in the plugin's own editor
+    /// follow along. It is best-effort and deliberately only done here, on the
+    /// untimed path: `automate` places points in the *future*, and stating them
+    /// to the controller now would make the editor run ahead of the sound.
+    pub fn set_param(&self, track_id: &str, param_id: u32, value: f64) -> Result<(), String> {
+        if let Some(controller) = self.controller(track_id) {
+            // SAFETY: the controller is live, and this is the same control-side
+            // use `open_editor` and `get_state` already make of it.
+            unsafe {
+                use vst3::Steinberg::Vst::IEditControllerTrait;
+                controller.setParamNormalized(param_id, value);
+            }
+        }
+
+        let Some(slot) = self.slot_of(track_id) else {
+            return Ok(());
+        };
+        self.send(Command::Param {
+            slot,
+            id: param_id,
+            value,
+            host_time: None,
+        })
     }
 
     pub fn set_gain(&self, track_id: &str, gain: f32) -> Result<(), String> {
@@ -785,14 +944,56 @@ fn apply(
                 slot.plugin.0.set_gain(gain);
             }
         }
+        Command::Param {
+            slot: id,
+            id: param,
+            value,
+            host_time,
+        } => {
+            // An untimed change goes out in the block being assembled; a timed
+            // one is placed on the clock exactly as a note is, and is dropped
+            // the same way when no anchor has arrived yet.
+            let at = match host_time {
+                Some(host_time) => match clock.frame_for(host_time) {
+                    Some(at) => at,
+                    None => return,
+                },
+                None => frame,
+            };
+            if let Some(slot) = slots.iter_mut().find(|s| s.id == id) {
+                slot.plugin.0.param_scheduler.schedule(param, value, at);
+            }
+        }
+        Command::LearnSweep {
+            slot: id,
+            id: param,
+            step,
+        } => {
+            if let Some(slot) = slots.iter_mut().find(|s| s.id == id) {
+                // Measured from the block being assembled, so the sweep starts
+                // immediately and needs no clock anchor — a plugin is armed by
+                // hand, with the transport almost always stopped.
+                for (i, value) in LEARN_SWEEP.iter().enumerate() {
+                    slot.plugin
+                        .0
+                        .param_scheduler
+                        .schedule(param, *value, frame + i as i64 * step);
+                }
+            }
+        }
         Command::Stop { slot: id } => {
             if let Some(slot) = slots.iter_mut().find(|s| s.id == id) {
                 slot.plugin.0.scheduler.stop_all();
+                // The curve is abandoned but the parameter is left where it
+                // reached: unlike a note, nothing hangs, and the host has no
+                // better value to impose than the plugin's own.
+                slot.plugin.0.param_scheduler.clear();
             }
         }
         Command::StopAll => {
             for slot in slots.iter_mut() {
                 slot.plugin.0.scheduler.stop_all();
+                slot.plugin.0.param_scheduler.clear();
             }
         }
         Command::Sync { host_time } => {

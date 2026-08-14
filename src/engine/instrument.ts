@@ -6,9 +6,13 @@
  * running in Web Audio and a natively-hosted VST3 sit behind the same interface —
  * the scheduler never learns which one it is driving.
  *
- * No React, no stores, no project types. Notes arrive already resolved to MIDI
- * pitches and seconds.
+ * No React and no stores. Notes arrive already resolved to MIDI pitches and
+ * seconds. The one project type named here is `AutomationTarget`, which is a
+ * description of what to drive rather than a piece of the document — the
+ * scheduler has to be able to say *which* knob, and there is no narrower way to.
  */
+
+import type { AutomationTarget } from '@/types/music';
 
 /** A single note, fully resolved against the instrument's own clock. */
 export interface ScheduledNote {
@@ -74,6 +78,30 @@ export interface Instrument {
    * pass instead, which is coarser but never silent.
    */
   rampVolume?(volume: number, when: number): void;
+
+  /**
+   * Drive one of the instrument's own targets to `value` at `when` on its clock
+   * — the same domain as `ScheduledNote.when`.
+   *
+   * `value` is normalised 0-1, which is both the range every level in this app
+   * uses and the range VST3 works in, so a breakpoint travels from a curve to a
+   * plugin unconverted.
+   *
+   * Optional, like `sustain` and `rampVolume`: a backend with no parameters to
+   * drive has nothing to implement, and a caller finding it absent simply does
+   * not automate that instrument. Unlike `rampVolume` there is no coarser
+   * fallback, because there is nothing to fall back *to* — an instrument that
+   * cannot be automated is not one whose parameters can be stepped instead.
+   */
+  automateTarget?(target: AutomationTarget, value: number, when: number): void;
+
+  /**
+   * State a target now rather than at a moment in the future.
+   *
+   * What pins a curve's value at Play, and what previews one while it is being
+   * drawn. Present exactly when `automateTarget` is.
+   */
+  setTarget?(target: AutomationTarget, value: number): void;
 
   /** Release resources. The instrument is unusable afterwards. */
   dispose(): void;

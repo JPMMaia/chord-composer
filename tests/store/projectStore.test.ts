@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { projectStore } from '@/store/projectStore';
 import { Bar, ChordSegment, NoteName, ScaleType } from '@/types/music';
 import { barChords, barNotes } from '@/engine/timeline';
+import { laneKey } from '@/engine/parameterAutomation';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
 import type { TemplateInstrument } from '@/engine/instrumentTemplate';
 
@@ -2322,6 +2323,182 @@ describe('projectStore', () => {
       expect(copy.volumeAutomation).toEqual([
         { beat: 4, value: 1 },
         { beat: 8, value: 0 },
+      ]);
+    });
+  });
+
+  describe('plugin parameter automation', () => {
+    const state = () => projectStore.getState();
+    const lanes = () => state().project!.tracks[0].parameterAutomation;
+    const keys = () => lanes()!.map(l => laneKey(l.target));
+    const pointsOf = (key: string) => lanes()?.find(l => laneKey(l.target) === key)?.points;
+    /** A parameter target, which most of these cases do not care about. */
+    const param = (paramId: number) => ({ kind: 'param', paramId }) as const;
+
+    beforeEach(() => {
+      state().createProject();
+    });
+
+    it('starts with no lanes, so nothing drives the plugin', () => {
+      expect(lanes()).toBeUndefined();
+    });
+
+    // Unlike a volume curve, an empty lane survives: it is one just added, and
+    // there is no fader behind it to hand control back to.
+    it('keeps a lane that has no points yet', () => {
+      state().addLane(trackId(), param(7), 'Cutoff');
+
+      expect(lanes()).toEqual([{ target: param(7), name: 'Cutoff', points: [] }]);
+    });
+
+    it('sorts lanes by key however they arrive', () => {
+      state().addLane(trackId(), param(9), 'Resonance');
+      state().addLane(trackId(), param(2), 'Cutoff');
+
+      expect(keys()).toEqual(['param:2', 'param:9']);
+    });
+
+    it('leaves an existing lane alone rather than wiping its curve', () => {
+      state().addLane(trackId(), param(7), 'Cutoff');
+      state().addLanePoint(trackId(), 'param:7', 4, 0.5);
+      state().addLane(trackId(), param(7), 'Cutoff');
+
+      expect(pointsOf('param:7')).toEqual([{ beat: 4, value: 0.5 }]);
+    });
+
+    it('adds points in beat order however they arrive', () => {
+      state().addLane(trackId(), param(7), 'Cutoff');
+      state().addLanePoint(trackId(), 'param:7', 8, 0);
+      state().addLanePoint(trackId(), 'param:7', 4, 1);
+
+      expect(pointsOf('param:7')).toEqual([
+        { beat: 4, value: 1 },
+        { beat: 8, value: 0 },
+      ]);
+    });
+
+    it('moves a point and re-sorts, like the volume curve', () => {
+      state().addLane(trackId(), param(7), 'Cutoff');
+      state().addLanePoint(trackId(), 'param:7', 4, 1);
+      state().addLanePoint(trackId(), 'param:7', 8, 0);
+      state().moveLanePoint(trackId(), 'param:7', 0, 12, 0.5);
+
+      expect(pointsOf('param:7')).toEqual([
+        { beat: 8, value: 0 },
+        { beat: 12, value: 0.5 },
+      ]);
+    });
+
+    it('removes a point by index, leaving the lane standing', () => {
+      state().addLane(trackId(), param(7), 'Cutoff');
+      state().addLanePoint(trackId(), 'param:7', 4, 1);
+      state().removeLanePoint(trackId(), 'param:7', 0);
+
+      expect(pointsOf('param:7')).toEqual([]);
+    });
+
+    it('removes a whole lane', () => {
+      state().addLane(trackId(), param(7), 'Cutoff');
+      state().addLane(trackId(), param(9), 'Resonance');
+      state().removeLane(trackId(), 'param:7');
+
+      expect(keys()).toEqual(['param:9']);
+    });
+
+    it('drops the array entirely once the last lane goes', () => {
+      state().addLane(trackId(), param(7), 'Cutoff');
+      state().removeLane(trackId(), 'param:7');
+
+      expect(lanes()).toBeUndefined();
+    });
+
+    it('edits one lane without disturbing another', () => {
+      state().addLane(trackId(), param(7), 'Cutoff');
+      state().addLane(trackId(), param(9), 'Resonance');
+      state().addLanePoint(trackId(), 'param:9', 4, 0.5);
+      state().addLanePoint(trackId(), 'param:7', 2, 1);
+
+      expect(pointsOf('param:7')).toEqual([{ beat: 2, value: 1 }]);
+      expect(pointsOf('param:9')).toEqual([{ beat: 4, value: 0.5 }]);
+    });
+
+    it('leaves the volume curve alone', () => {
+      state().addVolumePoint(trackId(), 4, 0.5);
+      state().addLane(trackId(), param(7), 'Cutoff');
+      state().removeLane(trackId(), 'param:7');
+
+      expect(state().project!.tracks[0].volumeAutomation).toEqual([{ beat: 4, value: 0.5 }]);
+    });
+
+    it('leaves the project alone for an unknown instrument', () => {
+      const before = state().project;
+      state().addLane('no-such-track', param(7), 'Cutoff');
+      expect(state().project).toBe(before);
+    });
+
+    // A no-op must not land an entry on the undo stack, which is snapshot-based
+    // and pushes on every `set`.
+    it('leaves the project alone for a parameter with no lane', () => {
+      state().addLane(trackId(), param(7), 'Cutoff');
+      const before = state().project;
+
+      state().addLanePoint(trackId(), 'param:99', 4, 0.5);
+      state().removeLane(trackId(), 'param:99');
+
+      expect(state().project).toBe(before);
+    });
+
+    it('touches only the instrument it is aimed at', () => {
+      const other = state().addTrack('Strings')!;
+      state().addLane(trackId(), param(7), 'Cutoff');
+
+      expect(
+        state().project!.tracks.find(t => t.id === other)!.parameterAutomation
+      ).toBeUndefined();
+    });
+
+    // A parameter and a controller of the same number are different things, and
+    // one lane must never stand in for the other.
+    it('keeps a controller lane beside a parameter lane of the same number', () => {
+      state().addLane(trackId(), param(20), 'Slot 20');
+      state().addLane(trackId(), { kind: 'cc', controller: 20 }, 'CC 20');
+      state().addLanePoint(trackId(), 'cc:20', 4, 0.5);
+
+      expect(keys()).toEqual(['cc:20', 'param:20']);
+      expect(pointsOf('param:20')).toEqual([]);
+      expect(pointsOf('cc:20')).toEqual([{ beat: 4, value: 0.5 }]);
+    });
+
+    // The name a curve carries has to be the user's: "CC 20" says nothing about
+    // what it drives, and a sampler titles all its slots the same thing.
+    it('renames a lane, leaving its curve alone', () => {
+      state().addLane(trackId(), { kind: 'cc', controller: 20 }, 'CC 20');
+      state().addLanePoint(trackId(), 'cc:20', 4, 0.5);
+      state().renameLane(trackId(), 'cc:20', 'Filter Cutoff');
+
+      expect(lanes()![0].name).toBe('Filter Cutoff');
+      expect(pointsOf('cc:20')).toEqual([{ beat: 4, value: 0.5 }]);
+    });
+
+    it('leaves the project alone for a rename that changes nothing', () => {
+      state().addLane(trackId(), param(7), 'Cutoff');
+      const before = state().project;
+
+      state().renameLane(trackId(), 'param:7', 'Cutoff');
+      state().renameLane(trackId(), 'param:7', '  ');
+      state().renameLane(trackId(), 'param:99', 'Nowhere');
+
+      expect(state().project).toBe(before);
+    });
+
+    it('is carried by duplicateTrack, like the preset and the volume curve', () => {
+      state().addLane(trackId(), param(7), 'Cutoff');
+      state().addLanePoint(trackId(), 'param:7', 4, 1);
+      state().duplicateTrack(trackId());
+
+      const copy = state().project!.tracks.find(t => t.name === 'Piano (copy)')!;
+      expect(copy.parameterAutomation).toEqual([
+        { target: param(7), name: 'Cutoff', points: [{ beat: 4, value: 1 }] },
       ]);
     });
   });

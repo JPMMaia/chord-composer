@@ -1,10 +1,12 @@
 import type {
   ArpeggioPattern,
   AutomationPoint,
+  AutomationTarget,
   ChordQuality,
   ChordSegment,
   Note,
   NoteName,
+  ParameterAutomation,
   Project,
   Scale,
   ScaleType,
@@ -19,6 +21,7 @@ import type {
 } from '@/types/music';
 import { barChords, getTotalBeats, isValidTimeSignature } from '@/engine/timeline';
 import { normalizePoints } from '@/engine/volumeAutomation';
+import { MAX_CC, normalizeParameterAutomation } from '@/engine/parameterAutomation';
 import { normalizeSections } from '@/engine/sections';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
 import { trackColorAt } from '@/utils/constants';
@@ -118,8 +121,24 @@ const LEGACY_TRACK_ID = 'track-legacy';
  * nothing else; no note's sound depends on one. The key is omitted when there are
  * none, so an unlabelled project serialises byte for byte as it did under 1.12, and
  * a pre-1.13 file reads back as the unlabelled timeline it always was.
+ *
+ * 1.14 added plugin parameter automation: per-track curves driving a VST3 plugin's own
+ * parameters by id, on the same absolute-beat axis and the same 0-1 scale as the volume
+ * curve — which is also VST3's normalised range, so a breakpoint needs no conversion.
+ * Each lane stores the parameter's title beside its id, so a lane can still name itself
+ * on a machine where the plugin is not installed. The key is omitted when there are no
+ * lanes, so a project with no parameter curves serialises byte for byte as it did under
+ * 1.13, and a pre-1.14 file reads back with nothing automated but its volume.
+ *
+ * 1.15 let a lane drive a MIDI controller as well as a named parameter, which is what
+ * reaches a sampler whose own controls are bound by MIDI learn rather than published
+ * under useful names. A lane's `paramId` became a `target` — `{kind: 'param', paramId}`
+ * or `{kind: 'cc', controller}` — because a controller has to be stored as the number
+ * the user bound rather than as the id it currently resolves to, which belongs to this
+ * installed version of this plugin. A 1.14 lane's bare `paramId` reads back as a
+ * `param` target, so nothing automated under 1.14 loses its curve.
  */
-export const SCHEMA_VERSION = '1.13';
+export const SCHEMA_VERSION = '1.15';
 
 /**
  * Validation error returned by validateProject.
@@ -201,6 +220,10 @@ export function serializeProject(project: Project): string {
       // and still round-trips byte for byte as it did under 1.9.
       volumeAutomation:
         t.volumeAutomation && t.volumeAutomation.length > 0 ? t.volumeAutomation : undefined,
+      // Omitted on the same terms, and additionally without its empty lanes: a
+      // lane with no points survives an edit — it is one just added, waiting to be
+      // drawn on — but saving one would preserve a gesture rather than a curve.
+      parameterAutomation: serializeParameterAutomation(t.parameterAutomation),
       pan: t.pan,
       muted: t.muted,
       solo: t.solo,
@@ -402,6 +425,54 @@ function parseAutomation(raw: unknown): AutomationPoint[] | undefined {
   return points.length > 0 ? points : undefined;
 }
 
+/** How a lane names itself in a validation message. */
+function describeTarget(target: { kind?: string; paramId?: unknown; controller?: unknown }): string {
+  return target?.kind === 'cc' ? `CC ${target.controller}` : `parameter ${target?.paramId}`;
+}
+
+/**
+ * A track's parameter lanes as they go into a file, or absent when there are none.
+ *
+ * Empty lanes are dropped on the way out: one survives an *edit*, because a lane
+ * just added is waiting to be drawn on, but a saved file describing a curve with
+ * no points in it records a gesture rather than any music.
+ */
+function serializeParameterAutomation(
+  lanes: ParameterAutomation[] | undefined
+): ParameterAutomation[] | undefined {
+  const kept = normalizeParameterAutomation(lanes ?? [], { dropEmpty: true });
+  return kept.length > 0 ? kept : undefined;
+}
+
+/**
+ * Read a track's plugin lanes off a file.
+ *
+ * Absent when there is nothing usable, rather than an empty array — the same rule
+ * `parseAutomation` follows above, and what a project written before parameter
+ * automation says. A malformed lane is dropped rather than repaired: a curve with
+ * nothing to drive says nothing about what the author meant.
+ *
+ * A 1.14 lane carried a bare `paramId` where a 1.15 one carries a `target`; it is
+ * read as the parameter target it always meant. No version is consulted to decide
+ * that, in keeping with every other key here: the shape says which it is.
+ */
+function readParameterAutomation(raw: unknown): ParameterAutomation[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+
+  const upgraded = raw.map(lane => {
+    if (typeof lane !== 'object' || lane === null) return lane;
+    const legacy = lane as { target?: unknown; paramId?: unknown };
+    if (legacy.target !== undefined || typeof legacy.paramId !== 'number') return lane;
+
+    return { ...legacy, target: { kind: 'param', paramId: legacy.paramId } };
+  });
+
+  const lanes = normalizeParameterAutomation(upgraded as ParameterAutomation[], {
+    dropEmpty: true,
+  });
+  return lanes.length > 0 ? lanes : undefined;
+}
+
 /**
  * Read the project's sections off a file.
  *
@@ -490,6 +561,10 @@ export function deserializeProject(json: string): Project {
         // Anything malformed is dropped, which lands the track back on its flat
         // volume rather than failing the whole load.
         volumeAutomation: parseAutomation(t.volumeAutomation),
+        // Normalised for the same reason, and dropped on the same terms: a lane
+        // naming no parameter drives nothing, and losing it is better than
+        // failing the load over it.
+        parameterAutomation: readParameterAutomation(t.parameterAutomation),
         pan: typeof t.pan === 'number' ? t.pan : 0,
         muted: t.muted === true,
         solo: t.solo === true,
@@ -760,6 +835,59 @@ export function validateProject(project: Project): ValidationResult {
             point.value > 1
           ) {
             errors.push(`Track ${i}: volume automation value must be between 0 and 1.`);
+            break;
+          }
+        }
+      }
+    }
+
+    if (t.parameterAutomation !== undefined) {
+      if (!Array.isArray(t.parameterAutomation)) {
+        errors.push(`Track ${i}: parameter automation must be a list of lanes.`);
+      } else {
+        for (const lane of t.parameterAutomation) {
+          // A 1.14 lane named its parameter directly, so it is read the same way
+          // `readParameterAutomation` reads one — validating a file must not
+          // reject what opening it accepts. The cast is what says this arrives
+          // untrusted, whatever the declared type claims.
+          const legacy = lane as { target?: AutomationTarget; paramId?: number };
+          const target: AutomationTarget | { kind: 'param'; paramId?: number } =
+            legacy?.target ?? { kind: 'param', paramId: legacy?.paramId };
+          const named = describeTarget(target);
+
+          // A VST3 ParamID is an unsigned 32-bit integer and a MIDI controller is
+          // 0-127; anything else names nothing the plugin could be sent.
+          const usable =
+            target.kind === 'param'
+              ? Number.isInteger(target.paramId) && (target.paramId ?? -1) >= 0
+              : target.kind === 'cc' &&
+                Number.isInteger(target.controller) &&
+                target.controller >= 0 &&
+                target.controller <= MAX_CC;
+          if (!usable) {
+            errors.push(
+              `Track ${i}: automation needs a whole parameter id >= 0 or a controller 0-${MAX_CC}.`
+            );
+            break;
+          }
+          if (!Array.isArray(lane.points)) {
+            errors.push(`Track ${i}: ${named} needs a list of points.`);
+            break;
+          }
+          const bad = lane.points.find(
+            p =>
+              typeof p?.beat !== 'number' ||
+              !Number.isFinite(p.beat) ||
+              p.beat < 0 ||
+              typeof p?.value !== 'number' ||
+              !Number.isFinite(p.value) ||
+              p.value < 0 ||
+              p.value > 1
+          );
+          if (bad) {
+            errors.push(
+              `Track ${i}: ${named} needs a beat >= 0 and a value between 0 and 1.`
+            );
             break;
           }
         }

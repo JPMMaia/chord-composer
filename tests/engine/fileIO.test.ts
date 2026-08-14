@@ -12,6 +12,7 @@ import {
 } from '@/engine/fileIO';
 import { Project, Bar, Track, Note, ChordSegment, TimeSignature } from '@/types/music';
 import { generateId } from '@/utils/id';
+import { laneKey } from '@/engine/parameterAutomation';
 
 // Helper to create a minimal valid project for testing
 /**
@@ -586,7 +587,7 @@ describe('fileIO', () => {
         });
 
       it('states the current schema version', () => {
-        expect(SCHEMA_VERSION).toBe('1.13');
+        expect(SCHEMA_VERSION).toBe('1.15');
       });
 
       it('round-trips names, ranges and colours', () => {
@@ -672,6 +673,156 @@ describe('fileIO', () => {
         );
 
         expect(result.valid).toBe(true);
+      });
+    });
+
+    describe('plugin parameter automation', () => {
+      /** The fixture with one automated parameter on its first instrument. */
+      const withParams = () => {
+        const project = createTestProject();
+        project.tracks[0].parameterAutomation = [
+          {
+            target: { kind: 'param', paramId: 7 },
+            name: 'Cutoff',
+            points: [
+              { beat: 0, value: 0.2 },
+              { beat: 4, value: 0.9 },
+            ],
+          },
+        ];
+        return project;
+      };
+
+      it('round-trips a lane, its name and its points', () => {
+        const restored = deserializeProject(serializeProject(withParams()));
+
+        expect(restored.tracks[0].parameterAutomation).toEqual([
+          {
+            target: { kind: 'param', paramId: 7 },
+            name: 'Cutoff',
+            points: [
+              { beat: 0, value: 0.2 },
+              { beat: 4, value: 0.9 },
+            ],
+          },
+        ]);
+      });
+
+      it('omits the key entirely when nothing is automated', () => {
+        const json = JSON.parse(serializeProject(createTestProject()));
+        expect('parameterAutomation' in json.tracks[0]).toBe(false);
+      });
+
+      // A lane with no points survives an edit — it is one just added — but saving
+      // it would preserve a gesture rather than a curve.
+      it('does not write a lane that has no points', () => {
+        const project = createTestProject();
+        project.tracks[0].parameterAutomation = [{ target: { kind: 'param', paramId: 7 }, name: 'Cutoff', points: [] }];
+
+        const json = JSON.parse(serializeProject(project));
+        expect('parameterAutomation' in json.tracks[0]).toBe(false);
+      });
+
+      it('reads a file written before parameter automation as having none', () => {
+        const json = JSON.parse(serializeProject(createTestProject()));
+        const restored = deserializeProject(JSON.stringify({ ...json, version: '1.13' }));
+
+        expect(restored.tracks[0].parameterAutomation).toBeUndefined();
+        // And the volume curve it did carry is untouched by the new field.
+        expect(restored.tracks[0].volume).toBe(json.tracks[0].volume);
+      });
+
+      it('drops a lane naming no parameter rather than failing the load', () => {
+        const json = JSON.parse(serializeProject(withParams()));
+        json.tracks[0].parameterAutomation.push({ name: 'Broken', points: [] });
+        json.tracks[0].parameterAutomation.push({ target: { kind: 'param', paramId: -1 }, name: 'Bad', points: [] });
+        json.tracks[0].parameterAutomation.push({ target: { kind: 'cc', controller: 200 }, name: 'Bad CC', points: [] });
+
+        expect(
+          deserializeProject(JSON.stringify(json)).tracks[0].parameterAutomation?.map(
+            l => laneKey(l.target)
+          )
+        ).toEqual(['param:7']);
+      });
+
+      // 1.14 named a parameter directly, before a lane could drive a controller
+      // too. Read as the parameter target it always meant, so a project automated
+      // under 1.14 does not silently lose its curves.
+      it('reads a 1.14 lane’s bare parameter id as a parameter target', () => {
+        const json = JSON.parse(serializeProject(withParams()));
+        json.version = '1.14';
+        json.tracks[0].parameterAutomation = [
+          { paramId: 7, name: 'Cutoff', points: [{ beat: 0, value: 0.2 }] },
+        ];
+
+        expect(deserializeProject(JSON.stringify(json)).tracks[0].parameterAutomation).toEqual([
+          {
+            target: { kind: 'param', paramId: 7 },
+            name: 'Cutoff',
+            points: [{ beat: 0, value: 0.2 }],
+          },
+        ]);
+      });
+
+      it('round-trips a controller lane beside a parameter one', () => {
+        const project = withParams();
+        project.tracks[0].parameterAutomation = [
+          ...project.tracks[0].parameterAutomation!,
+          {
+            target: { kind: 'cc', controller: 20 },
+            name: 'Filter Cutoff',
+            points: [{ beat: 2, value: 0.7 }],
+          },
+        ];
+
+        const restored = deserializeProject(serializeProject(project));
+
+        expect(restored.tracks[0].parameterAutomation).toEqual([
+          {
+            target: { kind: 'cc', controller: 20 },
+            name: 'Filter Cutoff',
+            points: [{ beat: 2, value: 0.7 }],
+          },
+          {
+            target: { kind: 'param', paramId: 7 },
+            name: 'Cutoff',
+            points: [
+              { beat: 0, value: 0.2 },
+              { beat: 4, value: 0.9 },
+            ],
+          },
+        ]);
+      });
+
+      it('sorts and dedupes what a hand-edited file states', () => {
+        const json = JSON.parse(serializeProject(withParams()));
+        json.tracks[0].parameterAutomation = [
+          { target: { kind: 'param', paramId: 9 }, name: 'Resonance', points: [{ beat: 4, value: 0.5 }] },
+          { target: { kind: 'param', paramId: 2 }, name: 'Drive', points: [{ beat: 4, value: 0.1 }, { beat: 0, value: 0.2 }] },
+        ];
+
+        const lanes = deserializeProject(JSON.stringify(json)).tracks[0].parameterAutomation!;
+
+        expect(lanes.map(l => laneKey(l.target))).toEqual(['param:2', 'param:9']);
+        expect(lanes[0].points.map(p => p.beat)).toEqual([0, 4]);
+      });
+
+      it('rejects a lane with no parameter id, or a value out of range', () => {
+        const noId = createTestProject();
+        noId.tracks[0].parameterAutomation = [
+          { target: { kind: 'param', paramId: 1.5 }, name: 'Cutoff', points: [] },
+        ];
+        expect(validateProject(noId).errors.join(' ')).toContain('whole parameter id');
+
+        const badValue = createTestProject();
+        badValue.tracks[0].parameterAutomation = [
+          { target: { kind: 'param', paramId: 7 }, name: 'Cutoff', points: [{ beat: 0, value: 2 }] },
+        ];
+        expect(validateProject(badValue).errors.join(' ')).toContain('between 0 and 1');
+      });
+
+      it('accepts a well-formed lane', () => {
+        expect(validateProject(withParams()).valid).toBe(true);
       });
     });
 

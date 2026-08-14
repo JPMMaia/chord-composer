@@ -12,6 +12,7 @@ import {
   toClockTime,
 } from '@/engine/scheduler';
 import { firstPointAtOrAfter, valueAtBeat } from '@/engine/volumeAutomation';
+import { laneKey, VOLUME_LANE_KEY } from '@/engine/parameterAutomation';
 import { syncVst3Clock } from '@/engine/vst3Instrument';
 import { registerAudioContext } from '@/engine/audioOutput';
 import {
@@ -52,10 +53,25 @@ const VOLUME_STEP_EPSILON = 0.005;
 interface AutomationCursor {
   /** Index of the next breakpoint not yet handed to the instrument. */
   index: number;
+  /**
+   * Song time of the next *sampled* value, for a curve walked on a grid rather
+   * than breakpoint by breakpoint. Unused when `index` is what advances.
+   */
+  nextSongTime: number;
   points: AutomationPoint[];
   /** Last level sent, for backends stepped per pass rather than ramped. */
   lastValue: number;
 }
+
+/**
+ * How far apart sampled points are, in song seconds.
+ *
+ * Ten milliseconds reproduces a corner in the curve closely enough that no sweep
+ * can show the difference, while a 200 ms look-ahead window costs only twenty
+ * points per lane per pass. See `advanceCurve`'s `maxStep` for why a plugin
+ * parameter has to be sampled at all.
+ */
+const PARAM_GRID_SECONDS = 0.01;
 
 /**
  * Drives playback: owns the AudioContext, the instrument pool, and the look-ahead
@@ -114,7 +130,13 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
 
   /** Memoised `calculateNoteTiming` for this run. Null while stopped. */
   const timingsRef = useRef<((bars: Bar[]) => NoteTiming[]) | null>(null);
-  /** How far through each instrument's volume curve this run has got, by track id. */
+  /**
+   * How far through each curve this run has got, keyed by `<trackId>|<laneKey>`.
+   *
+   * Keyed by lane rather than by track because an instrument now has several
+   * curves — its volume, and one per automated plugin parameter — and each
+   * advances independently.
+   */
   const automationRef = useRef(new Map<string, AutomationCursor>());
   /** Whether the click queue has been built for the current playback run. */
   const clickQueueBuiltRef = useRef(false);
@@ -139,6 +161,13 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
    * the gain node sitting whereever the fade reached, and the next Play would open
    * at that level — a project that gets quieter every time you press Play.
    *
+   * Plugin parameters are deliberately *not* reset with it. Volume has a flat
+   * value to go back to; a parameter does not, and inventing one would mean
+   * overwriting whatever the plugin's preset or its own editor last said. So a
+   * parameter is left where the curve left it, and the pin at the next Play
+   * states it from the curve — which makes the result deterministic without the
+   * app ever making a value up. Only the cursors go.
+   *
    * Deliberately not `pool.ensure`, which would also reconcile instruments and so
    * could start a sample download from a Stop handler.
    */
@@ -153,12 +182,105 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
   }, []);
 
   /**
-   * Hand each instrument the part of its volume curve falling inside this pass's
-   * look-ahead window.
+   * Advance one curve, returning the cursor it left off at.
    *
-   * Scheduled breakpoint by breakpoint rather than window by window: a ramp arrives
-   * at the *next* breakpoint, which may be many windows out, so slicing the curve by
-   * window would stair-step every long fade into a series of 50 ms steps.
+   * The shared half of every kind of automation: notice when the curve underneath
+   * the cursor has been replaced and re-pin against it, then hand out whatever
+   * falls inside the look-ahead window. What differs between a volume curve and a
+   * plugin parameter is only *how* a value is stated and scheduled, which is what
+   * `pin` and `emit` carry in.
+   *
+   * @param pin - State the value now. Called on a fresh run, a loop wrap, or an
+   *   edit made mid-playback — which is what makes a Play from the middle of a
+   *   ramp start at the level the ramp had reached rather than at its opening.
+   * @param emit - Place a value at a moment on the instrument's clock, or null
+   *   for a backend that cannot promise a value at a time.
+   * @param maxStep - The longest gap between emitted values, in song seconds, or
+   *   null to emit only at the curve's own breakpoints.
+   *
+   *   Volume passes null because `rampVolume` is `linearRampToValueAtTime`, which
+   *   draws the line between two points itself — sending the ends is sending the
+   *   ramp. A plugin has nothing that does: a parameter change is a value at a
+   *   sample and holds until the next one, so a four-bar sweep described by its
+   *   two ends would sit still and jump at the far one. Sampling the curve is
+   *   what makes a sweep a sweep.
+   */
+  const advanceCurve = useCallback(
+    (
+      key: string,
+      points: AutomationPoint[],
+      fallback: number,
+      elapsedBeat: number,
+      bpm: number,
+      horizon: number,
+      pin: (value: number) => void,
+      emit: ((value: number, when: number) => void) | null,
+      maxStep: number | null
+    ) => {
+      let cursor = automationRef.current.get(key);
+      if (!cursor || cursor.points !== points) {
+        // Pinning cancels whatever was scheduled against the old curve and states
+        // the value here.
+        const value = valueAtBeat(points, elapsedBeat, fallback);
+        pin(value);
+        cursor = {
+          index: firstPointAtOrAfter(points, elapsedBeat),
+          // From where playback actually is, so a Play from the middle of a ramp
+          // samples from there rather than replaying the curve's opening.
+          nextSongTime: beatToSongTime(elapsedBeat, bpm),
+          points,
+          lastValue: value,
+        };
+        automationRef.current.set(key, cursor);
+      }
+
+      if (!emit) {
+        // Stepped instead of scheduled, for a backend whose value is set through
+        // something with no notion of time. Only on a real change: a flat stretch
+        // of curve is not twenty commands a second.
+        const value = valueAtBeat(points, elapsedBeat, fallback);
+        if (Math.abs(value - cursor.lastValue) > VOLUME_STEP_EPSILON) {
+          pin(value);
+          cursor.lastValue = value;
+        }
+        return;
+      }
+
+      if (maxStep === null) {
+        // Breakpoint by breakpoint rather than window by window: a ramp arrives at
+        // the *next* breakpoint, which may be many windows out, so slicing the curve
+        // by window would stair-step every long fade into a series of 50 ms steps.
+        while (cursor.index < points.length) {
+          const songTime = beatToSongTime(points[cursor.index].beat, bpm);
+          if (songTime >= horizon) break;
+
+          emit(points[cursor.index].value, toClockTime(songTime, songStartClockRef.current));
+          cursor.index++;
+        }
+        return;
+      }
+
+      // Sampled on a fixed grid. A held value still costs nothing: the same
+      // epsilon the stepped path uses skips it, so a curve only sends while it is
+      // actually moving.
+      while (cursor.nextSongTime < horizon) {
+        const songTime = cursor.nextSongTime;
+        cursor.nextSongTime += maxStep;
+
+        const value = valueAtBeat(points, songTimeToBeat(songTime, bpm), fallback);
+        if (Math.abs(value - cursor.lastValue) <= VOLUME_STEP_EPSILON) continue;
+
+        emit(value, toClockTime(songTime, songStartClockRef.current));
+        cursor.lastValue = value;
+      }
+    },
+    []
+  );
+
+  /**
+   * Hand each instrument the part of every curve it owns that falls inside this
+   * pass's look-ahead window: its volume, and one lane per automated plugin
+   * parameter.
    */
   const scheduleAutomation = useCallback(
     (cfg: PlaybackConfig, pool: InstrumentPool, elapsed: number, horizon: number) => {
@@ -168,55 +290,60 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
         const instrument = pool.get(track.id);
         if (!instrument) continue;
 
+        const volumeKey = `${track.id}|${VOLUME_LANE_KEY}`;
         const points = track.volumeAutomation ?? [];
         if (points.length === 0) {
           // No curve: the flat volume the pool applied when it built the instrument
           // still stands, and a cursor left from a curve just deleted must not.
-          automationRef.current.delete(track.id);
-          continue;
-        }
-
-        let cursor = automationRef.current.get(track.id);
-        if (!cursor || cursor.points !== points) {
-          // A fresh run, a loop wrap, or an edit made while playing. Pinning cancels
-          // whatever was scheduled against the old curve and states the level here,
-          // which is also what makes a Play from the middle of a fade start at the
-          // level the fade had reached rather than at its opening.
-          const value = valueAtBeat(points, elapsedBeat, track.volume);
-          instrument.setVolume(value);
-          cursor = {
-            index: firstPointAtOrAfter(points, elapsedBeat),
+          automationRef.current.delete(volumeKey);
+        } else {
+          advanceCurve(
+            volumeKey,
             points,
-            lastValue: value,
-          };
-          automationRef.current.set(track.id, cursor);
-        }
-
-        if (!instrument.rampVolume) {
-          // Stepped instead of ramped, for a backend whose level is set through
-          // something with no notion of time. Only on a real change: a flat stretch
-          // of curve is not twenty commands a second.
-          const value = valueAtBeat(points, elapsedBeat, track.volume);
-          if (Math.abs(value - cursor.lastValue) > VOLUME_STEP_EPSILON) {
-            instrument.setVolume(value);
-            cursor.lastValue = value;
-          }
-          continue;
-        }
-
-        while (cursor.index < points.length) {
-          const songTime = beatToSongTime(points[cursor.index].beat, cfg.bpm);
-          if (songTime >= horizon) break;
-
-          instrument.rampVolume(
-            points[cursor.index].value,
-            toClockTime(songTime, songStartClockRef.current)
+            track.volume,
+            elapsedBeat,
+            cfg.bpm,
+            horizon,
+            value => instrument.setVolume(value),
+            instrument.rampVolume
+              ? (value, when) => instrument.rampVolume!(value, when)
+              : null,
+            // The ends are enough: `rampVolume` draws the line between them.
+            null
           );
-          cursor.index++;
+        }
+
+        // Plugin targets. An instrument with no `automateTarget` cannot be driven
+        // at all — unlike volume there is no coarser fallback, because there is
+        // nothing to fall back *to* — so it is skipped outright.
+        if (!instrument.automateTarget || !instrument.setTarget) continue;
+
+        for (const lane of track.parameterAutomation ?? []) {
+          const key = `${track.id}|${laneKey(lane.target)}`;
+          if (lane.points.length === 0) {
+            automationRef.current.delete(key);
+            continue;
+          }
+
+          advanceCurve(
+            key,
+            lane.points,
+            // No flat value to fall back to, and none is ever reached: `fallback`
+            // is only consulted for an empty curve, which the guard above excludes.
+            0,
+            elapsedBeat,
+            cfg.bpm,
+            horizon,
+            value => instrument.setTarget!(lane.target, value),
+            // Sample-accurate, unlike a plugin's volume: a change goes through
+            // VST3's own queue, which carries a sample offset per point.
+            (value, when) => instrument.automateTarget!(lane.target, value, when),
+            PARAM_GRID_SECONDS
+          );
         }
       }
     },
-    []
+    [advanceCurve]
   );
 
   const clearTimer = useCallback(() => {

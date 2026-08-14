@@ -11,6 +11,22 @@ use std::process::Command;
 
 use chord_composer_lib::vst3::{module::Module, plugin::Plugin};
 
+/// The fixture's automatable parameter. Kept in step with `test-synth`'s
+/// `GAIN_PARAM` by hand: the fixture is loaded as a library at runtime, not
+/// linked, so there is no constant to share.
+const GAIN_PARAM: u32 = 0;
+
+/// The fixture's hidden, MIDI-only gain, and the controllers it maps.
+///
+/// CC 20 reaches `CC_GAIN_PARAM` and is audible; CC 1 reaches the fixture's inert
+/// `SECRET_PARAM` and is not. Kept in step with `test-synth` by hand, as
+/// `GAIN_PARAM` is.
+const CC_GAIN_PARAM: u32 = 3;
+const AUDIBLE_CC: u16 = 20;
+const INERT_CC: u16 = 1;
+/// A controller the fixture deliberately does not map.
+const UNMAPPED_CC: u16 = 74;
+
 const SAMPLE_RATE: f64 = 48_000.0;
 const BLOCK: usize = 512;
 
@@ -194,6 +210,101 @@ fn gain_scales_the_output() {
     );
 }
 
+#[test]
+fn the_parameter_list_is_the_automatable_ones() {
+    let plugin = load();
+    let controller = plugin.controller_handle().expect("the fixture has a controller");
+
+    let params = chord_composer_lib::vst3::plugin::list_params(&controller);
+
+    // The fixture publishes four; the read-only one and the two hidden ones are
+    // not automation targets and must not be offered as though they were.
+    assert_eq!(params.len(), 1, "got {params:?}");
+    assert_eq!(params[0].id, GAIN_PARAM);
+    assert_eq!(params[0].title, "Gain");
+    assert_eq!(params[0].units, "dB");
+    assert_eq!(params[0].step_count, 0);
+}
+
+#[test]
+fn a_scheduled_parameter_change_reaches_the_plugin() {
+    let mut plugin = load();
+    plugin.scheduler.schedule_note(60, 100, 0, 48_000);
+    plugin.param_scheduler.schedule(GAIN_PARAM, 0.0, 0);
+
+    let peaks = render(&mut plugin, 0, 2);
+    assert_eq!(peaks[1], 0.0, "a gain of zero should silence the note");
+}
+
+// The assertion this whole path exists for. A host that ignored the sample
+// offset — applying the value at the start of the block instead — would silence
+// the *entire* block, and the first half would be zero too.
+#[test]
+fn a_parameter_change_takes_effect_at_the_sample_it_was_placed_on() {
+    let mut plugin = load();
+    plugin.scheduler.schedule_note(60, 100, 0, 48_000);
+    // Half way through the second block.
+    let at = BLOCK as i64 + (BLOCK / 2) as i64;
+    plugin.param_scheduler.schedule(GAIN_PARAM, 0.0, at);
+
+    let mut out = vec![0.0f32; BLOCK * 2];
+    plugin.process_into(&mut out, BLOCK, 0);
+    out.fill(0.0);
+    plugin.process_into(&mut out, BLOCK, BLOCK as i64);
+
+    // Interleaved stereo, so frame N is samples 2N and 2N+1.
+    let before = peak(&out[..BLOCK]);
+    let after = peak(&out[BLOCK..]);
+
+    assert!(before > 0.0, "should still sound before the change: {before}");
+    assert_eq!(after, 0.0, "should be silent from the change onward");
+}
+
+#[test]
+fn a_parameter_change_holds_until_the_next_one() {
+    let mut plugin = load();
+    plugin.scheduler.schedule_note(60, 100, 0, 48_000);
+    plugin.param_scheduler.schedule(GAIN_PARAM, 0.0, 0);
+    // Nothing more is scheduled, so the third block still carries the change
+    // made in the first: a parameter holds rather than reverting.
+    let peaks = render(&mut plugin, 0, 3);
+
+    assert_eq!(&peaks[1..], &[0.0, 0.0], "got {peaks:?}");
+}
+
+#[test]
+fn two_parameter_changes_in_one_block_both_land() {
+    let mut plugin = load();
+    plugin.scheduler.schedule_note(60, 100, 0, 48_000);
+    // Down at a quarter of the way in, back up at three quarters.
+    plugin.param_scheduler.schedule(GAIN_PARAM, 0.0, (BLOCK / 4) as i64);
+    plugin.param_scheduler.schedule(GAIN_PARAM, 1.0, (BLOCK * 3 / 4) as i64);
+
+    let mut out = vec![0.0f32; BLOCK * 2];
+    plugin.process_into(&mut out, BLOCK, 0);
+
+    let middle = peak(&out[BLOCK / 2..BLOCK * 3 / 2]);
+    let end = peak(&out[BLOCK * 3 / 2..]);
+
+    assert_eq!(middle, 0.0, "the middle stretch should be silenced");
+    assert!(end > 0.0, "and it should come back: {end}");
+}
+
+// A parameter is not a note: stopping abandons the curve but leaves the value
+// where it reached, because the host has nothing better to put there.
+#[test]
+fn clearing_the_curve_leaves_the_parameter_where_it_was() {
+    let mut plugin = load();
+    plugin.scheduler.schedule_note(60, 100, 0, 48_000 * 10);
+    plugin.param_scheduler.schedule(GAIN_PARAM, 0.0, 0);
+    render(&mut plugin, 0, 1);
+
+    plugin.param_scheduler.clear();
+
+    let after = render(&mut plugin, BLOCK as i64, 2);
+    assert_eq!(after, vec![0.0, 0.0], "the gain should still be down");
+}
+
 // `process_into` adds rather than overwrites, because several plugins share one
 // output buffer and each mixes itself in.
 #[test]
@@ -208,4 +319,85 @@ fn rendering_adds_into_the_buffer_rather_than_replacing_it() {
     // already in the buffer has to still be there.
     assert!((out[0] - 0.5).abs() < 1e-6, "got {}", out[0]);
     assert!(out.iter().any(|s| (*s - 0.5).abs() > 1e-3), "nothing was added");
+}
+
+// --- MIDI controllers --------------------------------------------------------
+//
+// In VST3 a plugin is sent no MIDI stream: a controller reaches it as a parameter
+// change on whatever `ParamID` `IMidiMapping` names for it. These prove the
+// naming, and that a change addressed as a controller travels the same
+// sample-accurate path an ordinary parameter does.
+
+#[test]
+fn the_controller_list_is_the_ones_the_plugin_maps() {
+    let plugin = load();
+    let controller = plugin.controller_handle().expect("the fixture has a controller");
+
+    let mapped = chord_composer_lib::vst3::plugin::list_cc(&controller);
+
+    // Two of the 128 asked about, which is the point: a host that read the
+    // out-parameter without checking the result would come back with all 128.
+    assert_eq!(mapped.len(), 2, "got {mapped:?}");
+
+    let audible = mapped.iter().find(|cc| cc.controller == AUDIBLE_CC);
+    assert_eq!(audible.map(|cc| cc.param_id), Some(CC_GAIN_PARAM));
+    // Two controllers, two different parameters — a host that collapsed them
+    // would drive the wrong one.
+    let inert = mapped.iter().find(|cc| cc.controller == INERT_CC);
+    assert!(inert.is_some_and(|cc| cc.param_id != CC_GAIN_PARAM), "got {inert:?}");
+
+    assert!(!mapped.iter().any(|cc| cc.controller == UNMAPPED_CC));
+}
+
+// The parameter a controller resolves to is hidden, so it is absent from the
+// parameter picker — which is exactly how real plugins publish their CC proxies.
+// Reconciling the two lists would hide a working target.
+#[test]
+fn a_mapped_controller_names_a_parameter_the_picker_does_not_offer() {
+    let plugin = load();
+    let controller = plugin.controller_handle().expect("the fixture has a controller");
+
+    let params = chord_composer_lib::vst3::plugin::list_params(&controller);
+    assert!(!params.iter().any(|p| p.id == CC_GAIN_PARAM), "got {params:?}");
+}
+
+#[test]
+fn a_change_sent_as_a_controller_takes_effect_at_its_own_sample() {
+    let mut plugin = load();
+    plugin.scheduler.schedule_note(60, 100, 0, 48_000);
+
+    // Addressed the way the command layer does it: resolve, then schedule.
+    let controller = plugin.controller_handle().expect("controller");
+    let id = chord_composer_lib::vst3::plugin::list_cc(&controller)
+        .into_iter()
+        .find(|cc| cc.controller == AUDIBLE_CC)
+        .expect("CC 20 is mapped")
+        .param_id;
+
+    let at = BLOCK as i64 + (BLOCK / 2) as i64;
+    plugin.param_scheduler.schedule(id, 0.0, at);
+
+    let mut out = vec![0.0f32; BLOCK * 2];
+    plugin.process_into(&mut out, BLOCK, 0);
+    out.fill(0.0);
+    plugin.process_into(&mut out, BLOCK, BLOCK as i64);
+
+    assert!(peak(&out[..BLOCK]) > 0.0, "should still sound before the change");
+    assert_eq!(peak(&out[BLOCK..]), 0.0, "should be silent from the change onward");
+}
+
+// The failure mode this guards is silent and specific: `getMidiControllerAssignment`
+// leaves its out-parameter untouched when it refuses, so a host that trusts it
+// over the result binds every unmapped controller to whatever was in that
+// variable — parameter 0, the audible gain, if it was zeroed.
+#[test]
+fn an_unmapped_controller_drives_nothing_rather_than_parameter_zero() {
+    let plugin = load();
+    let controller = plugin.controller_handle().expect("controller");
+
+    let mapped = chord_composer_lib::vst3::plugin::list_cc(&controller);
+    assert!(
+        !mapped.iter().any(|cc| cc.param_id == GAIN_PARAM),
+        "an unmapped controller was bound to the gain: {mapped:?}"
+    );
 }

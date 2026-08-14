@@ -1261,7 +1261,7 @@ describe('ChordTimeline', () => {
     it('hides the lane, and its gutter label, when toggled off', () => {
       render(<ChordTimeline />);
 
-      fireEvent.click(screen.getByLabelText('Volume automation'));
+      fireEvent.click(screen.getByLabelText('Automation lanes'));
 
       expect(screen.queryByTestId('automation-lane')).not.toBeInTheDocument();
       expect(within(screen.getByTestId('timeline-gutter')).queryByText('Volume')).toBeNull();
@@ -1269,7 +1269,7 @@ describe('ChordTimeline', () => {
 
     it('reports its state on the toggle, so it reads as pressed', () => {
       render(<ChordTimeline />);
-      const toggle = screen.getByLabelText('Volume automation');
+      const toggle = screen.getByLabelText('Automation lanes');
 
       expect(toggle).toHaveAttribute('aria-pressed', 'true');
       fireEvent.click(toggle);

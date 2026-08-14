@@ -25,8 +25,17 @@ interface VolumeCall {
   when?: number;
 }
 
+/** A parameter change asked of the instrument: stated now, or placed at `when`. */
+interface ParamCall {
+  kind: 'set' | 'automate';
+  target: AutomationTarget;
+  value: number;
+  when?: number;
+}
+
 const scheduled: Scheduled[] = [];
 const volumeCalls: VolumeCall[] = [];
+const paramCalls: ParamCall[] = [];
 const stopAll = vi.fn();
 let loadResolve: () => void;
 let loadPromise: Promise<void>;
@@ -38,6 +47,16 @@ let clock = 0;
  * `Instrument.rampVolume` is optional, and that backend does not implement it.
  */
 let supportsRamp = true;
+
+/**
+ * Whether the instrument built for the next run has parameters at all.
+ *
+ * Read at construction, like `supportsRamp`. False is every backend but the
+ * natively-hosted plugins: `automateTarget` and `setTarget` are optional, and an
+ * instrument without them cannot be automated at all — there is no coarser
+ * fallback the way there is for volume.
+ */
+let supportsParams = true;
 
 vi.mock('@/engine/smplrPiano', () => {
   class MockPiano {
@@ -52,6 +71,16 @@ vi.mock('@/engine/smplrPiano', () => {
         ) => {
           volumeCalls.push({ kind: 'ramp', volume, when });
         };
+      }
+      if (supportsParams) {
+        Object.assign(this, {
+          automateTarget: (target: AutomationTarget, value: number, when: number) => {
+            paramCalls.push({ kind: 'automate', target, value, when });
+          },
+          setTarget: (target: AutomationTarget, value: number) => {
+            paramCalls.push({ kind: 'set', target, value });
+          },
+        });
       }
     }
 
@@ -84,7 +113,8 @@ vi.mock('@/engine/smplrPiano', () => {
 import { usePlayback } from '@/hooks/usePlayback';
 import { TICK_MS, LOOKAHEAD_SECONDS } from '@/engine/scheduler';
 import type { PlaybackConfig } from '@/engine/playback';
-import type { Bar, Note, Track } from '@/types/music';
+import type { AutomationTarget, Bar, Note, Track } from '@/types/music';
+import { laneKey } from '@/engine/parameterAutomation';
 import { soloContent, TEST_TRACK_ID } from '../helpers/tracks';
 
 /** The instrument the fixture bars' notes belong to. */
@@ -141,7 +171,9 @@ describe('usePlayback', () => {
     vi.useFakeTimers();
     scheduled.length = 0;
     volumeCalls.length = 0;
+    paramCalls.length = 0;
     supportsRamp = true;
+    supportsParams = true;
     stopAll.mockClear();
     clock = 0;
     loadPromise = new Promise<void>(resolve => {
@@ -711,6 +743,282 @@ describe('usePlayback', () => {
           { kind: 'set', volume: 0.8 },
           { kind: 'set', volume: 0.5 },
         ]);
+      });
+    });
+  });
+
+  describe('plugin parameter automation', () => {
+    /** A MIDI controller target, to prove the two kinds advance independently. */
+    const CC20 = { kind: 'cc', controller: 20 } as const;
+
+    /** A sweep on parameter 7 across beats 1–3, and a flat lane on parameter 9. */
+    const sweeping: PlaybackConfig = {
+      ...config,
+      tracks: [
+        {
+          ...testTrack,
+          parameterAutomation: [
+            {
+              target: { kind: 'param', paramId: 7 },
+              name: 'Cutoff',
+              points: [
+                { beat: 1, value: 0.2 },
+                { beat: 3, value: 0.9 },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const automated = () => paramCalls.filter(c => c.kind === 'automate');
+    const pinned = () => paramCalls.filter(c => c.kind === 'set');
+    /** Everything sent for one target, in the order it was sent. */
+    const forTarget = (key: string) =>
+      automated().filter(c => laneKey(c.target) === key);
+
+    it('says nothing at all when no parameter is automated', async () => {
+      const { result } = renderHook(() => usePlayback(config));
+      await startPlayback(result);
+      await advance(3);
+
+      expect(paramCalls).toEqual([]);
+    });
+
+    // The assertion the whole sampled path exists for. Nothing downstream
+    // interpolates a plugin parameter — a change is a value at a sample and holds
+    // until the next one — so a sweep sent as its two ends would sit still and
+    // jump at the far one. Sending only the breakpoints produces exactly 2 here.
+    it('sweeps a ramp rather than jumping at its far end', async () => {
+      const { result } = renderHook(() => usePlayback(sweeping));
+      await startPlayback(result);
+      await advance(4);
+
+      const sent = forTarget('param:7');
+      expect(sent.length).toBeGreaterThan(20);
+
+      // Strictly rising, and spanning the whole ramp rather than a corner of it.
+      const values = sent.map(c => c.value);
+      expect(values).toEqual([...values].sort((a, b) => a - b));
+      expect(values[0]).toBeCloseTo(0.2, 1);
+      expect(values.at(-1)).toBeCloseTo(0.9, 1);
+    });
+
+    // Unlike a plugin's volume, a change carries a time all the way down: VST3's
+    // queue takes a sample offset per point. Every sampled value has to arrive
+    // with one, in order, or the sweep would be placed as a heap at one instant.
+    it('places every value at its own clock time, in order', async () => {
+      const { result } = renderHook(() => usePlayback(sweeping));
+      await startPlayback(result);
+      await advance(4);
+
+      const times = forTarget('param:7').map(c => c.when!);
+      expect(times.every(t => typeof t === 'number')).toBe(true);
+      expect(times).toEqual([...times].sort((a, b) => a - b));
+      // Confined to the ramp: nothing before it starts or after it ends.
+      expect(times[0]).toBeGreaterThanOrEqual(1);
+      expect(times.at(-1)).toBeLessThanOrEqual(3);
+    });
+
+    // A held value costs nothing, which is what makes sampling affordable: the
+    // flat stretches either side of the ramp send nothing at all.
+    it('sends nothing while the curve is not moving', async () => {
+      const { result } = renderHook(() => usePlayback(sweeping));
+      await startPlayback(result);
+      await advance(4);
+
+      // Beat 3 onward is flat at 0.9, and beats 0-1 flat at 0.2. A sampler that
+      // ignored the epsilon would send a point every 10 ms across all four beats.
+      expect(forTarget('param:7').length).toBeLessThan(4 / 0.01);
+    });
+
+    it('does not re-send a value it has already handed over', async () => {
+      const { result } = renderHook(() => usePlayback(sweeping));
+      await startPlayback(result);
+      await advance(3.9);
+      const first = forTarget('param:7').length;
+
+      await advance(1);
+      expect(forTarget('param:7')).toHaveLength(first);
+    });
+
+    it('schedules no further ahead than the look-ahead window', async () => {
+      const { result } = renderHook(() => usePlayback(sweeping));
+      await startPlayback(result);
+
+      expect(automated()).toHaveLength(0);
+    });
+
+    it('pins the interpolated value when a run starts mid-sweep', async () => {
+      const twoBars = [makeBar(0, [makeNote(60, 0)]), makeBar(1, [makeNote(67, 0)])];
+      const { result } = renderHook(() =>
+        usePlayback({ ...sweeping, bars: twoBars, loopStart: 2, loopEnd: 6 })
+      );
+      await startPlayback(result);
+
+      // Half way through a 0.2→0.9 sweep running from beat 1 to beat 3.
+      expect(pinned().at(-1)).toEqual({
+        kind: 'set',
+        target: { kind: 'param', paramId: 7 },
+        value: 0.55,
+      });
+    });
+
+    it('advances a parameter curve and a controller curve independently', async () => {
+      const both: PlaybackConfig = {
+        ...sweeping,
+        tracks: [
+          {
+            ...sweeping.tracks[0],
+            parameterAutomation: [
+              ...sweeping.tracks[0].parameterAutomation!,
+              {
+                target: CC20,
+                name: 'CC 20',
+                // Falling where the parameter rises, and over a different span,
+                // so neither curve could be mistaken for the other's.
+                points: [
+                  { beat: 0, value: 0.8 },
+                  { beat: 2, value: 0.1 },
+                ],
+              },
+            ],
+          },
+        ],
+      };
+      const { result } = renderHook(() => usePlayback(both));
+      await startPlayback(result);
+      await advance(4);
+
+      const param = forTarget('param:7').map(c => c.value);
+      const cc = forTarget('cc:20').map(c => c.value);
+
+      // Each follows its own curve over its own span: one rising to 0.9 across
+      // beats 1-3, the other falling to 0.1 across beats 0-2.
+      expect(param.length).toBeGreaterThan(20);
+      expect(cc.length).toBeGreaterThan(20);
+      expect(param).toEqual([...param].sort((a, b) => a - b));
+      expect(cc).toEqual([...cc].sort((a, b) => b - a));
+      expect(param.at(-1)).toBeCloseTo(0.9, 1);
+      expect(cc.at(-1)).toBeCloseTo(0.1, 1);
+    });
+
+    it('leaves the volume curve to its own path', async () => {
+      const { result } = renderHook(() => usePlayback(sweeping));
+      await startPlayback(result);
+      await advance(4);
+
+      // The pool's one static setVolume, and nothing else: a parameter sweep is
+      // not a reason to touch the level.
+      expect(volumeCalls.filter(c => c.kind === 'ramp')).toHaveLength(0);
+      expect(volumeCalls.filter(c => c.kind === 'set')).toHaveLength(1);
+    });
+
+    // A parameter is not a note. Stopping mid-sweep leaves it where the curve left
+    // it, because the host has no better value to impose than the plugin's own.
+    it('does not put a parameter back to anything on stop', async () => {
+      const { result } = renderHook(() => usePlayback(sweeping));
+      await startPlayback(result);
+      await advance(2);
+
+      paramCalls.length = 0;
+      act(() => {
+        result.current.stop();
+      });
+
+      expect(paramCalls).toEqual([]);
+    });
+
+    it('re-pins both curves after a loop wrap rather than drifting', async () => {
+      const { result } = renderHook(() =>
+        usePlayback({ ...sweeping, loopStart: 0, loopEnd: 4, loopEnabled: true })
+      );
+      await startPlayback(result);
+      await advance(4.5);
+
+      // The wrap invalidates the cursor, so the curve is stated again from the top
+      // rather than being treated as already spent.
+      expect(pinned().length).toBeGreaterThan(1);
+    });
+
+    it('picks up an edit made while playing', async () => {
+      const { result, rerender } = renderHook(({ cfg }) => usePlayback(cfg), {
+        initialProps: { cfg: sweeping },
+      });
+      await startPlayback(result);
+      await advance(0.5);
+
+      rerender({
+        cfg: {
+          ...sweeping,
+          tracks: [
+            {
+              ...sweeping.tracks[0],
+              parameterAutomation: [
+                {
+                  target: { kind: 'param', paramId: 7 },
+                  name: 'Cutoff',
+                  points: [
+                    { beat: 1, value: 0.2 },
+                    { beat: 3, value: 0.5 },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+      await advance(3);
+      // The edit lowered the ramp's top from 0.9 to 0.5, and the curve is
+      // re-pinned against the new array rather than run out against the old one.
+      expect(automated().at(-1)!.value).toBeCloseTo(0.5, 2);
+    });
+
+    it('drops the cursor for a lane whose points have all gone', async () => {
+      const { result, rerender } = renderHook(({ cfg }) => usePlayback(cfg), {
+        initialProps: { cfg: sweeping },
+      });
+      await startPlayback(result);
+      await advance(1.5);
+
+      rerender({
+        cfg: {
+          ...sweeping,
+          tracks: [
+            {
+              ...sweeping.tracks[0],
+              parameterAutomation: [
+                { target: { kind: 'param', paramId: 7 }, name: 'Cutoff', points: [] },
+              ],
+            },
+          ],
+        },
+      });
+
+      paramCalls.length = 0;
+      await advance(3);
+
+      // An emptied lane drives nothing at all, rather than holding its last value
+      // against the plugin.
+      expect(paramCalls).toEqual([]);
+    });
+
+    describe('a backend with no parameters', () => {
+      beforeEach(() => {
+        supportsParams = false;
+      });
+
+      // No coarser fallback the way volume has one: there is nothing to fall back
+      // *to*, so the curve is skipped rather than approximated.
+      it('is skipped without throwing', async () => {
+        const { result } = renderHook(() => usePlayback(sweeping));
+        await startPlayback(result);
+        await advance(4);
+
+        expect(paramCalls).toEqual([]);
+        // And the notes still play, so skipping the curve costs nothing else.
+        expect(scheduled.length).toBeGreaterThan(0);
       });
     });
   });

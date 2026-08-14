@@ -57,7 +57,8 @@ fn class_id(path: &Path) -> String {
 
 /// An engine on the default output device, or `None` if there isn't one.
 fn engine() -> Option<Engine> {
-    match Engine::start() {
+    // `None` is the system default, which is the only endpoint a test can assume.
+    match Engine::start(None) {
         Ok(engine) => Some(engine),
         Err(err) => {
             eprintln!("skipping: no usable audio output ({err})");

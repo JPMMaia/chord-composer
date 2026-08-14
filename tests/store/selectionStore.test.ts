@@ -146,6 +146,65 @@ describe('selectionStore', () => {
     });
   });
 
+  describe('section selection', () => {
+    it('starts with no section selected', () => {
+      expect(state().selectedSectionId).toBeNull();
+    });
+
+    it('selects and releases a section', () => {
+      state().selectSection('sec-1');
+      expect(state().selectedSectionId).toBe('sec-1');
+
+      state().selectSection(null);
+      expect(state().selectedSectionId).toBeNull();
+    });
+
+    // A third answer to the same question — what does Delete act on.
+    it('drops the block selection and the point when a section is picked', () => {
+      state().selectSegment('seg-1');
+      state().selectVolumePoint(0);
+      state().selectSection('sec-1');
+
+      expect(state().selectedSegmentIds).toEqual([]);
+      expect(state().anchorSegmentId).toBeNull();
+      expect(state().selectedVolumePointIndex).toBeNull();
+    });
+
+    it('drops the section when a block or a point is picked', () => {
+      state().selectSection('sec-1');
+      state().selectSegment('seg-1');
+      expect(state().selectedSectionId).toBeNull();
+
+      state().selectSection('sec-1');
+      state().setSelectedSegments(['seg-1', 'seg-2']);
+      expect(state().selectedSectionId).toBeNull();
+
+      state().selectSection('sec-1');
+      state().toggleSegment('seg-3');
+      expect(state().selectedSectionId).toBeNull();
+
+      state().selectSection('sec-1');
+      state().selectVolumePoint(0);
+      expect(state().selectedSectionId).toBeNull();
+    });
+
+    // Releasing a section must not also wipe a block selection made since.
+    it('leaves the block selection alone when the section is merely released', () => {
+      state().selectSegment('seg-1');
+      state().selectSection(null);
+
+      expect(state().selectedSegmentIds).toEqual(['seg-1']);
+      expect(state().anchorSegmentId).toBe('seg-1');
+    });
+
+    it('drops the section on a full clear', () => {
+      state().selectSection('sec-1');
+      state().clearSelection();
+
+      expect(state().selectedSectionId).toBeNull();
+    });
+  });
+
   it('reports a sole selection only when exactly one segment is selected', () => {
     expect(soleSelectedSegmentId(state())).toBeNull();
 

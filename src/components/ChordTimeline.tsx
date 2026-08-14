@@ -30,6 +30,7 @@ import type { CopiedSegment } from '@/store/clipboardStore';
 import { PALETTE_DRAG_TYPE } from '@/components/ScalePalette';
 import { ChordSegmentBlock } from '@/components/ChordSegmentBlock';
 import { AutomationLane, AUTOMATION_LANE_HEIGHT } from '@/components/AutomationLane';
+import { SectionBand } from '@/components/SectionBand';
 import { BAR_LINE_WIDTH, PIANO_KEYS_WIDTH, PIXELS_PER_BEAT } from '@/utils/constants';
 
 /** Beats a freshly dropped block occupies before the user resizes it. */
@@ -935,6 +936,11 @@ export const ChordTimeline: React.FC = () => {
         className="flex-1 overflow-x-auto scrollbar-hidden"
       >
         <div className="min-w-max">
+        {/* The arrangement's named spans, on the same beat axis as everything below.
+            It overhangs the gutter as the ruler does — the gutter is bottom-aligned,
+            so neither needs a row of its own over there. */}
+        <SectionBand totalBeats={totalBeats} />
+
         {/* Play-range ruler. One continuous strip rather than one piece per bar, so
             pointer positions read as absolute beats with no per-bar arithmetic. */}
         <div

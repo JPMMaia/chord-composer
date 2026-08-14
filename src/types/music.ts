@@ -199,6 +199,27 @@ export interface AutomationPoint {
   value: number;
 }
 
+/**
+ * A named span of the arrangement: "Intro", "Verse", "Chorus".
+ *
+ * Positioned in absolute beats from the start of the project, like the play range
+ * and unlike a chord segment — a section is a label written over the music rather
+ * than material belonging to one measure, and it has to be able to cross bar lines.
+ *
+ * It owns nothing and sounds nothing. Deleting a section leaves every block where
+ * it was; that is the whole point of it being a label.
+ */
+export interface Section {
+  id: string;
+  name: string;
+  /** Beats from the start of the project. */
+  startBeat: number;
+  /** Exclusive: the beat the section stops at, always > startBeat. */
+  endBeat: number;
+  /** Absent means "assigned by index from SECTION_COLORS", as `Track.color` does. */
+  color?: string;
+}
+
 // Track — one instrument in the arrangement.
 export interface Track {
   id: string;
@@ -299,6 +320,14 @@ export interface Project {
   loopEnabled?: boolean;
   /** When true, a click track accompanies playback. */
   metronomeEnabled?: boolean;
+  /**
+   * Named spans over the arrangement, sorted by start and never overlapping.
+   *
+   * Absent or empty in every project written before sections existed, which is
+   * exactly what an unlabelled timeline means. Gaps between them are allowed:
+   * music nobody has named yet is a normal state, not a hole to fill.
+   */
+  sections?: Section[];
   createdAt: Date;
   updatedAt: Date;
 }

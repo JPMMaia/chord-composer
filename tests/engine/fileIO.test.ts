@@ -575,6 +575,106 @@ describe('fileIO', () => {
       expect(result.errors.join(' ')).toContain('must be before its end');
     });
 
+    // The fixture project is one 4/4 bar, so every section here lives in [0, 4].
+    describe('sections', () => {
+      const withSections = () =>
+        createTestProject({
+          sections: [
+            { id: 'sec-1', name: 'Intro', startBeat: 0, endBeat: 2, color: '#6366f1' },
+            { id: 'sec-2', name: 'Verse', startBeat: 2, endBeat: 4, color: '#0ea5e9' },
+          ],
+        });
+
+      it('states the current schema version', () => {
+        expect(SCHEMA_VERSION).toBe('1.13');
+      });
+
+      it('round-trips names, ranges and colours', () => {
+        const restored = deserializeProject(serializeProject(withSections()));
+
+        expect(restored.sections).toEqual([
+          { id: 'sec-1', name: 'Intro', startBeat: 0, endBeat: 2, color: '#6366f1' },
+          { id: 'sec-2', name: 'Verse', startBeat: 2, endBeat: 4, color: '#0ea5e9' },
+        ]);
+      });
+
+      it('omits the key entirely when nothing is named', () => {
+        const json = JSON.parse(serializeProject(createTestProject({ sections: [] })));
+        expect('sections' in json).toBe(false);
+      });
+
+      it('reads a file written before sections existed as having none', () => {
+        const json = JSON.parse(serializeProject(createTestProject()));
+        const restored = deserializeProject(JSON.stringify({ ...json, version: '1.12' }));
+
+        expect(restored.sections).toBeUndefined();
+      });
+
+      it('drops a malformed entry rather than failing the load', () => {
+        const json = JSON.parse(serializeProject(withSections()));
+        json.sections.push({ id: 'sec-3', name: 'Broken' });
+
+        expect(deserializeProject(JSON.stringify(json)).sections?.map(s => s.id)).toEqual([
+          'sec-1',
+          'sec-2',
+        ]);
+      });
+
+      it('sorts and trims what a hand-edited file states', () => {
+        const json = JSON.parse(serializeProject(withSections()));
+        json.sections = [
+          { id: 'sec-2', name: 'Verse', startBeat: 1, endBeat: 4 },
+          { id: 'sec-1', name: 'Intro', startBeat: 0, endBeat: 3 },
+        ];
+
+        expect(
+          deserializeProject(JSON.stringify(json)).sections?.map(s => [s.id, s.startBeat, s.endBeat])
+        ).toEqual([
+          ['sec-1', 0, 1],
+          ['sec-2', 1, 4],
+        ]);
+      });
+
+      it('rejects a backwards section', () => {
+        const result = validateProject(
+          createTestProject({
+            sections: [{ id: 'sec-1', name: 'Intro', startBeat: 4, endBeat: 2 }],
+          })
+        );
+
+        expect(result.valid).toBe(false);
+        expect(result.errors.join(' ')).toContain('must be before its end');
+      });
+
+      it('rejects an unnamed section and an overlap', () => {
+        const result = validateProject(
+          createTestProject({
+            sections: [
+              { id: 'sec-1', name: '', startBeat: 0, endBeat: 3 },
+              { id: 'sec-2', name: 'Verse', startBeat: 2, endBeat: 4 },
+            ],
+          })
+        );
+
+        expect(result.valid).toBe(false);
+        expect(result.errors.join(' ')).toContain('name is required');
+        expect(result.errors.join(' ')).toContain('overlaps');
+      });
+
+      it('accepts a gap between two sections', () => {
+        const result = validateProject(
+          createTestProject({
+            sections: [
+              { id: 'sec-1', name: 'Intro', startBeat: 0, endBeat: 1 },
+              { id: 'sec-2', name: 'Outro', startBeat: 3, endBeat: 4 },
+            ],
+          })
+        );
+
+        expect(result.valid).toBe(true);
+      });
+    });
+
     it('round-trips a segment octave', () => {
       const project = revampProject();
       project.bars[0].content[FIXTURE_TRACK_ID].chords[0].octave = 2;
@@ -868,10 +968,6 @@ describe('fileIO', () => {
   });
 
   describe('schema 1.12 alterations', () => {
-    it('states the current schema version', () => {
-      expect(SCHEMA_VERSION).toBe('1.12');
-    });
-
     const withNote = (alter?: number) =>
       createTestProject({
         bars: [

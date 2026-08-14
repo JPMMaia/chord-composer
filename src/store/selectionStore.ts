@@ -20,6 +20,8 @@ interface SelectionState {
    * instrument's curve, which is the only one the lane ever shows.
    */
   selectedVolumePointIndex: number | null;
+  /** The section picked in the band above the ruler, or null. */
+  selectedSectionId: string | null;
   selectBar: (barId: string | null) => void;
   selectTrack: (trackId: string | null) => void;
   /** Replace the selection with one block, or clear it. */
@@ -32,6 +34,8 @@ interface SelectionState {
   clearSegmentSelection: () => void;
   /** Pick a point in the automation lane, or clear the pick with null. */
   selectVolumePoint: (index: number | null) => void;
+  /** Pick a section in the band, or clear the pick with null. */
+  selectSection: (sectionId: string | null) => void;
   clearSelection: () => void;
 }
 
@@ -44,9 +48,9 @@ interface SelectionState {
  * bar cursor must not disturb it. Dropping the selection is an explicit gesture —
  * a press on empty lane space, or Escape.
  *
- * Blocks and automation points, by contrast, are *mutually exclusive*: picking
- * either drops the other. They are two answers to one question — what does Delete
- * act on — and letting both be selected at once would make that key ambiguous,
+ * Blocks, automation points and sections, by contrast, are *mutually exclusive*:
+ * picking any drops the others. They are three answers to one question — what does
+ * Delete act on — and letting two be selected at once would make that key ambiguous,
  * erasing a chord and a point together on a single press.
  */
 export const selectionStore = create<SelectionState>((set, get) => ({
@@ -55,6 +59,7 @@ export const selectionStore = create<SelectionState>((set, get) => ({
   selectedSegmentIds: [],
   anchorSegmentId: null,
   selectedVolumePointIndex: null,
+  selectedSectionId: null,
 
   selectBar: (barId: string | null) => {
     set({ selectedBarId: barId });
@@ -82,11 +87,16 @@ export const selectionStore = create<SelectionState>((set, get) => ({
       selectedSegmentIds: segmentId ? [segmentId] : [],
       anchorSegmentId: segmentId,
       selectedVolumePointIndex: null,
+      selectedSectionId: null,
     });
   },
 
   setSelectedSegments: (segmentIds: string[]) => {
-    set({ selectedSegmentIds: [...new Set(segmentIds)], selectedVolumePointIndex: null });
+    set({
+      selectedSegmentIds: [...new Set(segmentIds)],
+      selectedVolumePointIndex: null,
+      selectedSectionId: null,
+    });
   },
 
   anchorSegment: (segmentId: string) => {
@@ -103,6 +113,7 @@ export const selectionStore = create<SelectionState>((set, get) => ({
       // A block that was just removed is a poor place to measure a range from.
       anchorSegmentId: isSelected ? get().anchorSegmentId : segmentId,
       selectedVolumePointIndex: null,
+      selectedSectionId: null,
     });
   },
 
@@ -116,6 +127,19 @@ export const selectionStore = create<SelectionState>((set, get) => ({
       // Picking a point drops the blocks, so Delete has exactly one meaning.
       selectedSegmentIds: index === null ? get().selectedSegmentIds : [],
       anchorSegmentId: index === null ? get().anchorSegmentId : null,
+      selectedSectionId: index === null ? get().selectedSectionId : null,
+    });
+  },
+
+  selectSection: (sectionId: string | null) => {
+    set({
+      selectedSectionId: sectionId,
+      // The same rule the other way round: a picked section is what Delete erases,
+      // so the blocks and the curve point let go of the key.
+      selectedSegmentIds: sectionId === null ? get().selectedSegmentIds : [],
+      anchorSegmentId: sectionId === null ? get().anchorSegmentId : null,
+      selectedVolumePointIndex:
+        sectionId === null ? get().selectedVolumePointIndex : null,
     });
   },
 
@@ -126,6 +150,7 @@ export const selectionStore = create<SelectionState>((set, get) => ({
       selectedSegmentIds: [],
       anchorSegmentId: null,
       selectedVolumePointIndex: null,
+      selectedSectionId: null,
     });
   },
 }));

@@ -1166,6 +1166,103 @@ describe('projectStore', () => {
     });
   });
 
+  describe('sections', () => {
+    const state = () => projectStore.getState();
+    const sections = () => state().project!.sections ?? [];
+
+    beforeEach(() => {
+      state().createProject();
+      state().addBar();
+      state().addBar(); // two 4/4 bars: eight beats of song
+    });
+
+    it('starts with none', () => {
+      expect(sections()).toEqual([]);
+    });
+
+    it('returns the new section id and names it by default', () => {
+      const id = state().addSection(0, 4);
+      expect(id).not.toBeNull();
+      expect(sections()).toHaveLength(1);
+      expect(sections()[0]).toMatchObject({ id, name: 'Section 1', startBeat: 0, endBeat: 4 });
+    });
+
+    it('assigns a colour by position', () => {
+      state().addSection(0, 4);
+      state().addSection(4, 8);
+      expect(sections()[0].color).not.toBe(sections()[1].color);
+    });
+
+    it('takes the name it is given', () => {
+      state().addSection(0, 4, 'Intro');
+      expect(sections()[0].name).toBe('Intro');
+    });
+
+    it('trims the earlier section when a later one is drawn over it', () => {
+      state().addSection(0, 6, 'Intro');
+      state().addSection(4, 8, 'Verse');
+
+      expect(sections().map(s => [s.name, s.startBeat, s.endBeat])).toEqual([
+        ['Intro', 0, 4],
+        ['Verse', 4, 8],
+      ]);
+    });
+
+    it('refuses a span the song has no room for', () => {
+      expect(state().addSection(8, 12)).toBeNull();
+      expect(sections()).toEqual([]);
+    });
+
+    it('clamps a resize to the end of the song', () => {
+      const id = state().addSection(0, 4)!;
+      state().setSectionRange(id, 2, 99);
+      expect(sections()[0]).toMatchObject({ startBeat: 2, endBeat: 8 });
+    });
+
+    it('renames a section', () => {
+      const id = state().addSection(0, 4)!;
+      state().renameSection(id, 'Chorus');
+      expect(sections()[0].name).toBe('Chorus');
+    });
+
+    it('keeps the old name rather than accepting an empty one', () => {
+      const id = state().addSection(0, 4, 'Intro')!;
+      state().renameSection(id, '   ');
+      expect(sections()[0].name).toBe('Intro');
+    });
+
+    it('is a no-op on an unknown id', () => {
+      state().addSection(0, 4, 'Intro');
+      const before = state().project;
+
+      state().renameSection('nope', 'Chorus');
+      state().setSectionRange('nope', 0, 2);
+      state().removeSection('nope');
+
+      expect(state().project).toBe(before);
+    });
+
+    it('preserves a gap between two sections', () => {
+      state().addSection(0, 2, 'Intro');
+      state().addSection(6, 8, 'Outro');
+      expect(sections().map(s => [s.startBeat, s.endBeat])).toEqual([
+        [0, 2],
+        [6, 8],
+      ]);
+    });
+
+    it('leaves every block where it was when a section is removed', () => {
+      const bar = state().project!.bars[0];
+      state().insertSegment(bar.id, 0, chordSegment({ id: 'seg-1' }), trackId());
+
+      const id = state().addSection(0, 4)!;
+      state().removeSection(id);
+
+      expect(sections()).toEqual([]);
+      expect(barChords(state().project!.bars[0], trackId()).map(c => c.id)).toEqual(['seg-1']);
+    });
+  });
+
   describe('segment pitch editing', () => {
     const state = () => projectStore.getState();
 

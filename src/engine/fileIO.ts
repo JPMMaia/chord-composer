@@ -8,6 +8,7 @@ import type {
   Project,
   Scale,
   ScaleType,
+  Section,
   SegmentBreak,
   SegmentKind,
   SegmentVoicing,
@@ -16,8 +17,9 @@ import type {
   Track,
   TrackContent,
 } from '@/types/music';
-import { barChords, isValidTimeSignature } from '@/engine/timeline';
+import { barChords, getTotalBeats, isValidTimeSignature } from '@/engine/timeline';
 import { normalizePoints } from '@/engine/volumeAutomation';
+import { normalizeSections } from '@/engine/sections';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
 import { trackColorAt } from '@/utils/constants';
 
@@ -110,8 +112,14 @@ const LEGACY_TRACK_ID = 'track-legacy';
  * change of key would both flatten the accidental out. Omitted at 0, so a piece with no
  * accidentals in it serialises byte for byte as it did under 1.11, and a pre-1.12 file
  * reads back as the wholly diatonic piece it was.
+ *
+ * 1.13 added sections: named spans over the arrangement — Intro, Verse, Chorus — in
+ * absolute beats, like the play range and unlike a chord segment. They label and
+ * nothing else; no note's sound depends on one. The key is omitted when there are
+ * none, so an unlabelled project serialises byte for byte as it did under 1.12, and
+ * a pre-1.13 file reads back as the unlabelled timeline it always was.
  */
-export const SCHEMA_VERSION = '1.12';
+export const SCHEMA_VERSION = '1.13';
 
 /**
  * Validation error returned by validateProject.
@@ -171,6 +179,17 @@ export function serializeProject(project: Project): string {
     // the project and was being dropped on every round-trip — reopening a file
     // silently turned the click off.
     metronomeEnabled: project.metronomeEnabled ?? false,
+    // Omitted when nothing is named, so an unlabelled project gains no bytes and
+    // still round-trips exactly as it did under 1.12.
+    sections: project.sections?.length
+      ? project.sections.map(s => ({
+          id: s.id,
+          name: s.name,
+          startBeat: s.startBeat,
+          endBeat: s.endBeat,
+          color: s.color,
+        }))
+      : undefined,
     tracks: project.tracks.map(t => ({
       id: t.id,
       name: t.name,
@@ -381,6 +400,44 @@ function parseAutomation(raw: unknown): AutomationPoint[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const points = normalizePoints(raw as AutomationPoint[]);
   return points.length > 0 ? points : undefined;
+}
+
+/**
+ * Read the project's sections off a file.
+ *
+ * Absent when there is nothing usable, rather than an empty array: absent is what a
+ * project written before sections existed says, and an empty array would only be a
+ * longer way of saying the same thing. A malformed entry is dropped rather than
+ * repaired — a span with no bounds says nothing about what the author meant, and an
+ * unlabelled stretch is a better answer than a band drawn from garbage.
+ */
+function readSections(raw: unknown, songEnd: number): Section[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+
+  const sections = normalizeSections(
+    (raw as Record<string, unknown>[])
+      .filter(
+        s =>
+          typeof s?.id === 'string' &&
+          typeof s?.name === 'string' &&
+          typeof s?.startBeat === 'number' &&
+          typeof s?.endBeat === 'number' &&
+          Number.isFinite(s.startBeat) &&
+          Number.isFinite(s.endBeat) &&
+          s.startBeat >= 0 &&
+          s.endBeat > s.startBeat
+      )
+      .map(s => ({
+        id: s.id as string,
+        name: s.name as string,
+        startBeat: s.startBeat as number,
+        endBeat: s.endBeat as number,
+        color: typeof s.color === 'string' ? s.color : undefined,
+      })),
+    songEnd
+  );
+
+  return sections.length > 0 ? sections : undefined;
 }
 
 /**
@@ -603,6 +660,9 @@ export function deserializeProject(json: string): Project {
     loopEnd: hasRange ? (p.loopEnd as number) : undefined,
     loopEnabled: p.loopEnabled === true,
     metronomeEnabled: p.metronomeEnabled === true,
+    // Normalised against the song the file actually describes, so a hand-edited
+    // list cannot hand the editor a band reaching past the last bar.
+    sections: readSections(p.sections, getTotalBeats(bars, timeSignature)),
     createdAt: new Date(p.createdAt as string),
     updatedAt: new Date(p.updatedAt as string),
   };
@@ -652,6 +712,25 @@ export function validateProject(project: Project): ValidationResult {
       errors.push(`Play range bounds must be >= 0. Got: ${loopStart}, ${loopEnd}.`);
     } else if (loopStart >= loopEnd) {
       errors.push(`Play range start (${loopStart}) must be before its end (${loopEnd}).`);
+    }
+  }
+
+  // Validate the sections: named, well-formed spans that do not overlap. Gaps
+  // between them are fine — music nobody has named is a normal state.
+  const sections = project.sections ?? [];
+  for (let i = 0; i < sections.length; i++) {
+    const s = sections[i];
+    if (!s.name || s.name.trim().length === 0) {
+      errors.push(`Section ${i}: name is required and cannot be empty.`);
+    }
+    if (s.startBeat < 0) {
+      errors.push(`Section ${i}: start must be >= 0. Got: ${s.startBeat}.`);
+    } else if (s.startBeat >= s.endBeat) {
+      errors.push(`Section ${i}: start (${s.startBeat}) must be before its end (${s.endBeat}).`);
+    }
+    const previous = sections[i - 1];
+    if (previous && s.startBeat < previous.endBeat) {
+      errors.push(`Section ${i} ("${s.name}") overlaps "${previous.name}".`);
     }
   }
 

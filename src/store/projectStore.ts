@@ -6,6 +6,7 @@ import type {
   NoteName,
   Project,
   Scale,
+  Section,
   SegmentBreak,
   SpacingPreset,
   TimeSignature,
@@ -15,6 +16,7 @@ import type { CopiedSegment } from './clipboardStore';
 import { clearLocalStorage } from '@/engine/fileIO';
 import { generateId } from '@/utils/id';
 import { movePoint, normalizePoints, withPoint, withoutPoint } from '@/engine/volumeAutomation';
+import { nextSectionName, normalizeSections, sectionColorAt } from '@/engine/sections';
 import {
   barChords,
   clampStartToBar,
@@ -192,6 +194,15 @@ interface ProjectState {
     target: import('@/engine/chordOperations').SegmentKindTarget
   ) => void;
   setLoopRegion: (start: number | null, end: number | null) => void;
+  /**
+   * Draw a named span over the arrangement. Returns its id, so the caller can select
+   * it and open its name for editing; null when nothing was added.
+   */
+  addSection: (startBeat: number, endBeat: number, name?: string) => string | null;
+  renameSection: (sectionId: string, name: string) => void;
+  setSectionRange: (sectionId: string, startBeat: number, endBeat: number) => void;
+  setSectionColor: (sectionId: string, color: string) => void;
+  removeSection: (sectionId: string) => void;
   /** Clone an instrument and all its chord segments. Returns the new instrument's id. */
   duplicateTrack: (sourceTrackId: string) => string | null;
   /**
@@ -400,6 +411,7 @@ const createInitialProject = (): Project => ({
   // dropped chord to land.
   tracks: [createTrack('Piano', 0)],
   bars: [],
+  sections: [],
   createdAt: new Date(),
   updatedAt: new Date(),
 });
@@ -463,6 +475,50 @@ function updateVolumeAutomation(
   }));
 }
 
+/**
+ * Rewrite the project's sections.
+ *
+ * Every section edit goes through here so one rule holds in one place: the stored
+ * array is always what `normalizeSections` would produce, sorted and free of
+ * overlaps, whatever a pointer drag handed in. Like the play range, none of these
+ * edits throws — a drag can legitimately pass through a backwards or zero-width span
+ * on the way to a good one, and refusing it mid-gesture would only fight the pointer.
+ */
+function updateSections(
+  get: () => ProjectState,
+  set: (partial: Partial<ProjectState>) => void,
+  edit: (sections: Section[]) => Section[]
+): Section[] | null {
+  const project = get().project;
+  if (!project) return null;
+
+  const current = project.sections ?? [];
+  const next = normalizeSections(
+    edit(current),
+    getTotalBeats(project.bars, project.timeSignature)
+  );
+
+  // An edit naming an id that is not there changes nothing, and a no-op must not
+  // land an entry on the undo stack — the panels these come from can lag a removal
+  // by a frame, which is a sloppy state rather than a bug, as `updateTrack` has it.
+  const unchanged =
+    next.length === current.length &&
+    next.every((s, i) => {
+      const was = current[i];
+      return (
+        s.id === was.id &&
+        s.name === was.name &&
+        s.startBeat === was.startBeat &&
+        s.endBeat === was.endBeat &&
+        s.color === was.color
+      );
+    });
+  if (unchanged) return next;
+
+  set({ project: { ...project, sections: next, updatedAt: new Date() } });
+  return next;
+}
+
 export const projectStore = create<ProjectState>((set, get) => ({
   project: null,
 
@@ -486,6 +542,13 @@ export const projectStore = create<ProjectState>((set, get) => ({
             ])
           ),
         })),
+        // Normalised on the way in for the same reason the curves are: a hand-edited
+        // file is the one place an unsorted or overlapping list can come from, and
+        // everything downstream assumes neither.
+        sections: normalizeSections(
+          project.sections ?? [],
+          getTotalBeats(project.bars, project.timeSignature)
+        ),
       },
     });
   },
@@ -531,6 +594,53 @@ export const projectStore = create<ProjectState>((set, get) => ({
     if (loopEnd - loopStart < MIN_SEGMENT_BEATS) return;
 
     set({ project: { ...project, loopStart, loopEnd, updatedAt: new Date() } });
+  },
+
+  /**
+   * Draw a named span over the arrangement.
+   *
+   * Returns the new section's id — read back out of the normalised list rather than
+   * assumed, since a span too short to read, or one wholly swallowed by the section
+   * it was dropped on, legitimately produces nothing at all.
+   */
+  addSection: (startBeat: number, endBeat: number, name?: string) => {
+    const current = get().project?.sections ?? [];
+    const id = generateId();
+    const section: Section = {
+      id,
+      name: name && name.trim().length > 0 ? name : nextSectionName(current),
+      startBeat,
+      endBeat,
+      color: sectionColorAt(current.length),
+    };
+
+    const next = updateSections(get, set, sections => [...sections, section]);
+    return next?.some(s => s.id === id) ? id : null;
+  },
+
+  renameSection: (sectionId: string, name: string) => {
+    // An empty name would leave a band nothing can be read off; the old one stands.
+    if (name.trim().length === 0) return;
+    updateSections(get, set, sections =>
+      sections.map(s => (s.id === sectionId ? { ...s, name } : s))
+    );
+  },
+
+  setSectionRange: (sectionId: string, startBeat: number, endBeat: number) => {
+    updateSections(get, set, sections =>
+      sections.map(s => (s.id === sectionId ? { ...s, startBeat, endBeat } : s))
+    );
+  },
+
+  setSectionColor: (sectionId: string, color: string) => {
+    updateSections(get, set, sections =>
+      sections.map(s => (s.id === sectionId ? { ...s, color } : s))
+    );
+  },
+
+  /** Erase a label. Every block underneath it stays exactly where it was. */
+  removeSection: (sectionId: string) => {
+    updateSections(get, set, sections => sections.filter(s => s.id !== sectionId));
   },
 
   toggleLoopEnabled: () => {

@@ -715,7 +715,9 @@ describe('projectStore', () => {
     });
   });
 
-  describe('moveSegment', () => {
+  // Destinations are beats from the start of the project, so with four-beat bars
+  // beat 6 means "bar 2, beat 2".
+  describe('moveSegments, one block', () => {
     const bars = () => projectStore.getState().project!.bars;
 
     beforeEach(() => {
@@ -727,39 +729,49 @@ describe('projectStore', () => {
     });
 
     it('moves a segment to a free beat in its own bar', () => {
-      projectStore.getState().moveSegment('a', bars()[0].id, 3);
+      projectStore.getState().moveSegments([{ segmentId: 'a', absoluteBeat: 3 }]);
       expect(layout(bars()[0])).toEqual(['b@1', 'a@3']);
     });
 
     it('moves a segment into another bar', () => {
-      projectStore.getState().moveSegment('a', bars()[1].id, 2);
+      projectStore.getState().moveSegments([{ segmentId: 'a', absoluteBeat: 6 }]);
       expect(layout(bars()[0])).toEqual(['b@1']);
       expect(layout(bars()[1])).toEqual(['a@2']);
       expect(barOf('a')!.id).toBe(bars()[1].id);
     });
 
     it('regenerates the notes in both the bar it left and the bar it joined', () => {
-      projectStore.getState().moveSegment('a', bars()[1].id, 2);
+      projectStore.getState().moveSegments([{ segmentId: 'a', absoluteBeat: 6 }]);
       expect(barNotes(bars()[0], trackId()).every(n => n.startBeat === 1)).toBe(true);
       expect(barNotes(bars()[1], trackId()).every(n => n.startBeat === 2)).toBe(true);
     });
 
     it('lets a moved block hang over the bar line', () => {
       projectStore.getState().resizeSegmentDuration('a', 2, 0.25);
-      projectStore.getState().moveSegment('a', bars()[0].id, 3.5);
+      projectStore.getState().moveSegments([{ segmentId: 'a', absoluteBeat: 3.5 }]);
       expect(barChords(barOf('a')!, trackId()).find(c => c.id === 'a')!.startBeat).toBe(3.5);
       // It still belongs to the bar its onset falls in, not the one it reaches into.
       expect(barOf('a')!.id).toBe(bars()[0].id);
     });
 
     it('pushes a block it is dropped on top of', () => {
-      projectStore.getState().moveSegment('a', bars()[0].id, 1);
+      projectStore.getState().moveSegments([{ segmentId: 'a', absoluteBeat: 1 }]);
       expect(layout(bars()[0])).toEqual(['a@1', 'b@2']);
     });
 
-    it('ignores an unknown segment or bar id', () => {
-      projectStore.getState().moveSegment('nope', bars()[0].id, 2);
-      projectStore.getState().moveSegment('a', 'nope', 2);
+    it('grows the project when a block is moved past the last bar', () => {
+      const barCount = bars().length;
+      // One bar's worth past the end, so exactly one bar has to be appended.
+      projectStore
+        .getState()
+        .moveSegments([{ segmentId: 'a', absoluteBeat: barCount * 4 + 1 }]);
+      expect(bars()).toHaveLength(barCount + 1);
+      expect(layout(bars()[barCount])).toEqual(['a@1']);
+    });
+
+    it('ignores an unknown id or a beat off the line', () => {
+      projectStore.getState().moveSegments([{ segmentId: 'nope', absoluteBeat: 2 }]);
+      projectStore.getState().moveSegments([{ segmentId: 'a', absoluteBeat: -2 }]);
       expect(layout(bars()[0])).toEqual(['a@0', 'b@1']);
     });
   });
@@ -778,8 +790,8 @@ describe('projectStore', () => {
 
     it('moves several blocks in one call', () => {
       projectStore.getState().moveSegments([
-        { segmentId: 'a', targetBarId: bars()[0].id, startBeat: 1 },
-        { segmentId: 'b', targetBarId: bars()[0].id, startBeat: 2 },
+        { segmentId: 'a', absoluteBeat: 1 },
+        { segmentId: 'b', absoluteBeat: 2 },
       ]);
       expect(layout(bars()[0])).toEqual(['a@1', 'b@2', 'c@3']);
     });
@@ -788,8 +800,8 @@ describe('projectStore', () => {
       // Each lands where the other was. Lifting both out first is what makes this
       // work: placed one at a time, the first would push the second aside.
       projectStore.getState().moveSegments([
-        { segmentId: 'a', targetBarId: bars()[0].id, startBeat: 1 },
-        { segmentId: 'b', targetBarId: bars()[0].id, startBeat: 0 },
+        { segmentId: 'a', absoluteBeat: 1 },
+        { segmentId: 'b', absoluteBeat: 0 },
       ]);
       expect(layout(bars()[0])).toEqual(['b@0', 'a@1', 'c@2']);
     });
@@ -801,8 +813,8 @@ describe('projectStore', () => {
         appendSegment(chordSegment({ id: 'a' }));
         appendSegment(chordSegment({ id: 'b' }));
         projectStore.getState().moveSegments([
-          { segmentId: 'b', targetBarId: bars()[0].id, startBeat: 3 },
-          { segmentId: 'a', targetBarId: bars()[0].id, startBeat: 2 },
+          { segmentId: 'b', absoluteBeat: 3 },
+          { segmentId: 'a', absoluteBeat: 2 },
         ]);
         return layout(bars()[0]);
       };
@@ -811,35 +823,43 @@ describe('projectStore', () => {
 
     it('carries a selection into another bar together', () => {
       projectStore.getState().moveSegments([
-        { segmentId: 'a', targetBarId: bars()[1].id, startBeat: 0 },
-        { segmentId: 'b', targetBarId: bars()[1].id, startBeat: 1 },
+        { segmentId: 'a', absoluteBeat: 4 },
+        { segmentId: 'b', absoluteBeat: 5 },
       ]);
       expect(layout(bars()[0])).toEqual(['c@2']);
       expect(layout(bars()[1])).toEqual(['a@0', 'b@1']);
     });
 
+    it('carries a selection across a bar line, each block keeping its own beat', () => {
+      // Two beats right from beats 2 and 3 of the first bar: one block stays put in
+      // the bar it is in, the other steps over the line. Nothing is pulled onto a
+      // downbeat, and the gap between them is exactly what it was.
+      projectStore.getState().moveSegments([
+        { segmentId: 'b', absoluteBeat: 3 },
+        { segmentId: 'c', absoluteBeat: 4 },
+      ]);
+      expect(layout(bars()[0])).toEqual(['a@0', 'b@3']);
+      expect(layout(bars()[1])).toEqual(['c@0']);
+    });
+
     it('holds each block’s onset inside its own destination bar', () => {
       projectStore.getState().resizeSegmentDuration('a', 2, 0.25);
-      projectStore.getState().moveSegments([
-        { segmentId: 'a', targetBarId: bars()[1].id, startBeat: 3.5 },
-      ]);
+      projectStore.getState().moveSegments([{ segmentId: 'a', absoluteBeat: 7.5 }]);
       // The onset stands; only its tail crosses into the bar beyond.
       expect(layout(bars()[1])).toEqual(['a@3.5']);
     });
 
     it('regenerates notes once, for every bar the batch touched', () => {
-      projectStore.getState().moveSegments([
-        { segmentId: 'a', targetBarId: bars()[1].id, startBeat: 2 },
-      ]);
+      projectStore.getState().moveSegments([{ segmentId: 'a', absoluteBeat: 6 }]);
       expect(barNotes(bars()[1], trackId()).every(n => n.startBeat === 2)).toBe(true);
       expect(barNotes(bars()[0], trackId()).some(n => n.startBeat === 0)).toBe(false);
     });
 
     it('skips unknown ids rather than failing the whole gesture', () => {
       projectStore.getState().moveSegments([
-        { segmentId: 'nope', targetBarId: bars()[0].id, startBeat: 3 },
-        { segmentId: 'a', targetBarId: 'no-such-bar', startBeat: 3 },
-        { segmentId: 'c', targetBarId: bars()[1].id, startBeat: 0 },
+        { segmentId: 'nope', absoluteBeat: 3 },
+        { segmentId: 'a', absoluteBeat: Number.NaN },
+        { segmentId: 'c', absoluteBeat: 4 },
       ]);
       expect(layout(bars()[0])).toEqual(['a@0', 'b@1']);
       expect(layout(bars()[1])).toEqual(['c@0']);
@@ -848,9 +868,7 @@ describe('projectStore', () => {
     it('leaves the project untouched when nothing resolves', () => {
       const before = projectStore.getState().project;
       projectStore.getState().moveSegments([]);
-      projectStore
-        .getState()
-        .moveSegments([{ segmentId: 'nope', targetBarId: bars()[0].id, startBeat: 1 }]);
+      projectStore.getState().moveSegments([{ segmentId: 'nope', absoluteBeat: 1 }]);
       expect(projectStore.getState().project).toBe(before);
     });
   });

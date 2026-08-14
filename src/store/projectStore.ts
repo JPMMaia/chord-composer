@@ -31,6 +31,7 @@ import {
   barChords,
   clampStartToBar,
   clearRange,
+  extendBarsToBeat,
   findSegment,
   flattenSegments,
   getBarIndexAtBeat,
@@ -45,6 +46,7 @@ import {
   refitBars,
   removeSegmentById,
   resizeSegment,
+  resolveBeatPosition,
   trackLaneCount,
   withoutTrackContent,
   withStartBeats,
@@ -86,11 +88,17 @@ export function setRecordingGate(fn: (active: boolean) => void) {
   recordingGate = fn;
 }
 
-/** One block's destination in a batch move. */
+/**
+ * One block's destination in a batch move, as beats from the start of the project.
+ *
+ * Absolute rather than bar-relative because a move is a move along the timeline: bars
+ * are a view of that line, and which one a block ends up in follows from where it
+ * lands rather than being chosen up front. That is what lets a selection be dragged
+ * across a bar line one grid step at a time instead of a bar at a time.
+ */
 export interface SegmentMove {
   segmentId: string;
-  targetBarId: string;
-  startBeat: number;
+  absoluteBeat: number;
   /** Sub-lane to land in. Absent keeps the lane the block is already in. */
   lane?: number;
 }
@@ -120,12 +128,6 @@ interface ProjectState {
   ) => void;
   removeSegment: (segmentId: string) => void;
   removeSegments: (segmentIds: string[]) => void;
-  moveSegment: (
-    segmentId: string,
-    targetBarId: string,
-    startBeat: number,
-    lane?: number
-  ) => void;
   moveSegments: (moves: SegmentMove[]) => void;
   /**
    * How many stacked sub-lanes an instrument shows.
@@ -963,10 +965,6 @@ export const projectStore = create<ProjectState>((set, get) => ({
     set({ project: applyBars(project, bars) });
   },
 
-  moveSegment: (segmentId: string, targetBarId: string, startBeat: number, lane?: number) => {
-    get().moveSegments([{ segmentId, targetBarId, startBeat, lane }]);
-  },
-
   setTrackLaneCount: (trackId: string, count: number) => {
     const project = get().project;
     if (!project) return;
@@ -999,13 +997,15 @@ export const projectStore = create<ProjectState>((set, get) => ({
    * ascending destination order, which makes the ripple deterministic regardless
    * of the order the caller listed them in, and the whole batch ends in a single
    * refit — one visual step, one history entry.
+   *
+   * Destinations are absolute beats, so a batch may land past the end of the song;
+   * the project grows to hold it rather than the moves being clamped back into the
+   * last bar.
    */
   moveSegments: (moves: SegmentMove[]) => {
     const project = get().project;
     if (!project) return;
     if (moves.length === 0) return;
-
-    const barIndexById = new Map(project.bars.map((bar, index) => [bar.id, index]));
 
     // A drag only ever moves blocks belonging to the instrument being edited, so
     // the whole batch is resolved against one track. It is found from the first
@@ -1017,8 +1017,9 @@ export const projectStore = create<ProjectState>((set, get) => ({
     );
     if (!trackId) return;
 
-    // Drop moves whose block or destination no longer exists rather than failing
-    // the whole gesture: a stale selection is a sloppy state, not an error.
+    // Drop moves whose block no longer exists, or that name a beat off the line
+    // entirely, rather than failing the whole gesture: a stale selection is a
+    // sloppy state, not an error.
     const resolved = moves
       .map(move => ({
         move,
@@ -1028,7 +1029,9 @@ export const projectStore = create<ProjectState>((set, get) => ({
       }))
       .filter(
         (entry): entry is { move: SegmentMove; segment: ChordSegment } =>
-          entry.segment !== undefined && barIndexById.has(entry.move.targetBarId)
+          entry.segment !== undefined &&
+          Number.isFinite(entry.move.absoluteBeat) &&
+          entry.move.absoluteBeat >= 0
       );
     if (resolved.length === 0) return;
 
@@ -1041,23 +1044,31 @@ export const projectStore = create<ProjectState>((set, get) => ({
         : bar
     );
 
+    // Grow the song before anything is placed, so the bar a destination names
+    // exists by the time it is resolved.
+    const furthest = Math.max(...resolved.map(entry => entry.move.absoluteBeat));
+    bars = extendBarsToBeat(bars, project.timeSignature, furthest);
+
     // Lane joins the ordering key so a chord's worth of stacked blocks lands in a
     // fixed order, however the caller happened to list them.
     const ordered = [...resolved].sort(
       (a, b) =>
-        barIndexById.get(a.move.targetBarId)! - barIndexById.get(b.move.targetBarId)! ||
-        a.move.startBeat - b.move.startBeat ||
+        a.move.absoluteBeat - b.move.absoluteBeat ||
         (a.move.lane ?? laneOf(a.segment)) - (b.move.lane ?? laneOf(b.segment))
     );
 
     for (const { move, segment } of ordered) {
-      const target = bars.find(bar => bar.id === move.targetBarId)!;
+      // The bar holding this beat, and the offset within it — the one place the
+      // absolute line is turned back into the bars that display it.
+      const position = resolveBeatPosition(move.absoluteBeat, bars, project.timeSignature);
+      if (!position) continue;
+      const target = bars[position.barIndex];
       const capacity = getBarBeats(target, project.timeSignature);
       // A move with no lane keeps the one the block is in, so every caller that
       // predates sub-lanes goes on meaning what it did.
       const placed = move.lane === undefined ? segment : { ...segment, lane: move.lane };
-      bars = mapBar(bars, move.targetBarId, trackId, chords =>
-        placedIn(chords, placed, move.startBeat, capacity)
+      bars = mapBar(bars, target.id, trackId, chords =>
+        placedIn(chords, placed, position.startBeat, capacity)
       );
     }
 

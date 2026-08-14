@@ -680,17 +680,51 @@ describe('ChordTimeline', () => {
 
     // Clamping each block's landing separately used to pile them onto the same beat,
     // and the commit then rippled them apart in reverse: C D E F came back F E D C.
-    // The delta is what gets clamped, so the selection keeps its shape or stays put.
-    it('does not reverse a selection dragged into the bar line', () => {
+    // One delta for the whole selection is what keeps its shape.
+    it('does not reverse a selection dragged over the bar line', () => {
       render(<ChordTimeline />);
       const ids = fullBar();
       selectionStore.getState().setSelectedSegments(ids);
 
-      // Far past the end of the bar: the last block already sits against the line,
-      // so the whole selection has nowhere to go.
+      // Six beats right, out of a four-beat bar: the selection spills across two
+      // bar lines and has to arrive spread over them in the order it left.
       dragBlock(ids[0], bars()[0].id, 0, 6);
 
-      expect(layout(0)).toEqual(ids.map((id, beat) => `${id}@${beat}`));
+      expect(layout(0)).toEqual([]);
+      expect(layout(1)).toEqual([`${ids[0]}@2`, `${ids[1]}@3`]);
+      expect(layout(2)).toEqual([`${ids[2]}@0`, `${ids[3]}@1`]);
+    });
+
+    // The bug this fixes: the trailing block sat against the bar line, which used to
+    // pin the whole selection until the pointer crossed into the next bar — at which
+    // point it jumped a whole bar, looking like a snap to the downbeat.
+    it('steps a selection over the bar line one grid step at a time', () => {
+      render(<ChordTimeline />);
+      const ids = fullBar();
+      selectionStore.getState().setSelectedSegments(ids);
+
+      dragBlock(ids[0], bars()[0].id, 0, 1);
+
+      expect(layout(0)).toEqual([`${ids[0]}@1`, `${ids[1]}@2`, `${ids[2]}@3`]);
+      expect(layout(1)).toEqual([`${ids[3]}@0`]);
+    });
+
+    it('grows the project when a selection is dragged off the end', () => {
+      render(<ChordTimeline />);
+      const items = cMajorChords();
+      dropAt(bars()[0].id, items[0], 0);
+      dropAt(bars()[0].id, items[4], 2);
+      const [first, second] = segments().map(s => s.id);
+      selectionStore.getState().setSelectedSegments([first, second]);
+      const barCount = bars().length;
+
+      // Onto the last bar's third beat: the trailing block lands two beats past the
+      // end of the song, which is a bar the project does not have yet.
+      dragBlock(first, bars()[barCount - 1].id, 0, 3);
+
+      expect(bars()).toHaveLength(barCount + 1);
+      expect(layout(barCount - 1)).toEqual([`${first}@3`]);
+      expect(layout(barCount)).toEqual([`${second}@1`]);
     });
 
     it('keeps the order of a selection dragged past the start of the bar', () => {
@@ -1011,6 +1045,17 @@ describe('ChordTimeline', () => {
       key: 'ArrowRight',
     });
     expect(segments()[0].startBeat).toBe(1.5);
+  });
+
+  it('nudges a block over the bar line rather than sticking it to the last beat', () => {
+    render(<ChordTimeline />);
+    dropAt(bars()[0].id, cMajorChords()[0], 3);
+    const id = segments()[0].id;
+
+    fireEvent.keyDown(screen.getByTestId(`chord-block-${id}`), { key: 'ArrowRight' });
+
+    expect(barChords(bars()[0], trackId())).toHaveLength(0);
+    expect(layout(1)).toEqual([`${id}@0`]);
   });
 
   it('reserves a gutter matching the piano roll key column, so bar 1 lines up', () => {

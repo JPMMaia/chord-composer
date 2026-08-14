@@ -11,7 +11,6 @@ import {
   getBarStartBeat,
   getTotalBeats,
   laneOf,
-  MIN_SEGMENT_BEATS,
   resolveBeatPosition,
   snapBeat,
   SNAP_OPTIONS,
@@ -128,10 +127,24 @@ function trackInStore(trackId: string): Track | undefined {
   return projectStore.getState().project?.tracks.find(t => t.id === trackId);
 }
 
-/** Where a block sat when a drag began, or would land if released now. */
+/** Where a block would land if released now, in the bar-relative terms it is drawn in. */
 interface SegmentPlacement {
   barIndex: number;
   startBeat: number;
+  /** Which of the instrument's stacked sub-lanes. */
+  lane: number;
+}
+
+/**
+ * Where a block sat when a drag began.
+ *
+ * Held in absolute beats rather than as a bar and an offset, because that is the
+ * frame the gesture works in: a drag is one distance along the timeline, and bar
+ * lines have no say in it. Turning it back into bars is the last step, not the first.
+ */
+interface DragOrigin {
+  /** Beats from the start of the project. */
+  absoluteBeat: number;
   /** Which of the instrument's stacked sub-lanes. */
   lane: number;
 }
@@ -146,8 +159,18 @@ interface DragState {
   /** Beats between the grabbed block's left edge and the point it was grabbed by. */
   grabOffset: number;
   /** Where each dragged block sat when the gesture began. */
-  origins: Map<string, SegmentPlacement>;
-  /** Where each dragged block would land if the pointer were released now. */
+  origins: Map<string, DragOrigin>;
+  /** How far along the timeline the selection has travelled, in beats. */
+  beatDelta: number;
+  /** How many sub-lanes down it has travelled. */
+  laneDelta: number;
+  /**
+   * Where each dragged block would land if the pointer were released now.
+   *
+   * A block carried past the last bar names a `barIndex` the project does not have
+   * yet, so no lane draws it and it goes unseen until release, when the commit grows
+   * the song to hold it.
+   */
   preview: Map<string, SegmentPlacement>;
   /** False until the pointer actually travels, so a press is not mistaken for a drag. */
   moved: boolean;
@@ -201,7 +224,6 @@ export const ChordTimeline: React.FC = () => {
   const insertSegment = projectStore(s => s.insertSegment);
   const pasteSegments = projectStore(s => s.pasteSegments);
   const removeSegment = projectStore(s => s.removeSegment);
-  const moveSegment = projectStore(s => s.moveSegment);
   const resizeSegmentDuration = projectStore(s => s.resizeSegmentDuration);
   const setBarTimeSignature = projectStore(s => s.setBarTimeSignature);
   const setTrackLaneCount = projectStore(s => s.setTrackLaneCount);
@@ -301,10 +323,13 @@ export const ChordTimeline: React.FC = () => {
       const grabbed = state.origins.get(state.segmentId);
       if (!grabbed) return;
 
-      // One lane delta for the whole selection, for the same reason as the bar and
-      // beat deltas below: a chord dragged down a row must stay a chord. The live
-      // track is read here rather than closed over, so the gesture cannot clamp
-      // against a lane count that has since grown.
+      const projectTs = currentProject.timeSignature;
+      const barStart = getBarStartBeat(currentBars, barIndex, projectTs);
+
+      // One lane delta for the whole selection, for the same reason as the beat
+      // delta below: a chord dragged down a row must stay a chord. The live track
+      // is read here rather than closed over, so the gesture cannot clamp against
+      // a lane count that has since grown.
       const draggedTrack = currentProject.tracks.find(
         t => t.id === selectionStore.getState().selectedTrackId
       );
@@ -317,55 +342,57 @@ export const ChordTimeline: React.FC = () => {
 
       // The grabbed block follows the pointer; everything else in the selection
       // keeps its offset from it, so the shape of the selection is preserved.
-      const startBeat = snapBeat(beatIn(lane, e.clientX) - state.grabOffset, snapBeats);
-      const origins = [...state.origins.values()];
+      //
+      // The snap is taken in the frame of the bar the block lands in, not of the
+      // whole line, so it lands on the gridlines actually drawn — bars may carry
+      // their own meter, and an absolute grid would drift away from theirs.
+      const raw = Math.max(0, barStart + beatIn(lane, e.clientX) - state.grabOffset);
+      const landing = resolveBeatPosition(raw, currentBars, projectTs, true);
+      if (!landing) return;
+      const snapped =
+        getBarStartBeat(currentBars, landing.barIndex, projectTs) +
+        snapBeat(landing.startBeat, snapBeats);
 
       // Clamp the delta once for the whole selection, never each block's landing
       // separately. Per-block clamping collapses blocks onto the same beat, and the
       // commit then ripples them apart again in reverse order — drag four blocks
       // hard against the bar line and they come back reversed. Holding the delta
       // instead keeps the selection's shape, so the preview and the commit agree.
-      const barDelta = clamp(
-        barIndex - grabbed.barIndex,
-        -Math.min(...origins.map(o => o.barIndex)),
-        currentBars.length - 1 - Math.max(...origins.map(o => o.barIndex))
-      );
-
-      // Only the onset is held inside the bar. A block's tail is free to cross the
-      // bar line, so its duration has no say in how far right it may be dragged.
-      let low = -Infinity;
-      let high = Infinity;
-      for (const origin of origins) {
-        const target = currentBars[origin.barIndex + barDelta];
-        const capacity = getBarBeats(target, currentProject.timeSignature);
-        low = Math.max(low, -origin.startBeat);
-        high = Math.min(high, capacity - MIN_SEGMENT_BEATS - origin.startBeat);
-      }
-      // Both bounds are pulled back onto the snap grid, inwards. The last legal
-      // onset is a quarter beat short of the bar line, which is not a beat the grid
-      // offers at coarser snaps; without this a selection dragged hard right would
-      // stop three quarters of a beat off the lattice it was dragged along.
-      low = Math.ceil(low / snapBeats) * snapBeats;
-      high = Math.floor(high / snapBeats) * snapBeats;
-
-      const beatDelta = clamp(startBeat - grabbed.startBeat, low, Math.max(low, high));
+      //
+      // Only one bound is needed: nothing may start before the song does. There is
+      // no upper one, because there is nothing up there to stop at — a block may sit
+      // across a bar line, and past the last bar the commit grows the song. The bound
+      // is pulled inwards onto the snap grid so a selection dragged hard left stops on
+      // the lattice it was dragged along rather than beside it.
+      const origins = [...state.origins.values()];
+      const low =
+        Math.ceil(-Math.min(...origins.map(o => o.absoluteBeat)) / snapBeats) * snapBeats;
+      const beatDelta = Math.max(snapped - grabbed.absoluteBeat, low);
 
       const preview = new Map<string, SegmentPlacement>();
       for (const [segmentId, origin] of state.origins) {
+        // `extend` so a block carried off the end keeps counting rather than piling
+        // onto the last bar: the commit will grow the song to match.
+        const at = resolveBeatPosition(
+          origin.absoluteBeat + beatDelta,
+          currentBars,
+          projectTs,
+          true
+        );
+        if (!at) continue;
         preview.set(segmentId, {
-          barIndex: origin.barIndex + barDelta,
-          startBeat: origin.startBeat + beatDelta,
+          barIndex: at.barIndex,
+          startBeat: at.startBeat,
           lane: origin.lane + laneDelta,
         });
       }
 
       const moved =
         state.moved ||
-        barDelta !== 0 ||
         laneDelta !== 0 ||
         Math.abs(beatDelta) * pixelsPerBeat > DRAG_THRESHOLD_PX;
 
-      setDrag({ ...state, preview, moved });
+      setDrag({ ...state, beatDelta, laneDelta, preview, moved });
     };
 
     const handleUp = () => {
@@ -373,15 +400,14 @@ export const ChordTimeline: React.FC = () => {
       setDrag(null);
       if (!state || !state.moved) return;
 
-      const currentBars = projectStore.getState().project?.bars;
-      if (!currentBars) return;
-
+      // Committed from the origins and the delta rather than from the preview: the
+      // preview is bars, which a block dragged off the end has run out of, while the
+      // delta is the gesture itself and always says exactly where every block goes.
       moveSegments(
-        [...state.preview].map(([segmentId, placement]) => ({
+        [...state.origins].map(([segmentId, origin]) => ({
           segmentId,
-          targetBarId: currentBars[placement.barIndex].id,
-          startBeat: placement.startBeat,
-          lane: placement.lane,
+          absoluteBeat: origin.absoluteBeat + state.beatDelta,
+          lane: origin.lane + state.laneDelta,
         }))
       );
     };
@@ -745,13 +771,16 @@ export const ChordTimeline: React.FC = () => {
   };
 
   /** Where a block sits, by id, across the whole project — the drag's starting point. */
-  const placementOf = (segmentId: string): SegmentPlacement | null => {
+  const originOf = (segmentId: string): DragOrigin | null => {
     const barIndex = bars.findIndex(bar =>
       barChords(bar, selectedTrackId).some(c => c.id === segmentId)
     );
     if (barIndex < 0) return null;
     const segment = barChords(bars[barIndex], selectedTrackId).find(c => c.id === segmentId)!;
-    return { barIndex, startBeat: segment.startBeat ?? 0, lane: laneOf(segment) };
+    return {
+      absoluteBeat: getBarStartBeat(bars, barIndex, projectTs) + (segment.startBeat ?? 0),
+      lane: laneOf(segment),
+    };
   };
 
   /**
@@ -803,10 +832,10 @@ export const ChordTimeline: React.FC = () => {
     }
     selectBar(bar.id);
 
-    const origins = new Map<string, SegmentPlacement>();
+    const origins = new Map<string, DragOrigin>();
     for (const id of dragged) {
-      const placement = placementOf(id);
-      if (placement) origins.set(id, placement);
+      const origin = originOf(id);
+      if (origin) origins.set(id, origin);
     }
     if (!origins.has(segment.id)) return;
 
@@ -819,19 +848,31 @@ export const ChordTimeline: React.FC = () => {
       segmentId: segment.id,
       grabOffset: pointerBeat - startBeat,
       origins,
-      preview: new Map<string, SegmentPlacement>(origins),
+      beatDelta: 0,
+      laneDelta: 0,
+      // Empty rather than a copy of the origins: a block with no preview entry is
+      // drawn where it actually sits, which is exactly right until the pointer moves.
+      preview: new Map<string, SegmentPlacement>(),
       moved: false,
     });
   };
 
-  /** Move a block by one grid step, the visible meaning of the arrow keys. */
+  /**
+   * Move a block by one grid step, the visible meaning of the arrow keys.
+   *
+   * Measured along the timeline rather than within the bar, so a block on the last
+   * beat of a bar steps over the bar line instead of sticking to it — the same rule
+   * dragging follows.
+   */
   const nudge = (bar: Bar, segment: ChordSegment, startBeat: number, direction: -1 | 1) => {
-    moveSegment(
-      segment.id,
-      bar.id,
-      Math.max(0, startBeat + direction * snapBeats),
-      laneOf(segment)
-    );
+    const from = getBarStartBeat(bars, bar.barIndex, projectTs) + startBeat;
+    moveSegments([
+      {
+        segmentId: segment.id,
+        absoluteBeat: Math.max(0, from + direction * snapBeats),
+        lane: laneOf(segment),
+      },
+    ]);
   };
 
   /**

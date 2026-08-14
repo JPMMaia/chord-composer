@@ -747,6 +747,35 @@ function createBar(index: number, existing: Bar[]): Bar {
   };
 }
 
+/**
+ * Grow the project until `beat` falls inside a bar, appending bars that inherit the
+ * last one's meter — the same rule `refitBars` follows when a block spills off the end.
+ *
+ * This is what lets a block be *placed* past the end rather than only rippled there:
+ * dragging a selection off the end of the song extends it, instead of piling every
+ * block onto the last bar. A beat already inside a bar appends nothing and hands back
+ * the array untouched, so callers can run it unconditionally.
+ */
+export function extendBarsToBeat(
+  bars: Bar[],
+  projectTs: TimeSignature,
+  beat: number
+): Bar[] {
+  if (!Number.isFinite(beat) || bars.length === 0) return bars;
+
+  let total = getTotalBeats(bars, projectTs);
+  if (beat < total) return bars;
+
+  const result = [...bars];
+  // Each appended bar inherits from the one before it, so the meter carries along
+  // the whole run rather than only onto the first new bar.
+  while (beat >= total) {
+    result.push(createBar(result.length, result));
+    total += getBarBeats(result[result.length - 1], projectTs);
+  }
+  return result;
+}
+
 /** Remove a segment by id. Unknown ids are a no-op. */
 export function removeSegmentById(
   segments: ChordSegment[],

@@ -15,6 +15,7 @@ import {
   placeSegmentInBar,
   refitBars,
   clearRange,
+  extendBarsToBeat,
   SNAP_OPTIONS,
   DEFAULT_SNAP_BEATS,
   MIN_SEGMENT_BEATS,
@@ -316,6 +317,32 @@ describe("timeline", () => {
     it("pulls a snap that overshoots the bar back inside it", () => {
       // 1/1 snap in 3/4: snapping lands on 4, past the bar's three beats.
       expect(clampStartToBar(snapBeat(2.5, 4), 3)).toBe(3 - MIN_SEGMENT_BEATS);
+    });
+  });
+
+  describe("extendBarsToBeat", () => {
+    it("hands back the same bars when the beat already falls inside one", () => {
+      const bars = [makeBar(0), makeBar(1)];
+      expect(extendBarsToBeat(bars, TS_4_4, 7.5)).toBe(bars);
+    });
+
+    it("appends as many bars as it takes to reach the beat", () => {
+      const bars = extendBarsToBeat([makeBar(0)], TS_4_4, 9);
+      expect(bars).toHaveLength(3);
+      expect(bars.map((b) => b.barIndex)).toEqual([0, 1, 2]);
+      expect(getTotalBeats(bars, TS_4_4)).toBe(12);
+    });
+
+    it("gives appended bars the meter of the bar they follow", () => {
+      const bars = extendBarsToBeat([makeBar(0, [], TS_3_4)], TS_4_4, 7);
+      // Three-beat bars all the way, so the beat lands in the third rather than
+      // the second, which is what a project's own metre continuing means.
+      expect(bars).toHaveLength(3);
+      expect(bars.every((b) => b.timeSignature === TS_3_4)).toBe(true);
+    });
+
+    it("leaves an empty project alone", () => {
+      expect(extendBarsToBeat([], TS_4_4, 8)).toEqual([]);
     });
   });
 

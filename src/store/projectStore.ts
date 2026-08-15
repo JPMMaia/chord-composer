@@ -13,6 +13,7 @@ import type {
   SpacingPreset,
   TimeSignature,
   Track,
+  TrackGroup,
 } from '@/types/music';
 import type { CopiedSegment } from './clipboardStore';
 import { clearLocalStorage } from '@/engine/fileIO';
@@ -27,6 +28,11 @@ import {
   withoutLane,
 } from '@/engine/parameterAutomation';
 import { nextSectionName, normalizeSections, sectionColorAt } from '@/engine/sections';
+import {
+  moveGroup as moveGroupInTracks,
+  moveTrack as moveTrackInTracks,
+  normalizeTrackOrder,
+} from '@/engine/trackGroups';
 import {
   barChords,
   clampStartToBar,
@@ -234,6 +240,36 @@ interface ProjectState {
   removeSection: (sectionId: string) => void;
   /** Clone an instrument and all its chord segments. Returns the new instrument's id. */
   duplicateTrack: (sourceTrackId: string) => string | null;
+
+  // -- Instrument groups -----------------------------------------------------
+  /**
+   * Add an empty group to the end of the sidebar. Returns its id so the caller can
+   * open its name for editing, as `addSection` does.
+   */
+  addTrackGroup: (name?: string) => string | null;
+  /**
+   * Remove a group. Its instruments stay exactly where they are, ungrouped — a
+   * group is a label, and removing a label must never remove what it labelled.
+   */
+  removeTrackGroup: (groupId: string) => void;
+  renameTrackGroup: (groupId: string, name: string) => void;
+  setTrackGroupColor: (groupId: string, color: string) => void;
+  toggleTrackGroupCollapsed: (groupId: string) => void;
+  toggleTrackGroupMute: (groupId: string) => void;
+  toggleTrackGroupSolo: (groupId: string) => void;
+  /**
+   * Move an instrument into a group and to a position within it.
+   *
+   * `groupId` null means ungrouped; `beforeTrackId` null means the end of the
+   * target group, or the end of the sidebar when both are null.
+   */
+  moveTrack: (
+    trackId: string,
+    groupId: string | null,
+    beforeTrackId: string | null
+  ) => void;
+  /** Move a whole group before another, or to the end when `beforeGroupId` is null. */
+  moveTrackGroup: (groupId: string, beforeGroupId: string | null) => void;
   /**
    * Paste clipboard segments into the project.
    *
@@ -597,6 +633,45 @@ function updateSections(
 
   set({ project: { ...project, sections: next, updatedAt: new Date() } });
   return next;
+}
+
+/** Whether two track arrays hold the same instruments, in the same order and groups. */
+function sameTrackOrder(a: Track[], b: Track[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((track, i) => track.id === b[i].id && track.groupId === b[i].groupId)
+  );
+}
+
+/**
+ * Rewrite the project's instrument groups.
+ *
+ * Every group edit goes through here so one rule holds in one place: the tracks are
+ * re-normalized against whatever groups came out, which is what turns "remove this
+ * group" into "its members become ungrouped and stay where they are" without any
+ * caller having to say so. A group naming an id that is not there changes nothing
+ * and must not land on the undo stack, the way `updateTrack` refuses an unknown id.
+ */
+function updateTrackGroups(
+  get: () => ProjectState,
+  set: (partial: Partial<ProjectState>) => void,
+  edit: (groups: TrackGroup[]) => TrackGroup[]
+): void {
+  const project = get().project;
+  if (!project) return;
+
+  const current = project.trackGroups ?? [];
+  const next = edit(current);
+  if (next.length === current.length && next.every((g, i) => g === current[i])) return;
+
+  set({
+    project: {
+      ...project,
+      trackGroups: next,
+      tracks: normalizeTrackOrder(project.tracks, next),
+      updatedAt: new Date(),
+    },
+  });
 }
 
 export const projectStore = create<ProjectState>((set, get) => ({
@@ -1436,6 +1511,9 @@ export const projectStore = create<ProjectState>((set, get) => ({
     const newTrack: Track = {
       id: newId,
       name: `${source.name} (copy)`,
+      // Lands in the same group as its original, which is both where the row
+      // appears and what keeps the group's run contiguous.
+      groupId: source.groupId,
       instrument: source.instrument,
       // The copy holds the same blocks in the same lanes, so it needs the same rows.
       laneCount: source.laneCount,
@@ -1487,6 +1565,103 @@ export const projectStore = create<ProjectState>((set, get) => ({
 
     set({ project: applyBars(next, newBars) });
     return newId;
+  },
+
+  // -------------------------------------------------------------------------
+  // Instrument groups
+  // -------------------------------------------------------------------------
+
+  addTrackGroup: (name?: string) => {
+    const project = get().project;
+    if (!project) return null;
+
+    const current = project.trackGroups ?? [];
+    const id = generateId();
+    const group: TrackGroup = {
+      id,
+      name: name && name.trim().length > 0 ? name : `Group ${current.length + 1}`,
+      color: trackColorAt(current.length),
+    };
+
+    set({
+      project: { ...project, trackGroups: [...current, group], updatedAt: new Date() },
+    });
+    return id;
+  },
+
+  removeTrackGroup: (groupId: string) => {
+    updateTrackGroups(get, set, groups => groups.filter(g => g.id !== groupId));
+  },
+
+  renameTrackGroup: (groupId: string, name: string) => {
+    // An empty name would leave a header nothing can be read off; the old one stands,
+    // as it does for a section and an automation lane.
+    if (name.trim().length === 0) return;
+    updateTrackGroups(get, set, groups =>
+      groups.map(g => (g.id === groupId ? { ...g, name } : g))
+    );
+  },
+
+  setTrackGroupColor: (groupId: string, color: string) => {
+    updateTrackGroups(get, set, groups =>
+      groups.map(g => (g.id === groupId ? { ...g, color } : g))
+    );
+  },
+
+  toggleTrackGroupCollapsed: (groupId: string) => {
+    updateTrackGroups(get, set, groups =>
+      groups.map(g => (g.id === groupId ? { ...g, collapsed: !g.collapsed } : g))
+    );
+  },
+
+  toggleTrackGroupMute: (groupId: string) => {
+    updateTrackGroups(get, set, groups =>
+      groups.map(g => (g.id === groupId ? { ...g, muted: !g.muted } : g))
+    );
+  },
+
+  toggleTrackGroupSolo: (groupId: string) => {
+    updateTrackGroups(get, set, groups =>
+      groups.map(g => (g.id === groupId ? { ...g, solo: !g.solo } : g))
+    );
+  },
+
+  moveTrack: (trackId: string, groupId: string | null, beforeTrackId: string | null) => {
+    const project = get().project;
+    if (!project) return;
+
+    const groups = project.trackGroups ?? [];
+    const tracks = moveTrackInTracks(project.tracks, groups, trackId, groupId, beforeTrackId);
+
+    // A drop that changed nothing must not land on the undo stack — dragging a row
+    // one pixel and letting go is a common miss.
+    if (sameTrackOrder(project.tracks, tracks)) return;
+
+    set({ project: { ...project, tracks, updatedAt: new Date() } });
+  },
+
+  moveTrackGroup: (groupId: string, beforeGroupId: string | null) => {
+    const project = get().project;
+    if (!project) return;
+
+    const current = project.trackGroups ?? [];
+    const moved = moveGroupInTracks(project.tracks, current, groupId, beforeGroupId);
+
+    if (
+      sameTrackOrder(project.tracks, moved.tracks) &&
+      moved.groups.every((g, i) => g === current[i])
+    ) {
+      return;
+    }
+
+    set({
+      project: {
+        ...project,
+        tracks: moved.tracks,
+        trackGroups: moved.groups,
+        updatedAt: new Date(),
+      },
+    });
   },
 
   /** Paste clipboard segments into the project at the given bar offset. */

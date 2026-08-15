@@ -587,7 +587,7 @@ describe('fileIO', () => {
         });
 
       it('states the current schema version', () => {
-        expect(SCHEMA_VERSION).toBe('1.15');
+        expect(SCHEMA_VERSION).toBe('1.16');
       });
 
       it('round-trips names, ranges and colours', () => {
@@ -1418,6 +1418,145 @@ describe('fileIO', () => {
 
         expect(result.valid).toBe(false);
         expect(result.errors.join(' ')).toContain('volume automation beat');
+      });
+    });
+  });
+
+  // Schema 1.16: the sidebar's groups. A label carrying a collapsed state and its
+  // own mute and solo, owning no music.
+  describe('instrument groups', () => {
+    const grouped = () =>
+      createTestProject({
+        trackGroups: [{ id: 'g1', name: 'Rhythm', color: '#abcdef' }],
+        tracks: [
+          { ...createTestProject().tracks[0], groupId: 'g1' },
+          {
+            id: 'track-lead',
+            name: 'Lead',
+            instrument: 'acoustic_grand_piano',
+            volume: 1,
+            pan: 0,
+            muted: false,
+            solo: false,
+          },
+        ],
+      });
+
+    it('round-trips a grouped project', () => {
+      const restored = deserializeProject(serializeProject(grouped()));
+
+      expect(restored.trackGroups).toEqual([
+        { id: 'g1', name: 'Rhythm', collapsed: false, muted: false, solo: false, color: '#abcdef' },
+      ]);
+      expect(restored.tracks.map(t => [t.name, t.groupId])).toEqual([
+        ['Piano', 'g1'],
+        ['Lead', undefined],
+      ]);
+    });
+
+    it('round-trips the collapsed, muted and soloed state of a group', () => {
+      const project = grouped();
+      project.trackGroups = [
+        { id: 'g1', name: 'Rhythm', collapsed: true, muted: true, solo: true },
+      ];
+
+      const restored = deserializeProject(serializeProject(project));
+
+      expect(restored.trackGroups![0]).toMatchObject({
+        collapsed: true,
+        muted: true,
+        solo: true,
+      });
+    });
+
+    // An ungrouped project must serialise exactly as it did under 1.15.
+    it('writes no group keys when nothing is grouped', () => {
+      const parsed = JSON.parse(serializeProject(createTestProject()));
+
+      expect('trackGroups' in parsed).toBe(false);
+      expect('groupId' in parsed.tracks[0]).toBe(false);
+    });
+
+    it('reads a file written before groups existed as ungrouped', () => {
+      const json = JSON.parse(serializeProject(createTestProject()));
+      json.version = '1.15';
+
+      const restored = deserializeProject(JSON.stringify(json));
+
+      expect(restored.trackGroups).toBeUndefined();
+      expect(restored.tracks[0].groupId).toBeUndefined();
+    });
+
+    // Contiguous runs are an invariant the writers keep, but a hand-edited file
+    // need not have honoured it, so it is restored on read.
+    it('gathers a scattered group into one run', () => {
+      const json = JSON.parse(serializeProject(grouped()));
+      const [piano, lead] = json.tracks;
+      // Piano(g1), Lead, Bass(g1) — the group is split around an ungrouped track.
+      json.tracks = [piano, lead, { ...piano, id: 'track-bass', name: 'Bass' }];
+
+      const restored = deserializeProject(JSON.stringify(json));
+
+      // The run lands at its first member, so Bass joins Piano rather than the
+      // pair being herded to the top or the bottom.
+      expect(restored.tracks.map(t => t.name)).toEqual(['Piano', 'Bass', 'Lead']);
+    });
+
+    it('drops a groupId naming no group', () => {
+      const json = JSON.parse(serializeProject(grouped()));
+      delete json.trackGroups;
+
+      const restored = deserializeProject(JSON.stringify(json));
+
+      expect(restored.trackGroups).toBeUndefined();
+      expect(restored.tracks[0].groupId).toBeUndefined();
+    });
+
+    it('drops a group entry with no usable id or name', () => {
+      const json = JSON.parse(serializeProject(grouped()));
+      json.trackGroups = [{ name: 'Nameless' }, { id: 'g1', name: 'Rhythm' }];
+
+      const restored = deserializeProject(JSON.stringify(json));
+
+      expect(restored.trackGroups!.map(g => g.id)).toEqual(['g1']);
+    });
+
+    describe('validateProject', () => {
+      it('accepts a grouped project', () => {
+        expect(validateProject(grouped()).valid).toBe(true);
+      });
+
+      it('rejects a group with no name', () => {
+        const project = grouped();
+        project.trackGroups = [{ id: 'g1', name: '  ' }];
+
+        const result = validateProject(project);
+
+        expect(result.valid).toBe(false);
+        expect(result.errors.join(' ')).toContain('Instrument group 0: name is required');
+      });
+
+      it('rejects two groups sharing an id', () => {
+        const project = grouped();
+        project.trackGroups = [
+          { id: 'g1', name: 'Rhythm' },
+          { id: 'g1', name: 'Horns' },
+        ];
+
+        const result = validateProject(project);
+
+        expect(result.valid).toBe(false);
+        expect(result.errors.join(' ')).toContain('duplicate id');
+      });
+
+      it('rejects a track in a group that does not exist', () => {
+        const project = grouped();
+        project.trackGroups = [];
+
+        const result = validateProject(project);
+
+        expect(result.valid).toBe(false);
+        expect(result.errors.join(' ')).toContain('group "g1" does not exist');
       });
     });
   });

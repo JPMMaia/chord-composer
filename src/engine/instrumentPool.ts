@@ -1,5 +1,6 @@
-import type { Track } from '@/types/music';
+import type { Track, TrackGroup } from '@/types/music';
 import type { Instrument } from '@/engine/instrument';
+import { groupOf } from '@/engine/trackGroups';
 import { configureLimiter } from '@/engine/instrumentBus';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
 import { SmplrPianoInstrument } from '@/engine/smplrPiano';
@@ -168,9 +169,21 @@ export class InstrumentPool {
  * Solo is a project-wide mode rather than a per-track flag: the moment any track is
  * soloed, every track that is not becomes silent. Mute still wins over solo, so
  * soloing a muted track does not un-mute it.
+ *
+ * A group's mute and solo sit *beside* its members' own rather than replacing them,
+ * and read exactly the same way: a muted group is as final as a muted track, and a
+ * soloed group puts all its members into the same one solo set the tracks share —
+ * so soloing a group and soloing a track inside another group leaves both sounding,
+ * which is what a single project-wide mode has to mean. `groups` defaults to none,
+ * which is every project written before groups existed.
  */
-export function isTrackAudible(track: Track, tracks: Track[]): boolean {
-  if (track.muted) return false;
-  const anySoloed = tracks.some(t => t.solo);
-  return !anySoloed || track.solo;
+export function isTrackAudible(
+  track: Track,
+  tracks: Track[],
+  groups: TrackGroup[] = []
+): boolean {
+  const group = groupOf(track, groups);
+  if (track.muted || group?.muted) return false;
+  const anySoloed = tracks.some(t => t.solo) || groups.some(g => g.solo);
+  return !anySoloed || track.solo || group?.solo === true;
 }

@@ -397,7 +397,7 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
     // Mute and solo are read here, per note, rather than baked into `timings`,
     // so toggling either during playback is heard on the next tick.
     const audible = new Set(
-      cfg.tracks.filter(t => isTrackAudible(t, cfg.tracks)).map(t => t.id)
+      cfg.tracks.filter(t => isTrackAudible(t, cfg.tracks, cfg.groups ?? [])).map(t => t.id)
     );
   
     for (const note of due) {

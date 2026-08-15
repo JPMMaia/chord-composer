@@ -2520,4 +2520,244 @@ describe('projectStore', () => {
       ]);
     });
   });
+
+  describe('instrument groups', () => {
+    const state = () => projectStore.getState();
+    const project = () => state().project!;
+    const groups = () => project().trackGroups ?? [];
+
+    /** The sidebar's instruments, as `group/name` or `name`. */
+    const order = () =>
+      project().tracks.map(t => {
+        const group = groups().find(g => g.id === t.groupId);
+        return group ? `${group.name}/${t.name}` : t.name;
+      });
+
+    /** An instrument's id by name — every action here is addressed by id. */
+    const idOf = (name: string) => project().tracks.find(t => t.name === name)!.id;
+    const groupIdOf = (name: string) => groups().find(g => g.name === name)!.id;
+
+    beforeEach(() => {
+      state().createProject(); // one instrument: Piano
+      state().addTrack('Bass');
+      state().addTrack('Lead');
+    });
+
+    describe('addTrackGroup', () => {
+      it('adds an empty group and returns its id', () => {
+        const id = state().addTrackGroup('Rhythm');
+
+        expect(id).not.toBeNull();
+        expect(groups()).toHaveLength(1);
+        expect(groups()[0]).toMatchObject({ id: id!, name: 'Rhythm' });
+      });
+
+      it('names a group after its position when none is given', () => {
+        state().addTrackGroup();
+        state().addTrackGroup();
+
+        expect(groups().map(g => g.name)).toEqual(['Group 1', 'Group 2']);
+      });
+
+      it('gives each group a colour from the palette', () => {
+        state().addTrackGroup();
+        expect(groups()[0].color).toBeTruthy();
+      });
+
+      it('leaves every instrument where it was', () => {
+        state().addTrackGroup('Rhythm');
+        expect(order()).toEqual(['Piano', 'Bass', 'Lead']);
+      });
+    });
+
+    describe('moveTrack', () => {
+      beforeEach(() => {
+        state().addTrackGroup('Rhythm');
+      });
+
+      // A group with no members yet sits at the bottom of the panel — `tracks` has
+      // nowhere else to put it — so the instrument dropped into it lands there too,
+      // which is where the user let go of it.
+      it('moves an instrument into a group', () => {
+        state().moveTrack(idOf('Bass'), groupIdOf('Rhythm'), null);
+
+        expect(order()).toEqual(['Piano', 'Lead', 'Rhythm/Bass']);
+      });
+
+      it('gathers the instruments of a group into one run', () => {
+        const rhythm = groupIdOf('Rhythm');
+        state().moveTrack(idOf('Piano'), rhythm, null);
+        state().moveTrack(idOf('Lead'), rhythm, null);
+
+        expect(order()).toEqual(['Bass', 'Rhythm/Piano', 'Rhythm/Lead']);
+      });
+
+      it('puts an instrument before a member it is dropped above', () => {
+        const rhythm = groupIdOf('Rhythm');
+        state().moveTrack(idOf('Piano'), rhythm, null);
+        state().moveTrack(idOf('Lead'), rhythm, idOf('Piano'));
+
+        expect(order()).toEqual(['Bass', 'Rhythm/Lead', 'Rhythm/Piano']);
+      });
+
+      it('moves an instrument back out of a group', () => {
+        state().moveTrack(idOf('Bass'), groupIdOf('Rhythm'), null);
+        state().moveTrack(idOf('Bass'), null, null);
+
+        expect(order()).toEqual(['Piano', 'Lead', 'Bass']);
+        expect(project().tracks.find(t => t.name === 'Bass')!.groupId).toBeUndefined();
+      });
+
+      it('reorders ungrouped instruments', () => {
+        state().moveTrack(idOf('Lead'), null, idOf('Piano'));
+
+        expect(order()).toEqual(['Lead', 'Piano', 'Bass']);
+      });
+
+      // A drag that ends where it started is a common miss, and must not cost an undo.
+      it('leaves the project alone for a move that changes nothing', () => {
+        const before = state().project;
+
+        state().moveTrack(idOf('Lead'), null, null);
+        state().moveTrack('nope', null, null);
+        state().moveTrack(idOf('Lead'), 'no-such-group', null);
+
+        expect(state().project).toBe(before);
+      });
+
+      it('keeps everything the instrument plays', () => {
+        appendSegment(chordSegment({ id: 'seg-1' }));
+        const bars = project().bars;
+
+        state().moveTrack(trackId(), groupIdOf('Rhythm'), null);
+
+        expect(project().bars).toEqual(bars);
+      });
+    });
+
+    describe('moveTrackGroup', () => {
+      beforeEach(() => {
+        state().addTrackGroup('Rhythm');
+        state().addTrackGroup('Horns');
+        state().moveTrack(idOf('Piano'), groupIdOf('Rhythm'), null);
+        state().moveTrack(idOf('Bass'), groupIdOf('Horns'), null);
+      });
+
+      it('moves a group before another, instruments and all', () => {
+        state().moveTrackGroup(groupIdOf('Horns'), groupIdOf('Rhythm'));
+
+        expect(groups().map(g => g.name)).toEqual(['Horns', 'Rhythm']);
+        expect(order()).toEqual(['Lead', 'Horns/Bass', 'Rhythm/Piano']);
+      });
+
+      it('moves a group to the end', () => {
+        state().moveTrackGroup(groupIdOf('Rhythm'), null);
+
+        expect(groups().map(g => g.name)).toEqual(['Horns', 'Rhythm']);
+      });
+
+      it('leaves the project alone for a move that changes nothing', () => {
+        const before = state().project;
+
+        state().moveTrackGroup('nope', null);
+        state().moveTrackGroup(groupIdOf('Rhythm'), groupIdOf('Rhythm'));
+
+        expect(state().project).toBe(before);
+      });
+    });
+
+    describe('removeTrackGroup', () => {
+      beforeEach(() => {
+        state().addTrackGroup('Rhythm');
+        state().moveTrack(idOf('Piano'), groupIdOf('Rhythm'), null);
+        state().moveTrack(idOf('Bass'), groupIdOf('Rhythm'), null);
+      });
+
+      // A group is a label. Removing a label must never remove what it labelled.
+      it('keeps every instrument and everything it plays', () => {
+        appendSegment(chordSegment({ id: 'seg-1' }));
+        const bars = project().bars;
+
+        state().removeTrackGroup(groupIdOf('Rhythm'));
+
+        expect(order()).toEqual(['Lead', 'Piano', 'Bass']);
+        expect(project().bars).toEqual(bars);
+      });
+
+      it('ungroups its members', () => {
+        state().removeTrackGroup(groupIdOf('Rhythm'));
+
+        expect(project().tracks.every(t => t.groupId === undefined)).toBe(true);
+      });
+
+      it('leaves the project alone for an id that is not there', () => {
+        const before = state().project;
+        state().removeTrackGroup('nope');
+        expect(state().project).toBe(before);
+      });
+    });
+
+    describe('renameTrackGroup', () => {
+      beforeEach(() => {
+        state().addTrackGroup('Rhythm');
+      });
+
+      it('renames a group', () => {
+        state().renameTrackGroup(groupIdOf('Rhythm'), 'Backline');
+        expect(groups()[0].name).toBe('Backline');
+      });
+
+      // An empty name would leave a header nothing can be read off.
+      it('refuses an empty name', () => {
+        state().renameTrackGroup(groupIdOf('Rhythm'), '  ');
+        expect(groups()[0].name).toBe('Rhythm');
+      });
+    });
+
+    describe('toggles', () => {
+      beforeEach(() => {
+        state().addTrackGroup('Rhythm');
+      });
+
+      it('collapses and expands', () => {
+        const id = groupIdOf('Rhythm');
+        expect(groups()[0].collapsed).toBeFalsy();
+
+        state().toggleTrackGroupCollapsed(id);
+        expect(groups()[0].collapsed).toBe(true);
+
+        state().toggleTrackGroupCollapsed(id);
+        expect(groups()[0].collapsed).toBe(false);
+      });
+
+      // The group's flags sit beside the members' own rather than overwriting them,
+      // so ungrouping hands back the mix the user built.
+      it('mutes a group without touching its instruments', () => {
+        state().moveTrack(idOf('Piano'), groupIdOf('Rhythm'), null);
+        state().toggleTrackGroupMute(groupIdOf('Rhythm'));
+
+        expect(groups()[0].muted).toBe(true);
+        expect(project().tracks.every(t => t.muted === false)).toBe(true);
+      });
+
+      it('solos a group without touching its instruments', () => {
+        state().moveTrack(idOf('Piano'), groupIdOf('Rhythm'), null);
+        state().toggleTrackGroupSolo(groupIdOf('Rhythm'));
+
+        expect(groups()[0].solo).toBe(true);
+        expect(project().tracks.every(t => t.solo === false)).toBe(true);
+      });
+    });
+
+    describe('duplicateTrack', () => {
+      it('puts the copy in the same group as its original', () => {
+        state().addTrackGroup('Rhythm');
+        state().moveTrack(idOf('Piano'), groupIdOf('Rhythm'), null);
+
+        state().duplicateTrack(idOf('Piano'));
+
+        expect(order()).toEqual(['Bass', 'Lead', 'Rhythm/Piano', 'Rhythm/Piano (copy)']);
+      });
+    });
+  });
 });

@@ -136,6 +136,7 @@ function App() {
         timeSignature: project.timeSignature,
         bars: project.bars,
         tracks: project.tracks,
+        groups: project.trackGroups,
         loopStart: project.loopStart ?? null,
         loopEnd: project.loopEnd ?? null,
         loopEnabled: project.loopEnabled ?? false,

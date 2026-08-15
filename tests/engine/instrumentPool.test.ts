@@ -22,7 +22,7 @@ vi.mock('@/engine/vst3Instrument', () => ({
 
 import { InstrumentPool, isTrackAudible } from '@/engine/instrumentPool';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
-import type { Track } from '@/types/music';
+import type { Track, TrackGroup } from '@/types/music';
 
 const CLASS_ID = '565354416d736e6f53757267652058ab';
 const SFZ_PATH = 'C:/lib/Ocarina/Ocarina 20241002.sfz';
@@ -232,5 +232,53 @@ describe('isTrackAudible', () => {
   it('keeps a soloed track muted if it is also muted', () => {
     const tracks = [track({ solo: true, muted: true })];
     expect(isTrackAudible(tracks[0], tracks)).toBe(false);
+  });
+
+  // A group's mute and solo read exactly as a track's own, and sit beside them
+  // rather than replacing them — so ungrouping hands back the mix the user built.
+  describe('with groups', () => {
+    const rhythm: TrackGroup = { id: 'rhythm', name: 'Rhythm' };
+
+    it('silences a member of a muted group', () => {
+      const tracks = [track({ groupId: 'rhythm' })];
+      expect(isTrackAudible(tracks[0], tracks, [{ ...rhythm, muted: true }])).toBe(false);
+    });
+
+    it('leaves an instrument outside the muted group sounding', () => {
+      const tracks = [track({ id: 'a', groupId: 'rhythm' }), track({ id: 'b' })];
+      expect(isTrackAudible(tracks[1], tracks, [{ ...rhythm, muted: true }])).toBe(true);
+    });
+
+    it('puts every member of a soloed group into the solo set', () => {
+      const tracks = [track({ id: 'a', groupId: 'rhythm' }), track({ id: 'b' })];
+      const groups = [{ ...rhythm, solo: true }];
+      expect(isTrackAudible(tracks[0], tracks, groups)).toBe(true);
+      expect(isTrackAudible(tracks[1], tracks, groups)).toBe(false);
+    });
+
+    // One project-wide solo mode, not one per group: soloing a group and soloing a
+    // loose instrument has to leave both sounding.
+    it('adds a soloed track to a soloed group rather than replacing it', () => {
+      const tracks = [
+        track({ id: 'a', groupId: 'rhythm' }),
+        track({ id: 'b', solo: true }),
+        track({ id: 'c' }),
+      ];
+      const groups = [{ ...rhythm, solo: true }];
+      expect(isTrackAudible(tracks[0], tracks, groups)).toBe(true);
+      expect(isTrackAudible(tracks[1], tracks, groups)).toBe(true);
+      expect(isTrackAudible(tracks[2], tracks, groups)).toBe(false);
+    });
+
+    it('keeps a member muted by its own flag inside a soloed group', () => {
+      const tracks = [track({ groupId: 'rhythm', muted: true })];
+      expect(isTrackAudible(tracks[0], tracks, [{ ...rhythm, solo: true }])).toBe(false);
+    });
+
+    // A groupId left behind by a removed group must not silence anything.
+    it('ignores a groupId naming no group', () => {
+      const tracks = [track({ groupId: 'gone' })];
+      expect(isTrackAudible(tracks[0], tracks, [{ ...rhythm, muted: true }])).toBe(true);
+    });
   });
 });

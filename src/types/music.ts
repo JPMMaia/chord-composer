@@ -267,10 +267,46 @@ export interface Section {
   color?: string;
 }
 
+/**
+ * A named, collapsible bundle of instruments in the sidebar.
+ *
+ * It owns no music. Removing a group leaves every instrument exactly where it was
+ * and playing exactly what it played; that is the whole point of it being a label.
+ *
+ * Its mute and solo are the one exception, and they are deliberately a *second*
+ * pair of flags rather than a bulk edit of the members': silencing a group must
+ * not overwrite which instruments the user had muted inside it, or ungrouping
+ * would hand back a different mix than the one they built.
+ *
+ * Groups do not nest, and a group has no fader. One level of folder is what a
+ * sidebar of a few dozen instruments needs; a tree is what a mixer needs.
+ */
+export interface TrackGroup {
+  id: string;
+  name: string;
+  /** Folded away in the panel. Absent reads as expanded. */
+  collapsed?: boolean;
+  /** Silences every member, whatever each member's own `muted` says. */
+  muted?: boolean;
+  /** Puts every member into the project-wide solo set. */
+  solo?: boolean;
+  /** Absent means "assigned by index from TRACK_COLORS", as `Track.color` does. */
+  color?: string;
+}
+
 // Track — one instrument in the arrangement.
 export interface Track {
   id: string;
   name: string;
+  /**
+   * The group this instrument sits in, by `TrackGroup.id`. Absent means ungrouped,
+   * which is what every instrument was before groups existed.
+   *
+   * Membership is stated here rather than as a list of ids on the group so that
+   * there is only ever one array to keep in order — `Project.tracks` — and no way
+   * for the two to disagree about where an instrument is.
+   */
+  groupId?: string;
   /**
    * The sound this instrument makes: a General MIDI id from
    * `@/engine/instrumentCatalog`, e.g. 'acoustic_grand_piano'. Empty on tracks
@@ -369,6 +405,18 @@ export interface Project {
   key: NoteName;
   keyMode: 'major' | 'minor';
   tracks: Track[];
+  /**
+   * The sidebar's groups, in the order they are shown.
+   *
+   * Absent or empty in every project written before groups existed, which is
+   * exactly what an ungrouped sidebar means.
+   *
+   * A group's *members* are not listed here: they are the run of `tracks` carrying
+   * its id, which the panel and every writer keep contiguous. So this array orders
+   * the groups relative to each other only — and matters on its own solely for a
+   * group with no members yet, which `tracks` cannot place.
+   */
+  trackGroups?: TrackGroup[];
   bars: Bar[];
   /**
    * Play range, in absolute beats from the start of the project. Absent means the

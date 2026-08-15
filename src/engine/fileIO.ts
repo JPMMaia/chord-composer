@@ -18,11 +18,13 @@ import type {
   TimeSignature,
   Track,
   TrackContent,
+  TrackGroup,
 } from '@/types/music';
 import { barChords, getTotalBeats, isValidTimeSignature } from '@/engine/timeline';
 import { normalizePoints } from '@/engine/volumeAutomation';
 import { MAX_CC, normalizeParameterAutomation } from '@/engine/parameterAutomation';
 import { normalizeSections } from '@/engine/sections';
+import { normalizeTrackOrder } from '@/engine/trackGroups';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
 import { trackColorAt } from '@/utils/constants';
 
@@ -137,8 +139,18 @@ const LEGACY_TRACK_ID = 'track-legacy';
  * the user bound rather than as the id it currently resolves to, which belongs to this
  * installed version of this plugin. A 1.14 lane's bare `paramId` reads back as a
  * `param` target, so nothing automated under 1.14 loses its curve.
+ *
+ * 1.16 grouped the sidebar: `trackGroups` names the groups, and each track's optional
+ * `groupId` says which one it is in. A group is a label carrying a collapsed state and
+ * its own mute and solo, and owns no music — removing one leaves every instrument
+ * playing exactly what it played. Membership is stored on the track rather than as a
+ * list of ids on the group so `tracks` stays the one place instrument order is written;
+ * a group's members are the run of tracks carrying its id, which the reader below
+ * re-normalizes into a contiguous run whatever order the file had them in. Both keys
+ * are omitted when nothing is grouped, so an ungrouped project serialises byte for byte
+ * as it did under 1.15, and a pre-1.16 file reads back as the flat sidebar it always was.
  */
-export const SCHEMA_VERSION = '1.15';
+export const SCHEMA_VERSION = '1.16';
 
 /**
  * Validation error returned by validateProject.
@@ -209,9 +221,24 @@ export function serializeProject(project: Project): string {
           color: s.color,
         }))
       : undefined,
+    // Omitted when the sidebar is flat, on the same terms as `sections` above.
+    trackGroups: project.trackGroups?.length
+      ? project.trackGroups.map(g => ({
+          id: g.id,
+          name: g.name,
+          // Only the non-default state of each flag is worth writing; absent reads
+          // as expanded, unmuted and unsoloed.
+          collapsed: g.collapsed || undefined,
+          muted: g.muted || undefined,
+          solo: g.solo || undefined,
+          color: g.color,
+        }))
+      : undefined,
     tracks: project.tracks.map(t => ({
       id: t.id,
       name: t.name,
+      // Absent means ungrouped, which is what every instrument was before 1.16.
+      groupId: t.groupId,
       instrument: t.instrument,
       // Absent means the single lane every instrument had before 1.11.
       laneCount: t.laneCount !== undefined && t.laneCount > 1 ? t.laneCount : undefined,
@@ -543,11 +570,36 @@ export function deserializeProject(json: string): Project {
   const keyMode = p.keyMode as 'major' | 'minor';
   const timeSignature = p.timeSignature as { beatsPerMeasure: number; beatUnit: number };
 
+  // Read before the tracks, which need it to tell a real `groupId` from a stale one.
+  // An entry without a usable id or name is dropped rather than shown as a nameless
+  // header: its members simply come back ungrouped, which loses a label and no music.
+  const trackGroups: TrackGroup[] = Array.isArray(p.trackGroups)
+    ? (p.trackGroups as Record<string, unknown>[]).flatMap((g, i) =>
+        typeof g?.id === 'string' && g.id && typeof g.name === 'string' && g.name
+          ? [
+              {
+                id: g.id,
+                name: g.name,
+                collapsed: g.collapsed === true,
+                muted: g.muted === true,
+                solo: g.solo === true,
+                color: typeof g.color === 'string' ? g.color : trackColorAt(i),
+              },
+            ]
+          : []
+      )
+    : [];
+  const groupIds = new Set(trackGroups.map(g => g.id));
+
   // Type-check tracks and bars
   const parsedTracks = Array.isArray(p.tracks)
     ? (p.tracks as Record<string, unknown>[]).map((t, i) => ({
         id: (t.id as string) ?? `track-${i}`,
         name: (t.name as string) ?? `Track ${i + 1}`,
+        // A groupId naming no group is dropped here rather than left to read as
+        // ungrouped downstream, so what loads is what saves.
+        groupId:
+          typeof t.groupId === 'string' && groupIds.has(t.groupId) ? t.groupId : undefined,
         // A pre-1.5 track named no sound; every project was a piano.
         instrument:
           typeof t.instrument === 'string' && t.instrument
@@ -581,7 +633,10 @@ export function deserializeProject(json: string): Project {
   // hang them on rather than opening as a project that can play nothing.
   const tracks: Track[] =
     parsedTracks.length > 0
-      ? parsedTracks
+      ? // Contiguous runs are an invariant the panel and the writers keep, but a
+        // hand-edited file need not have honoured it — so it is restored on read
+        // rather than assumed, and a scattered group loads as one group.
+        normalizeTrackOrder(parsedTracks, trackGroups)
       : [
           {
             id: LEGACY_TRACK_ID,
@@ -730,6 +785,9 @@ export function deserializeProject(json: string): Project {
     key,
     keyMode,
     tracks,
+    // Kept undefined rather than empty when nothing is grouped, so a re-save of a
+    // pre-1.16 file writes no `trackGroups` key at all.
+    trackGroups: trackGroups.length > 0 ? trackGroups : undefined,
     bars,
     loopStart: hasRange ? (p.loopStart as number) : undefined,
     loopEnd: hasRange ? (p.loopEnd as number) : undefined,
@@ -809,10 +867,31 @@ export function validateProject(project: Project): ValidationResult {
     }
   }
 
+  // Validate the instrument groups: named, uniquely identified labels. Being empty
+  // is fine — a group is made before anything is dragged into it.
+  const groups = project.trackGroups ?? [];
+  const groupIds = new Set<string>();
+  for (let i = 0; i < groups.length; i++) {
+    const g = groups[i];
+    if (!g.id) {
+      errors.push(`Instrument group ${i}: missing id.`);
+    } else if (groupIds.has(g.id)) {
+      errors.push(`Instrument group ${i}: duplicate id "${g.id}".`);
+    } else {
+      groupIds.add(g.id);
+    }
+    if (!g.name || g.name.trim().length === 0) {
+      errors.push(`Instrument group ${i}: name is required and cannot be empty.`);
+    }
+  }
+
   // Validate tracks
   for (let i = 0; i < (project.tracks?.length ?? 0); i++) {
     const t = project.tracks[i];
     if (!t.id) errors.push(`Track ${i}: missing id.`);
+    if (t.groupId !== undefined && !groupIds.has(t.groupId)) {
+      errors.push(`Track ${i}: group "${t.groupId}" does not exist.`);
+    }
     if (typeof t.volume !== 'number' || t.volume < 0 || t.volume > 1) {
       errors.push(`Track ${i}: volume must be between 0 and 1.`);
     }

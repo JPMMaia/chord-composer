@@ -1,4 +1,4 @@
-import type { Bar, TimeSignature, Track } from '@/types/music';
+import type { Bar, TimeSignature, Track, TrackGroup } from '@/types/music';
 import { allBarNotes, getBarPulse, getBarStartBeat, getTotalBeats } from '@/engine/timeline';
 
 export interface NoteTiming {
@@ -21,6 +21,11 @@ export interface PlaybackConfig {
    * instead of at the next Play.
    */
   tracks: Track[];
+  /**
+   * The sidebar's instrument groups, for their mute and solo. Read at dispatch time
+   * alongside each track's own flags, for the same reason. Absent means ungrouped.
+   */
+  groups?: TrackGroup[];
   /** Play range bounds, in beats. Null means "the whole project". */
   loopStart: number | null;
   loopEnd: number | null;

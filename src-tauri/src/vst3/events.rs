@@ -120,7 +120,19 @@ impl Scheduler {
 
         // A zero-length note still has to release, or it hangs. One frame is
         // the shortest thing the stream can express.
-        let off_frame = frame.saturating_add(duration_frames.max(1));
+        let mut off_frame = frame.saturating_add(duration_frames.max(1));
+
+        // Keep this pitch's ons and offs strictly interleaved. Two notes of the
+        // same pitch that meet — the shared note of two triads in a row — are
+        // scheduled independently, and the frames they are placed on are not
+        // guaranteed to meet exactly: `frame_for` and `frames_in` round
+        // separately, and the clock is re-anchored between the passes that
+        // schedule them, which moves the mapping by the IPC jitter. Either can
+        // leave the first note's off a few frames *behind* the second's on,
+        // where it silences the note it was never meant to touch. Whether that
+        // is audible is up to the plugin, which is why it looks like a fault in
+        // some instruments and not others.
+        self.resolve_overlap(pitch, frame, &mut off_frame);
 
         self.insert(Event {
             frame,
@@ -163,6 +175,62 @@ impl Scheduler {
             pitch,
             kind,
         });
+    }
+
+    /// Make room for a note at `frame` among this pitch's pending events.
+    ///
+    /// The invariant being restored is that a pitch's note-off never lands
+    /// after the next note-on of the same pitch — which is what the plugin
+    /// needs to hear a repeat as two notes rather than one cut short. Two
+    /// things can break it, and both are fixed by moving an off:
+    ///
+    /// * A note already pending would release *into* this one. Its off is
+    ///   pulled back onto this note's frame, where the `(frame, kind)` ordering
+    ///   puts it ahead of the on — the clean retrigger the exactly-coincident
+    ///   case already got.
+    /// * This note would release into one already pending — the same collision
+    ///   seen from the other side, which happens whenever notes are scheduled
+    ///   out of order. Its own off is brought back to that note's on instead.
+    ///
+    /// Moving rather than dropping, in both directions: an on with no matching
+    /// off sounds forever on a plugin that ref-counts its voices.
+    ///
+    /// Notes of the same pitch that genuinely overlap are shortened to abut
+    /// instead. Nothing in the app writes them — one instrument's segments do
+    /// not overlap — and a plugin has no way to hold two voices of one pitch
+    /// apart anyway, since a note-off names only the pitch.
+    fn resolve_overlap(&mut self, pitch: i16, frame: i64, off_frame: &mut i64) {
+        // `pending` is in frame order, so the first event of this pitch at or
+        // after `frame` decides which case this is: an off there belongs to a
+        // note already sounding, and an on there is a later note this one must
+        // not release. Later events of the pitch belong to notes on the far
+        // side of that boundary and are none of this note's business.
+        let found = self
+            .pending
+            .iter()
+            .position(|e| e.pitch == pitch && e.frame >= frame);
+
+        let Some(at) = found else { return };
+
+        match self.pending[at].kind {
+            EventKind::NoteOff => {
+                if self.pending[at].frame <= frame {
+                    return;
+                }
+                let mut event = self.pending.remove(at);
+                event.frame = frame;
+                self.insert(event);
+            }
+            EventKind::NoteOn { .. } => {
+                // Strictly after, so an on landing on this very frame — two
+                // identical notes, which nothing in the app writes — cannot
+                // pull the off back in front of the on it belongs to and hang
+                // the note.
+                if self.pending[at].frame > frame {
+                    *off_frame = (*off_frame).min(self.pending[at].frame);
+                }
+            }
+        }
     }
 
     /// Insert keeping `pending` sorted. Does not allocate: the caller has
@@ -325,6 +393,87 @@ mod tests {
             .collect();
 
         assert_eq!(at_480, vec![EventKind::NoteOff, on(100)]);
+    }
+
+    // The two frames a note boundary is computed from are rounded separately and
+    // read a clock that is re-anchored between the passes that schedule them, so
+    // the first note's off can land a few frames *past* the second's on. Left
+    // alone it silences the note it was never meant to touch — the shared note of
+    // two triads in a row going missing.
+    #[test]
+    fn an_off_that_would_land_inside_the_next_note_is_pulled_back_in_front_of_it() {
+        let mut s = Scheduler::new(16);
+        s.schedule_note(60, 100, 0, 483);
+        s.schedule_note(60, 100, 480, 480);
+
+        let kinds: Vec<(i64, EventKind)> =
+            due(&mut s, 0, 1_000).iter().map(|(_, e)| (e.frame, e.kind)).collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                (0, on(100)),
+                (480, EventKind::NoteOff),
+                (480, on(100)),
+                (960, EventKind::NoteOff),
+            ]
+        );
+    }
+
+    // The same collision seen from the other side: a note scheduled after one
+    // that starts later must not release into it.
+    #[test]
+    fn a_note_scheduled_out_of_order_does_not_release_into_a_later_one() {
+        let mut s = Scheduler::new(16);
+        s.schedule_note(60, 100, 480, 480);
+        // Overruns the note above by three frames.
+        s.schedule_note(60, 100, 0, 483);
+
+        let kinds: Vec<(i64, EventKind)> =
+            due(&mut s, 0, 1_000).iter().map(|(_, e)| (e.frame, e.kind)).collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                (0, on(100)),
+                (480, EventKind::NoteOff),
+                (480, on(100)),
+                (960, EventKind::NoteOff),
+            ]
+        );
+    }
+
+    // Every on still has an off, whichever way round the overlap was resolved:
+    // an unmatched on hangs forever on a plugin that ref-counts its voices.
+    #[test]
+    fn resolving_an_overlap_leaves_the_ons_and_offs_paired() {
+        let mut s = Scheduler::new(16);
+        s.schedule_note(60, 100, 0, 500);
+        s.schedule_note(60, 100, 480, 500);
+        s.schedule_note(60, 100, 940, 500);
+
+        let events = due(&mut s, 0, 10_000);
+        let ons = events.iter().filter(|(_, e)| matches!(e.kind, EventKind::NoteOn { .. })).count();
+        let offs = events.iter().filter(|(_, e)| e.kind == EventKind::NoteOff).count();
+
+        assert_eq!((ons, offs), (3, 3));
+        assert!(s.sounding.is_empty(), "nothing is left sounding");
+    }
+
+    // Only the pitch that collides is touched; the rest of the chord is not.
+    #[test]
+    fn an_overlap_on_one_pitch_leaves_the_others_alone() {
+        let mut s = Scheduler::new(16);
+        s.schedule_note(64, 100, 0, 483);
+        s.schedule_note(60, 100, 0, 483);
+        s.schedule_note(60, 100, 480, 480);
+
+        let e_off = due(&mut s, 0, 1_000)
+            .into_iter()
+            .find(|(_, e)| e.pitch == 64 && e.kind == EventKind::NoteOff)
+            .expect("E still releases where it was told to");
+
+        assert_eq!(e_off.1.frame, 483);
     }
 
     #[test]

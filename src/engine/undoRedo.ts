@@ -19,6 +19,24 @@ export function createUndoRedoMiddleware<T>(
   let isRecording = false;
   const subscribers: Array<() => void> = [];
 
+  // ---------------------------------------------------------------------------
+  // Record pass — a whole recording take is ONE history entry.
+  //
+  // While a pass is open nothing enters `history`; pushState just remembers the
+  // latest state. Ending the pass pushes it as a single entry, and aborting the
+  // pass throws it away and hands back the state the pass started from. History
+  // and pointer are never touched during a pass, so the redo tail survives an
+  // abort and the next undo steps over the edit made *before* recording began.
+  // ---------------------------------------------------------------------------
+  let passActive = false;
+  let passBaseline: T = initialState;
+  /** undefined = nothing has been written this pass. */
+  let passLatest: T | undefined;
+
+  function hasPassChanges(): boolean {
+    return passActive && passLatest !== undefined && !Object.is(passLatest, passBaseline);
+  }
+
   function trimHistory() {
     // Trim from the front if total history exceeds maxHistory
     while (history.length > maxHistory) {
@@ -37,8 +55,37 @@ export function createUndoRedoMiddleware<T>(
     for (const sub of subscribers) sub();
   }
 
+  function pushState(state: T) {
+    // A dirty pass is held outside history until it ends — see above.
+    if (passActive) {
+      const wasDirty = hasPassChanges();
+      passLatest = state;
+      // Only on the clean → dirty edge, so the Transport's undo button lights up
+      // once per pass rather than on every recorded note.
+      if (!wasDirty && hasPassChanges()) notify();
+      return;
+    }
+    if (isRecording) return;
+    const prev = history[pointer];
+    if (!shouldRecord(prev, state)) return;
+    pointer++;
+    // Remove any redo states beyond the pointer
+    history.splice(pointer);
+    history.push(state);
+    trimHistory();
+  }
+
+  /** After history navigation, an open pass must start over from where the
+      pointer now sits — otherwise a later abort would resurrect a project the
+      user has already undone away from. */
+  function rebaselinePass() {
+    if (!passActive) return;
+    passBaseline = history[pointer];
+    passLatest = undefined;
+  }
+
   function getSnapshot(): { canUndo: boolean; canRedo: boolean } {
-    const u = pointer > 0;
+    const u = pointer > 0 || hasPassChanges();
     const r = pointer < history.length - 1;
     if (cachedSnapshot && cachedSnapshot.canUndo === u && cachedSnapshot.canRedo === r) {
       return cachedSnapshot;
@@ -52,16 +99,7 @@ export function createUndoRedoMiddleware<T>(
     current: (): T => history[pointer],
 
     /** Push a new state onto the stack. Clears the redo history. */
-    pushState: (state: T) => {
-      if (isRecording) return;
-      const prev = history[pointer];
-      if (!shouldRecord(prev, state)) return;
-      pointer++;
-      // Remove any redo states beyond the pointer
-      history.splice(pointer);
-      history.push(state);
-      trimHistory();
-    },
+    pushState,
 
     /** Undo to the previous state. Throws if at the beginning. */
     undo: (): T => {
@@ -69,6 +107,7 @@ export function createUndoRedoMiddleware<T>(
         throw new Error('Nothing to undo');
       }
       pointer--;
+      rebaselinePass();
       notify();
       return history[pointer];
     },
@@ -79,6 +118,7 @@ export function createUndoRedoMiddleware<T>(
         throw new Error('Nothing to redo');
       }
       pointer++;
+      rebaselinePass();
       notify();
       return history[pointer];
     },
@@ -92,8 +132,9 @@ export function createUndoRedoMiddleware<T>(
       notify();
     },
 
-    /** Whether undo is available. */
-    canUndo: (): boolean => pointer > 0,
+    /** Whether undo is available. A dirty record pass counts: undoing it erases
+        the take, even when there is no history entry behind it. */
+    canUndo: (): boolean => pointer > 0 || hasPassChanges(),
 
     /** Whether redo is available. */
     canRedo: (): boolean => pointer < history.length - 1,
@@ -110,6 +151,43 @@ export function createUndoRedoMiddleware<T>(
     },
 
     // ---------------------------------------------------------------------------
+    // Record pass — see the notes at the top of the closure.
+    // ---------------------------------------------------------------------------
+
+    /** Open a pass. Everything pushed until it ends collapses into one entry. */
+    beginPass: (baseline: T) => {
+      passActive = true;
+      passBaseline = baseline;
+      passLatest = undefined;
+      notify();
+    },
+
+    /** Throw the pass away and hand back the state it started from. The pass
+        stays OPEN — the user is still rolling and can immediately retake. */
+    abortPass: (): T => {
+      passLatest = undefined;
+      notify();
+      return passBaseline;
+    },
+
+    /** Close the pass, committing everything it wrote as a single entry. A pass
+        that wrote nothing, or that ended back at its baseline, adds no entry —
+        `shouldRecord` compares against the baseline, which is still `current()`. */
+    endPass: (final?: T) => {
+      passActive = false;
+      const state = final ?? passLatest;
+      passLatest = undefined;
+      if (state !== undefined) pushState(state);
+      notify();
+    },
+
+    /** Whether a pass is open. */
+    isPassActive: (): boolean => passActive,
+
+    /** Whether an open pass has written anything worth erasing. */
+    hasPassChanges,
+
+    // ---------------------------------------------------------------------------
     // Subscribers — triggered after undo/redo/clear so React can sync.
     // ---------------------------------------------------------------------------
     notify: notify,
@@ -122,3 +200,6 @@ export function createUndoRedoMiddleware<T>(
     },
   };
 }
+
+/** The middleware instance, named so hooks and tests can type it directly. */
+export type UndoRedoMiddleware<T> = ReturnType<typeof createUndoRedoMiddleware<T>>;

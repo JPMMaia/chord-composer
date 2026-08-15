@@ -23,6 +23,7 @@ import { useSegmentCopyPaste } from '@/hooks/useSegmentCopyPaste';
 import { usePlaybackShortcuts } from '@/hooks/usePlaybackShortcuts';
 import { useRecordShortcuts } from '@/hooks/useRecordShortcuts';
 import { useMidiInput } from '@/hooks/useMidiInput';
+import { useRecordSession } from '@/hooks/useRecordSession';
 import { useFollowPlayhead } from '@/hooks/useFollowPlayhead';
 import { useFileIO } from '@/hooks/useFileIO';
 import { useFileShortcuts } from '@/hooks/useFileShortcuts';
@@ -211,36 +212,10 @@ function App() {
   // instance would reopen every remembered library file twice.
   const formulaLibraries = useFormulaLibraries();
 
-  // Gated recording: the key-down call is wrapped so it skips history;
-  // the key-up call (in useRecordShortcuts) uses the plain recordSegment,
-  // which is captured by the subscribe → one history entry per take.
-  const recordGated = useCallback(
-    (trackId: string, startBeat: number, segment: ChordSegment) => {
-      projectStore.getState().withRecording(() =>
-        projectStore.getState().recordSegment(trackId, startBeat, segment)
-      );
-    },
-    []
-  );
-
-  // 1–7 play the palette's degrees, and record them while armed. `r` arms.
-  useRecordShortcuts({ isPlaying, getSongTime, getPool, recordGated });
-
-  // A MIDI keyboard plays the selected instrument, and records one note block per
-  // key while armed. Same gating as above: one history entry per gesture.
-  const midiStatus = useMidiInput({
-    isPlaying,
-    getSongTime,
-    getPool,
-    ensureAudio,
-    recordGated,
-  });
-
-  // Page the view along during playback so the playhead never runs off screen.
-  useFollowPlayhead(playheadBeat, isPlaying);
-
   // ---------------------------------------------------------------------------
   // Undo / Redo — middleware instance survives across renders.
+  //
+  // Declared above the recording hooks because the record session below needs it.
   // ---------------------------------------------------------------------------
   const urRef = useRef(
     createUndoRedoMiddleware<Project | null>(null, 50)
@@ -265,6 +240,37 @@ function App() {
     return unsubscribe;
   }, [project, pushSnapshot]);
 
+  // Recording writes are gated so no single block becomes a history entry of its
+  // own — the record pass below is what makes the take one undo step.
+  const recordGated = useCallback(
+    (trackId: string, startBeat: number, segment: ChordSegment) => {
+      projectStore.getState().withRecording(() =>
+        projectStore.getState().recordSegment(trackId, startBeat, segment)
+      );
+    },
+    []
+  );
+
+  // 1–7 play the palette's degrees, and record them while armed. `r` arms.
+  useRecordShortcuts({ isPlaying, getSongTime, getPool, record: recordGated });
+
+  // A MIDI keyboard plays the selected instrument, and records one note block per
+  // key while armed. Same gating as above.
+  const midiStatus = useMidiInput({
+    isPlaying,
+    getSongTime,
+    getPool,
+    ensureAudio,
+    record: recordGated,
+  });
+
+  // Armed and rolling is one take, and one undo step: Ctrl+Z during it scraps the
+  // whole take rather than the last block of it.
+  useRecordSession(recordArmed && isPlaying, urRef.current);
+
+  // Page the view along during playback so the playhead never runs off screen.
+  useFollowPlayhead(playheadBeat, isPlaying);
+
   // Sync canUndo / canRedo with React via useSyncExternalStore.
   // The middleware caches the snapshot object so the SAME reference is
   // returned when canUndo/canRedo haven't changed — preventing infinite
@@ -279,15 +285,24 @@ function App() {
     // undone/redone state.  Just moving the middleware pointer would leave
     // the store (and therefore React) showing the pre-undo project.
     undo: useCallback(() => {
+      const ur = urRef.current;
+      // Mid-take, undo means "scrap that take" — the whole pass in one press.
+      if (ur.hasPassChanges()) {
+        projectStore.setState({ project: ur.abortPass() });
+        return;
+      }
       try {
-        urRef.current.undo();
-        projectStore.setState({ project: urRef.current.current() });
+        ur.undo();
+        projectStore.setState({ project: ur.current() });
       } catch { /* at beginning */ }
     }, []),
     redo: useCallback(() => {
+      const ur = urRef.current;
+      // Stepping the pointer would overwrite material the user is still recording.
+      if (ur.hasPassChanges()) return;
       try {
-        urRef.current.redo();
-        projectStore.setState({ project: urRef.current.current() });
+        ur.redo();
+        projectStore.setState({ project: ur.current() });
       } catch { /* at end */ }
     }, []),
     canUndo: urSnapshot.canUndo,

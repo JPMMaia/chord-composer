@@ -55,9 +55,9 @@ interface UseRecordShortcutsProps {
   /** Live song position in seconds, straight off the audio clock. */
   getSongTime: () => number;
   getPool: () => InstrumentPool | null;
-  /** Call withRecording to gate the key-down recording call so only key-up
-      creates a history entry. */
-  recordGated: (trackId: string, startBeat: number, segment: ChordSegment) => void;
+  /** Writes a block to the timeline without creating a history entry of its own.
+      The whole recording pass is one undo step — see `useRecordSession`. */
+  record: (trackId: string, startBeat: number, segment: ChordSegment) => void;
 }
 
 /**
@@ -74,7 +74,8 @@ interface UseRecordShortcutsProps {
  * The take is committed on key-*down*, at the minimum length, and re-committed at its
  * full length on key-up. Writing only at the end would leave the timeline showing
  * nothing during the very gesture that is filling it; `recordSegment` re-places a
- * block it already holds, so the two calls are the same call.
+ * block it already holds, so the two calls are the same call. Neither is a history
+ * entry: the recording pass around them is the undo step.
  *
  * The position comes from `getSongTime` rather than from the playhead React renders,
  * which is up to a scheduling pass (50 ms) stale — a tenth of a beat at 120 BPM, and
@@ -84,10 +85,8 @@ export function useRecordShortcuts({
   isPlaying,
   getSongTime,
   getPool,
-  recordGated,
+  record,
 }: UseRecordShortcutsProps): void {
-  const recordSegment = projectStore(s => s.recordSegment);
-
   /** Keys held down, by `e.key`. Outlives renders, so a re-render cannot drop a take. */
   const heldRef = useRef(new Map<string, OpenTake>());
   const isPlayingRef = useRef(isPlaying);
@@ -120,7 +119,7 @@ export function useRecordShortcuts({
       const { recordQuantize, snapBeats } = editorStore.getState();
       const floor = recordFloor({ recordQuantize, snapBeats });
       const duration = Math.max(floor, beatNow() - take.pressBeat);
-      recordSegment(take.trackId, take.pressBeat, { ...take.segment, duration });
+      record(take.trackId, take.pressBeat, { ...take.segment, duration });
     };
 
     const closeAll = (commit: boolean) => {
@@ -199,9 +198,7 @@ export function useRecordShortcuts({
       let pressBeat: number | null = null;
       if (recordArmed && isPlayingRef.current) {
         pressBeat = beatNow();
-        // Gate the key-down call so it does NOT create a history entry;
-        // the key-up call below does, making the whole take one undo step.
-        recordGated(trackId, pressBeat, segment);
+        record(trackId, pressBeat, segment);
       }
 
       held.set(keyId, { segment, pressBeat, trackId, release });
@@ -230,7 +227,7 @@ export function useRecordShortcuts({
       // a length measured against a playhead that is going away.
       closeAll(false);
     };
-  }, [recordSegment, getSongTime, getPool]);
+  }, [record, getSongTime, getPool]);
 
   // Playback ending ends every take with it. The blocks keep the length they had
   // reached rather than being re-committed: Stop rewinds the playhead, so there is no

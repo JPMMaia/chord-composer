@@ -37,11 +37,11 @@ interface UseMidiInputProps {
   /** Brings the audio graph up, so a key pressed before the first Play still sounds. */
   ensureAudio: () => Promise<InstrumentPool>;
   /**
-   * Records without creating a history entry. Every commit but the one that ends
-   * the gesture goes through this, so a chord is one undo step however many keys
-   * are in it.
+   * Writes a block to the timeline without creating a history entry of its own.
+   * The whole recording pass is one undo step — see `useRecordSession` — so no
+   * individual write here should be one.
    */
-  recordGated: (trackId: string, startBeat: number, segment: ChordSegment) => void;
+  record: (trackId: string, startBeat: number, segment: ChordSegment) => void;
 }
 
 /**
@@ -66,7 +66,7 @@ export function useMidiInput({
   getSongTime,
   getPool,
   ensureAudio,
-  recordGated,
+  record,
 }: UseMidiInputProps): MidiInputStatus {
   const [status, setStatus] = useState<MidiInputStatus>({ support: 'ok', inputs: [] });
 
@@ -83,8 +83,8 @@ export function useMidiInput({
    * function would re-render, re-run the effect, and request MIDI access again —
    * forever. Ports are opened once per mount, which is also simply what they are.
    */
-  const propsRef = useRef({ getSongTime, getPool, ensureAudio, recordGated });
-  propsRef.current = { getSongTime, getPool, ensureAudio, recordGated };
+  const propsRef = useRef({ getSongTime, getPool, ensureAudio, record });
+  propsRef.current = { getSongTime, getPool, ensureAudio, record };
 
   useEffect(() => {
     const held = heldRef.current;
@@ -125,17 +125,14 @@ export function useMidiInput({
     /**
      * Write a block where it stands.
      *
-     * Gated while any other key is still down, plain once this is the last one up:
-     * the undo middleware snapshots the whole project, so that single ungated write
-     * captures every block of the gesture and a chord is one Ctrl+Z.
+     * Never its own history entry — a recording pass is one undo step from its
+     * first note to the moment the transport stops, so Ctrl+Z scraps the take
+     * rather than picking it apart a note at a time.
      */
-    const commit = (take: OpenNote, duration: number, last: boolean) => {
+    const commit = (take: OpenNote, duration: number) => {
       const segment = { ...take.segment, duration };
       take.segment = segment;
-      const write = last
-        ? projectStore.getState().recordSegment
-        : propsRef.current.recordGated;
-      write(take.trackId, take.startBeat, segment);
+      propsRef.current.record(take.trackId, take.startBeat, segment);
     };
 
     const handleNoteOn = (event: MidiNoteEvent) => {
@@ -180,8 +177,7 @@ export function useMidiInput({
           trackId,
           lane,
         };
-        // Never the last write: this key is about to be in the held map.
-        commit(take, take.segment.duration, false);
+        commit(take, take.segment.duration);
       }
 
       held.set(event.note, { release, take });
@@ -195,7 +191,7 @@ export function useMidiInput({
 
       if (!key.take) return;
       const duration = Math.max(floorNow(), beatNow() - key.take.startBeat);
-      commit(key.take, duration, held.size === 0);
+      commit(key.take, duration);
     };
 
     const close = openMidiInputs({
@@ -211,12 +207,11 @@ export function useMidiInput({
       const open = [...held.values()];
       held.clear();
       for (const key of open) key.release();
-      // The last one closes the history entry, exactly as the last note-off would.
-      open.forEach((key, index) => {
-        if (!key.take) return;
+      for (const key of open) {
+        if (!key.take) continue;
         const duration = Math.max(floorNow(), beatNow() - key.take.startBeat);
-        commit(key.take, duration, index === open.length - 1);
-      });
+        commit(key.take, duration);
+      }
     };
     window.addEventListener('blur', handleBlur);
 

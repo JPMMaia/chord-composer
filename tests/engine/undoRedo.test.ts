@@ -175,4 +175,143 @@ describe('undoRedo', () => {
       expect(ur.canUndo()).toBe(true);
     });
   });
+
+  describe('record pass', () => {
+    // A pass models one recording take: armed + rolling. Everything written
+    // between beginPass and endPass is a single undo step, and abortPass erases
+    // the whole take without disturbing history.
+    let ur: ReturnType<typeof createUndoRedoMiddleware<{ value: number }>>;
+    const baseline = { value: 0 };
+
+    beforeEach(() => {
+      ur = createUndoRedoMiddleware(baseline, 50);
+    });
+
+    it('collapses every push in the pass into one entry', () => {
+      ur.beginPass(baseline);
+      ur.pushState({ value: 1 });
+      ur.pushState({ value: 2 });
+      ur.pushState({ value: 3 });
+      // Nothing lands while the pass is open.
+      expect(ur.current()).toEqual(baseline);
+      ur.endPass();
+      expect(ur.current()).toEqual({ value: 3 });
+      expect(ur.undo()).toEqual(baseline);
+      expect(ur.canUndo()).toBe(false);
+    });
+
+    it('adds no entry for a pass that wrote nothing', () => {
+      ur.beginPass(baseline);
+      ur.endPass();
+      expect(ur.canUndo()).toBe(false);
+      expect(ur.current()).toEqual(baseline);
+    });
+
+    it('adds no entry for a pass that ended back at its baseline', () => {
+      ur.beginPass(baseline);
+      ur.pushState({ value: 1 });
+      ur.pushState(baseline);
+      ur.endPass();
+      expect(ur.canUndo()).toBe(false);
+    });
+
+    it('abortPass returns the baseline and leaves history untouched', () => {
+      ur.pushState({ value: 7 }); // a pre-recording edit
+      const before = ur.getSnapshot();
+      ur.beginPass({ value: 7 });
+      ur.pushState({ value: 8 });
+      ur.pushState({ value: 9 });
+      expect(ur.abortPass()).toEqual({ value: 7 });
+      expect(ur.getSnapshot()).toEqual(before);
+      // The next undo steps over the pre-recording edit, not the take.
+      expect(ur.undo()).toEqual({ value: 0 });
+    });
+
+    it('keeps recording after an abort, and the retake is one entry', () => {
+      ur.beginPass(baseline);
+      ur.pushState({ value: 1 });
+      ur.abortPass();
+      expect(ur.isPassActive()).toBe(true);
+      ur.pushState({ value: 5 });
+      ur.pushState({ value: 6 });
+      ur.endPass();
+      expect(ur.current()).toEqual({ value: 6 });
+      expect(ur.undo()).toEqual(baseline);
+    });
+
+    it('adds no entry when a pass ends with nothing written since the abort', () => {
+      ur.beginPass(baseline);
+      ur.pushState({ value: 1 });
+      ur.abortPass();
+      ur.endPass();
+      expect(ur.canUndo()).toBe(false);
+    });
+
+    it('tracks pass dirtiness through canUndo', () => {
+      ur.beginPass(baseline);
+      expect(ur.hasPassChanges()).toBe(false);
+      expect(ur.canUndo()).toBe(false);
+      ur.pushState({ value: 1 });
+      expect(ur.hasPassChanges()).toBe(true);
+      // Undo is offered even though history is still empty — it erases the take.
+      expect(ur.canUndo()).toBe(true);
+      expect(ur.getSnapshot().canUndo).toBe(true);
+      ur.abortPass();
+      expect(ur.hasPassChanges()).toBe(false);
+      expect(ur.canUndo()).toBe(false);
+    });
+
+    it('notifies once on the clean → dirty edge', () => {
+      const sub = vi.fn();
+      ur.subscribe(sub);
+      ur.beginPass(baseline);
+      sub.mockClear();
+      ur.pushState({ value: 1 });
+      ur.pushState({ value: 2 });
+      ur.pushState({ value: 3 });
+      expect(sub).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the recording gate closed inside a pass', () => {
+      // Models withRecording() around a key-down write: its finally-clause
+      // setRecording(false) must not let the next write into history.
+      ur.beginPass(baseline);
+      ur.setRecording(true);
+      ur.pushState({ value: 1 });
+      ur.setRecording(false);
+      ur.pushState({ value: 2 });
+      expect(ur.current()).toEqual(baseline);
+      expect(ur.hasPassChanges()).toBe(true);
+      ur.endPass();
+      expect(ur.current()).toEqual({ value: 2 });
+    });
+
+    it('drops the redo tail when a pass ends, but not when it aborts', () => {
+      ur.pushState({ value: 1 });
+      ur.pushState({ value: 2 });
+      ur.undo();
+      expect(ur.canRedo()).toBe(true);
+
+      const aborted = createUndoRedoMiddleware({ value: 0 }, 50);
+      aborted.pushState({ value: 1 });
+      aborted.pushState({ value: 2 });
+      aborted.undo();
+      aborted.beginPass({ value: 1 });
+      aborted.pushState({ value: 9 });
+      aborted.abortPass();
+      expect(aborted.canRedo()).toBe(true);
+
+      ur.beginPass({ value: 1 });
+      ur.pushState({ value: 9 });
+      ur.endPass();
+      expect(ur.canRedo()).toBe(false);
+    });
+
+    it('re-baselines an open pass when history is navigated', () => {
+      ur.pushState({ value: 1 });
+      ur.beginPass({ value: 1 });
+      ur.undo(); // user undoes the pre-recording edit mid-pass
+      expect(ur.abortPass()).toEqual({ value: 0 });
+    });
+  });
 });

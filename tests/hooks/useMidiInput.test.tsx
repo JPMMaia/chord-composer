@@ -111,7 +111,7 @@ function mount(isPlaying = true) {
         getSongTime: () => songTime,
         getPool: () => livePool,
         ensureAudio,
-        recordGated: (tId: string, startBeat: number, seg: ChordSegment) => {
+        record: (tId: string, startBeat: number, seg: ChordSegment) => {
           // In the real App this is withRecording(() => recordSegment(...)):
           // it writes, but does not create a history entry.
           projectStore
@@ -327,28 +327,30 @@ describe('useMidiInput', () => {
       expect(blocks()).toHaveLength(0);
     });
 
-    it('lands the whole gesture in the history as one step', async () => {
-      // Only the write that empties the held map goes through the plain
-      // `recordSegment` the undo middleware is subscribed to; every earlier one is
-      // gated. The middleware snapshots the whole project, so that one write
-      // captures every block of a chord and it takes a single Ctrl+Z to undo.
+    it('never writes a history entry of its own', async () => {
+      // Not one write in a gesture is a history entry: the recording pass around
+      // the whole take is the undo step, so Ctrl+Z scraps the take rather than
+      // picking it apart a note at a time.
       await mountReady();
 
+      let depth = 0;
       const gated: number[] = [];
-      const plain: number[] = [];
+      const ungated: number[] = [];
       const store = projectStore.getState();
       const realWithRecording = store.withRecording;
       const realRecordSegment = store.recordSegment;
 
       projectStore.setState({
         withRecording: fn => {
-          gated.push(1);
-          return realWithRecording(fn);
+          depth++;
+          try {
+            return realWithRecording(fn);
+          } finally {
+            depth--;
+          }
         },
         recordSegment: (...args) => {
-          // Counted only when not inside a gated call, which is the distinction
-          // the middleware itself draws.
-          if (gated.length === plain.length) plain.push(1);
+          (depth > 0 ? gated : ungated).push(1);
           return realRecordSegment(...args);
         },
       });
@@ -365,8 +367,8 @@ describe('useMidiInput', () => {
         });
       }
 
-      // Two note-ons and the first note-off are gated; the last key up is not.
-      expect(gated).toHaveLength(3);
+      expect(gated).toHaveLength(4);
+      expect(ungated).toHaveLength(0);
       expect(blocks()).toHaveLength(2);
     });
 

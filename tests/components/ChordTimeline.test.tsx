@@ -1396,4 +1396,54 @@ describe('ChordTimeline', () => {
       expect(screen.getByTestId('automation-flat-line')).toBeInTheDocument();
     });
   });
+
+  describe('insert bars (ruler context menu)', () => {
+    /** Right-click the ruler at an absolute beat; jsdom zeroes the rect, so
+        clientX reads as beats. */
+    function rightClickRuler(beat: number) {
+      const ruler = screen.getByTestId('timeline-ruler');
+      fireEvent.contextMenu(ruler, { clientX: beat * PIXELS_PER_BEAT });
+    }
+
+    it('opens the insert menu with a default count of 1 on right-click', () => {
+      render(<ChordTimeline />);
+      expect(screen.queryByTestId('insert-menu')).not.toBeInTheDocument();
+
+      rightClickRuler(1);
+
+      expect(screen.getByTestId('insert-menu')).toBeInTheDocument();
+      expect(screen.getByTestId('insert-count')).toHaveValue(1);
+    });
+
+    it('inserts the chosen number of empty bars before the right-clicked bar', () => {
+      render(<ChordTimeline />);
+      rightClickRuler(4);
+
+      fireEvent.change(screen.getByTestId('insert-count'), { target: { value: '2' } });
+      fireEvent.click(screen.getByTestId('insert-bars'));
+
+      expect(bars()).toHaveLength(4);
+      expect(bars()[1].content).toEqual({});
+      expect(bars()[2].content).toEqual({});
+      expect(segments()).toHaveLength(0);
+    });
+
+    it('right-clicking bar 1 inserts at the start', () => {
+      render(<ChordTimeline />);
+      rightClickRuler(0);
+      fireEvent.click(screen.getByTestId('insert-bars'));
+
+      expect(bars()).toHaveLength(3);
+      expect(bars()[0].content).toEqual({});
+    });
+
+    it('closes the menu on cancel without inserting', () => {
+      render(<ChordTimeline />);
+      rightClickRuler(0);
+      fireEvent.click(screen.getByTestId('insert-cancel'));
+
+      expect(screen.queryByTestId('insert-menu')).not.toBeInTheDocument();
+      expect(bars()).toHaveLength(2);
+    });
+  });
 });

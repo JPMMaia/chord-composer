@@ -330,6 +330,74 @@ describe('projectStore', () => {
     });
   });
 
+  describe('insertBar', () => {
+    const state = () => projectStore.getState();
+
+    beforeEach(() => {
+      state().createProject();
+      state().addBar();
+      state().addBar();
+      state().addBar();
+    });
+
+    it('inserts a fresh empty bar at the front and shifts the originals', () => {
+      const originalIds = state().project!.bars.map(b => b.id);
+
+      state().insertBar(0, 1);
+
+      const bars = state().project!.bars;
+      expect(bars).toHaveLength(4);
+      expect(bars[0].content).toEqual({});
+      expect(bars[0].id).not.toBe(originalIds[0]);
+      expect(bars.map(b => b.id)).toEqual([bars[0].id, ...originalIds]);
+      expect(bars.map(b => b.barIndex)).toEqual([0, 1, 2, 3]);
+    });
+
+    it('inserts a bar in the middle and re-indexes the bars after it', () => {
+      const ids = state().project!.bars.map(b => b.id);
+
+      state().insertBar(2, 1);
+
+      const bars = state().project!.bars;
+      expect(bars).toHaveLength(4);
+      expect(bars.map(b => b.id)).toEqual([ids[0], ids[1], bars[2].id, ids[2]]);
+      expect(bars.map(b => b.barIndex)).toEqual([0, 1, 2, 3]);
+      expect(bars[2].content).toEqual({});
+    });
+
+    it('appends a bar at the end when the index is at the end', () => {
+      const ids = state().project!.bars.map(b => b.id);
+
+      state().insertBar(3, 1);
+
+      const bars = state().project!.bars;
+      expect(bars).toHaveLength(4);
+      expect(bars.map(b => b.id)).toEqual([...ids, bars[3].id]);
+      expect(bars[3].barIndex).toBe(3);
+    });
+
+    it('inserts several bars at once, re-indexing the whole list', () => {
+      state().insertBar(1, 2);
+
+      const bars = state().project!.bars;
+      expect(bars).toHaveLength(5);
+      expect(bars.map(b => b.barIndex)).toEqual([0, 1, 2, 3, 4]);
+    });
+
+    it('preserves the existing bars\' content while shifting their indexes', () => {
+      const barId = state().project!.bars[1].id;
+      state().insertSegment(barId, 0, chordSegment({ id: 'a' }), trackId());
+      const before = state().project!.bars[1];
+      expect(layout(before)).toEqual(['a@0']);
+
+      state().insertBar(0, 1);
+
+      const moved = state().project!.bars.find(b => b.id === barId)!;
+      expect(moved.barIndex).toBe(2);
+      expect(layout(moved)).toEqual(['a@0']);
+    });
+  });
+
   describe('setBarTimeSignature', () => {
     beforeEach(() => {
       projectStore.getState().createProject();

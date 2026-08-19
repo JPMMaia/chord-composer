@@ -117,6 +117,7 @@ interface ProjectState {
   setTimeSignature: (ts: TimeSignature) => void;
   setKey: (key: NoteName, mode?: 'major' | 'minor') => void;
   addBar: () => void;
+  insertBar: (index: number, count: number) => void;
   removeBar: (barId: string) => void;
   setSegmentsScale: (segmentIds: string[], patch: Partial<Scale>) => void;
   setBarTimeSignature: (barId: string, ts: TimeSignature) => void;
@@ -854,6 +855,38 @@ export const projectStore = create<ProjectState>((set, get) => ({
       project: {
         ...project,
         bars: [...project.bars, newBar],
+        updatedAt: new Date(),
+      },
+    });
+  },
+
+  /**
+   * Insert empty bars at a position, shifting everything from there on.
+   *
+   * Like a drop that missed its target rather than a bad call, an out-of-range
+   * index is clamped to the ends of the list and a non-positive count does
+   * nothing: the caller is a drag or a context menu, and a sloppy one simply
+   * does not apply.
+   */
+  insertBar: (index: number, count: number) => {
+    const project = get().project;
+    if (!project) return;
+
+    const amount = Math.floor(count);
+    if (amount <= 0) return;
+
+    const bars = [...project.bars];
+    const at = Math.max(0, Math.min(index, bars.length));
+    const fresh: Bar[] = Array.from({ length: amount }, () => ({
+      id: generateId(),
+      barIndex: 0,
+      content: {},
+    }));
+    bars.splice(at, 0, ...fresh);
+    set({
+      project: {
+        ...project,
+        bars: bars.map((b, i) => ({ ...b, barIndex: i })),
         updatedAt: new Date(),
       },
     });

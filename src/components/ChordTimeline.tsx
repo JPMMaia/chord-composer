@@ -8,6 +8,7 @@ import {
   flattenSegments,
   getBarBeats,
   getBarPulse,
+  getBarIndexAtBeat,
   getBarStartBeat,
   getTotalBeats,
   laneOf,
@@ -284,6 +285,15 @@ export const ChordTimeline: React.FC = () => {
   } | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [rangeDrag, setRangeDrag] = useState<RangeDragState | null>(null);
+
+  /** The right-clicked ruler tick's bar and the click's screen position. */
+  const [insertMenu, setInsertMenu] = useState<{
+    barIndex: number;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [insertCount, setInsertCount] = useState(1);
+  const insertBar = projectStore(s => s.insertBar);
 
   const rulerRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1127,6 +1137,19 @@ export const ChordTimeline: React.FC = () => {
           ref={rulerRef}
           data-testid="timeline-ruler"
           onPointerDown={e => startRangeDrag(e)}
+          onContextMenu={e => {
+            // The native menu has nothing useful to offer here; ours does.
+            e.preventDefault();
+            const rect = e.currentTarget.getBoundingClientRect();
+            const beat = Math.max(0, (e.clientX - rect.left) / pixelsPerBeat);
+            // A fresh menu always offers one bar, however many the last one inserted.
+            setInsertCount(1);
+            setInsertMenu({
+              barIndex: getBarIndexAtBeat(bars, projectTs, beat),
+              x: e.clientX,
+              y: e.clientY,
+            });
+          }}
           style={{ width: `${totalBeats * pixelsPerBeat}px` }}
           title="Drag to set the play range, click to clear it"
           className="relative h-5 bg-gray-800 border-b border-gray-700 cursor-ew-resize select-none"
@@ -1383,6 +1406,43 @@ export const ChordTimeline: React.FC = () => {
               addLane(selectedTrack.id, { kind: 'cc', controller }, `CC ${controller}`)
             }
           />
+        </div>
+      )}
+
+      {/* Where right-clicking a ruler tick inserts empty bars, before the
+          right-clicked bar. */}
+      {insertMenu && (
+        <div
+          data-testid="insert-menu"
+          style={{ position: 'fixed', left: insertMenu.x, top: insertMenu.y, zIndex: 50 }}
+          className="bg-gray-800 border border-gray-600 rounded p-2 flex items-center gap-2 shadow-lg"
+        >
+          <input
+            data-testid="insert-count"
+            type="number"
+            min={1}
+            value={insertCount}
+            onChange={e => setInsertCount(Number(e.target.value) || 1)}
+            className="w-14 bg-gray-700 border border-gray-600 rounded text-gray-200 px-1 focus:outline-none focus:border-indigo-500"
+            aria-label="Bars to insert"
+          />
+          <button
+            data-testid="insert-bars"
+            onClick={() => {
+              insertBar(insertMenu.barIndex, insertCount);
+              setInsertMenu(null);
+            }}
+            className="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-gray-100 transition-colors"
+          >
+            Insert
+          </button>
+          <button
+            data-testid="insert-cancel"
+            onClick={() => setInsertMenu(null)}
+            className="px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
+          >
+            Cancel
+          </button>
         </div>
       )}
     </div>

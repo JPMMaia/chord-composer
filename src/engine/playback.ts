@@ -26,6 +26,16 @@ export interface PlaybackConfig {
    * alongside each track's own flags, for the same reason. Absent means ungrouped.
    */
   groups?: TrackGroup[];
+  /**
+   * The only instruments that sound, when something is auditioning rather than
+   * playing the song — the phrase editor, hearing one placement on its own.
+   *
+   * It *replaces* mute and solo rather than narrowing them: the user opened this
+   * phrase to hear it, so an instrument they had muted while working on the
+   * arrangement still sounds here. Absent or null is the song, where mute and solo
+   * are the whole answer.
+   */
+  audibleTrackIds?: string[] | null;
   /** Play range bounds, in beats. Null means "the whole project". */
   loopStart: number | null;
   loopEnd: number | null;

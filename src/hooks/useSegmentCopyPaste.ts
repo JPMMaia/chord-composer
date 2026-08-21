@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { clipboardStore } from '@/store/clipboardStore';
-import { projectStore } from '@/store/projectStore';
+import { editSurface, projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { getTotalBeats, resolveBeatPosition, snapBeat } from '@/engine/timeline';
 import { editorStore } from '@/store/editorStore';
@@ -86,7 +86,11 @@ export function useSegmentCopyPaste(): void {
         // under the cursor happened to fall. Relative spacing between the pasted
         // segments is preserved by `pasteSegments`, so snapping the anchor snaps
         // the whole group.
-        const totalBeats = getTotalBeats(project.bars, project.timeSignature);
+        // The anchor is clamped to the *phrase*, which is what the ruler above the
+        // timeline measures — pasting past its end would land nowhere.
+        const surface = editSurface();
+        if (!surface) return;
+        const totalBeats = getTotalBeats(surface.bars, project.timeSignature);
         const clampedBeat = Math.max(
           0,
           Math.min(snapBeat(mouseBeat, snapBeats), totalBeats)
@@ -94,7 +98,7 @@ export function useSegmentCopyPaste(): void {
 
         const target = resolveBeatPosition(
           clampedBeat,
-          project.bars,
+          surface.bars,
           project.timeSignature
         );
         if (!target) return;

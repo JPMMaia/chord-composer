@@ -4,6 +4,8 @@ import { useRecordShortcuts } from '@/hooks/useRecordShortcuts';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { editorStore } from '@/store/editorStore';
+import { editableBars, openTestPhrase } from '../helpers/phrases';
+import { PHRASE_TRACK_KEY } from '@/engine/phrases';
 import { barChords } from '@/engine/timeline';
 import type { InstrumentPool } from '@/engine/instrumentPool';
 import type { ChordSegment } from '@/types/music';
@@ -87,6 +89,8 @@ describe('useRecordShortcuts', () => {
 
     selectionStore.getState().clearSelection();
     selectionStore.getState().selectTrack(trackId());
+    // A take lands in the open phrase; recording is refused when there is none.
+    openTestPhrase(trackId(), 4);
 
     editorStore.setState({
       paletteScale: { root: 'C', type: 'major' },

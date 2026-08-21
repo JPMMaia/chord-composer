@@ -443,6 +443,8 @@ export function midiToProject(midiBytes: Uint8Array): Project {
     key: 'C',
     keyMode: 'major',
     tracks: importedTracks,
+    phrases: [],
+    clips: [],
     // The reader merges every chunk's notes into one list, so they all land on the
     // first instrument. The other chunks still become instruments — their names and
     // sounds are real information — but they come in empty.

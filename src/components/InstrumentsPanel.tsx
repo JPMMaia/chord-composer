@@ -529,7 +529,7 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
   // flag — shows its notes rather than silently disappearing from the roll.
   const isVisible = track.visible !== false;
   const color = track.color ?? trackColorAt(index);
-  /** Whether a volume curve is driving this instrument instead of the fader. */
+  /** Whether a phrase placed on this instrument shapes its volume over time. */
   const automated = (track.volumeAutomation?.length ?? 0) > 0;
 
   const vst3Options = vst3.plugins.map(vst3Option);
@@ -838,9 +838,10 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
         ))}
       </select>
 
-      {/* The instrument's level. Disabled once a curve exists, because the curve
-          overrides it outright — leaving a live fader that changed nothing would be
-          the more confusing of the two. */}
+      {/* The instrument's level. Live even when a phrase automates it: a phrase's
+          curve is a shape relative to this fader rather than a replacement for it,
+          so this still says how loud the instrument is and the curve says how the
+          loudness moves. */}
       <div className="mt-1 flex items-center gap-1.5">
         <span className="text-[10px] text-gray-500 w-6 shrink-0">Vol</span>
         <input
@@ -849,11 +850,10 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
           max={1}
           step={0.01}
           value={track.volume}
-          disabled={automated}
           aria-label={`Volume ${track.name}`}
           title={
             automated
-              ? 'This instrument follows its volume curve; clear the curve to use this'
+              ? 'Instrument volume — the level the phrase curves on it are relative to'
               : 'Instrument volume'
           }
           onPointerDown={e => e.stopPropagation()}

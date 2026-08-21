@@ -88,3 +88,31 @@ export function describePosition(beatInBar: number, ts: TimeSignature): string {
 
   return offset < EPSILON ? label : `${label} + ${formatNoteValue(offset)}`;
 }
+
+/**
+ * Metres a bar may be set to.
+ *
+ * Lives here beside `describeMeter` rather than in whichever view happens to draw the
+ * picker: the arrangement offers it per bar, and the project settings offer the same
+ * list for the piece as a whole.
+ */
+export const TIME_SIGNATURES: TimeSignature[] = [
+  { beatsPerMeasure: 2, beatUnit: 4 },
+  { beatsPerMeasure: 3, beatUnit: 4 },
+  { beatsPerMeasure: 4, beatUnit: 4 },
+  { beatsPerMeasure: 5, beatUnit: 4 },
+  { beatsPerMeasure: 6, beatUnit: 8 },
+  { beatsPerMeasure: 7, beatUnit: 8 },
+  { beatsPerMeasure: 12, beatUnit: 8 },
+];
+
+/** A metre as "4/4" — what the picker shows and what its option values carry. */
+export function formatTs(ts: TimeSignature): string {
+  return `${ts.beatsPerMeasure}/${ts.beatUnit}`;
+}
+
+/** The inverse of `formatTs`, for reading a picker's value back. */
+export function parseTs(value: string): TimeSignature {
+  const [beatsPerMeasure, beatUnit] = value.split('/').map(Number);
+  return { beatsPerMeasure, beatUnit };
+}

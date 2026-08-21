@@ -5,11 +5,14 @@ import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { barChords, barNotes } from '@/engine/timeline';
 import { generateId } from '@/utils/id';
+import { editableBars, openTestPhrase } from '../helpers/phrases';
+import { PHRASE_TRACK_KEY } from '@/engine/phrases';
 import type { ChordSegment } from '@/types/music';
 
 const state = () => projectStore.getState();
 const trackId = () => state().project!.tracks[0].id;
-const bars = () => state().project!.bars;
+/** The bars the inspector's selection lives in — the open phrase's. */
+const bars = () => editableBars();
 
 /** A C major triad, ready to drop into a bar. */
 function chordSegment(overrides: Partial<ChordSegment> = {}): ChordSegment {
@@ -35,12 +38,12 @@ function placeAndSelect(segment: ChordSegment, barIndex = 0): ChordSegment {
 
 const segmentOf = (id: string): ChordSegment =>
   bars()
-    .flatMap(b => barChords(b, trackId()))
+    .flatMap(b => barChords(b, PHRASE_TRACK_KEY))
     .find(c => c.id === id)!;
 
 const pitchesOf = (id: string): number[] => {
-  const bar = bars().find(b => barChords(b, trackId()).some(c => c.id === id))!;
-  return barNotes(bar, trackId()).map(n => n.pitch);
+  const bar = bars().find(b => barChords(b, PHRASE_TRACK_KEY).some(c => c.id === id))!;
+  return barNotes(bar, PHRASE_TRACK_KEY).map(n => n.pitch);
 };
 
 describe('SegmentInspector', () => {
@@ -52,6 +55,9 @@ describe('SegmentInspector', () => {
     state().addBar();
     state().addBar();
     selectionStore.getState().selectTrack(trackId());
+    // The inspector reads the blocks selected in the phrase editor, so there has to
+    // be a phrase open for a block to have been selected in.
+    openTestPhrase(trackId(), 3);
   });
 
   it('says so when nothing is selected', () => {
@@ -138,6 +144,7 @@ describe('SegmentInspector', () => {
       state().createProject();
       state().addBar();
       selectionStore.getState().selectTrack(trackId());
+      openTestPhrase(trackId(), 1);
       placeAndSelect(chordSegment({ quality: 'maj7' }));
       rerender(<SegmentInspector />);
 
@@ -236,8 +243,8 @@ describe('SegmentInspector', () => {
       // 1/16 of a beat — the widest stagger still narrower than a written note.
       fireEvent.change(screen.getByTestId('strum-spread'), { target: { value: '0.0625' } });
 
-      const bar = bars().find(b => barChords(b, trackId()).some(c => c.id === segment.id))!;
-      expect(barNotes(bar, trackId()).map(n => n.startBeat)).toEqual([0, 0.0625, 0.125]);
+      const bar = bars().find(b => barChords(b, PHRASE_TRACK_KEY).some(c => c.id === segment.id))!;
+      expect(barNotes(bar, PHRASE_TRACK_KEY).map(n => n.startBeat)).toEqual([0, 0.0625, 0.125]);
     });
   });
 

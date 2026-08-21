@@ -1,4 +1,4 @@
-import type { ChordSegment, Project, Scale } from '@/types/music';
+import type { Bar, ChordSegment, Project, Scale } from '@/types/music';
 import { getDiatonicChords, midiToNoteLabel, midiToOctave, SEMITONE_TO_NOTE } from '@/engine/chords';
 import { degreeOffsetFromTonic, getScalePitches } from '@/engine/scales';
 import { findSegment, getBarStartBeat } from '@/engine/timeline';
@@ -275,20 +275,25 @@ export interface CapturedFormula {
  */
 export function captureFormula(
   project: Project,
+  /**
+   * The bars those ids name — the open phrase's, not the compiled song's. Passed in
+   * rather than read off `project` so this stays a pure function of what it is given.
+   */
+  bars: Bar[],
   segmentIds: string[],
   fallbackScale: Scale,
   name: string,
   id: string
 ): CapturedFormula | null {
   const found = segmentIds
-    .map(segmentId => findSegment(project.bars, segmentId))
+    .map(segmentId => findSegment(bars, segmentId))
     .filter((loc): loc is NonNullable<typeof loc> => loc !== null)
     .map(loc => ({
       segment: loc.segment,
       // One absolute axis, so blocks selected across a bar line stay in order and
       // the rest between them can be measured.
       beat:
-        getBarStartBeat(project.bars, loc.bar.barIndex, project.timeSignature) +
+        getBarStartBeat(bars, loc.bar.barIndex, project.timeSignature) +
         (loc.segment.startBeat ?? 0),
     }))
     .sort((a, b) => a.beat - b.beat);

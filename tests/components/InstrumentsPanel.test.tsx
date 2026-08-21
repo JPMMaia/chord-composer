@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import { InstrumentsPanel } from '@/components/InstrumentsPanel';
 import { projectStore } from '@/store/projectStore';
+import { editableBars, openTestPhrase } from '../helpers/phrases';
 import { selectionStore } from '@/store/selectionStore';
 import { barChords } from '@/engine/timeline';
 
@@ -158,7 +159,10 @@ describe('InstrumentsPanel', () => {
 
   it('duplicates an instrument and copies its chords', () => {
     projectStore.getState().addBar();
-    const barId = projectStore.getState().project!.bars[0].id;
+    // The chord goes into a phrase placed on the Piano's row; duplicating the
+    // instrument gives the copy a placement of that same phrase.
+    openTestPhrase(firstId(), 1);
+    const barId = editableBars()[0].id;
     projectStore.getState().insertSegment(
       barId,
       0,
@@ -173,8 +177,9 @@ describe('InstrumentsPanel', () => {
     const bar = projectStore.getState().project!.bars[0];
     expect(barChords(bar, firstId()).length).toBe(1);
     expect(barChords(bar, copyId).length).toBe(1);
-    // The copy has a new segment id, not the original's.
-    expect(barChords(bar, copyId)[0].id).not.toBe('seg1');
+    // The two instruments play one phrase between them, but each placement puts it
+    // into the timeline under its own ids.
+    expect(barChords(bar, copyId)[0].id).not.toBe(barChords(bar, firstId())[0].id);
     // But same musical content.
     expect(barChords(bar, copyId)[0].root).toBe('C');
     expect(barChords(bar, copyId)[0].quality).toBe('major');
@@ -258,21 +263,26 @@ describe('InstrumentsPanel', () => {
       expect(tracks()[1].volume).toBe(1);
     });
 
-    // A live fader that changed nothing would be more confusing than a dead one.
-    it('is disabled while a volume curve is driving the instrument', () => {
-      projectStore.getState().addVolumePoint(firstId(), 0, 0.5);
-      render(<InstrumentsPanel />);
-
-      expect(fader()).toBeDisabled();
-      expect(fader().title).toContain('volume curve');
-    });
-
-    it('is enabled again once the curve is gone', () => {
-      projectStore.getState().addVolumePoint(firstId(), 0, 0.5);
-      projectStore.getState().clearVolumeAutomation(firstId());
+    // A phrase's curve is a shape relative to this fader rather than a replacement
+    // for it, so the fader still says how loud the instrument is.
+    it('stays live while a placed phrase automates the instrument', () => {
+      const { phraseId } = openTestPhrase(firstId());
+      projectStore.getState().addVolumePoint(phraseId, 0, 0.5);
       render(<InstrumentsPanel />);
 
       expect(fader()).toBeEnabled();
+      expect(fader().title).toContain('relative to');
+    });
+
+    it('scales the curve it drives, rather than being overridden by it', () => {
+      const { phraseId } = openTestPhrase(firstId());
+      projectStore.getState().addVolumePoint(phraseId, 0, 0.5);
+      render(<InstrumentsPanel />);
+
+      fireEvent.change(fader(), { target: { value: '0.5' } });
+
+      // The compiled curve is the phrase's shape times the fader: half of a half.
+      expect(tracks()[0].volumeAutomation?.[0].value).toBe(0.25);
     });
   });
 });

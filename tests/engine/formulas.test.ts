@@ -302,6 +302,7 @@ describe('captureFormula', () => {
 
     const captured = captureFormula(
       project,
+      project.bars,
       segments.map(s => s.id),
       C_MAJOR,
       'Arch',
@@ -315,13 +316,13 @@ describe('captureFormula', () => {
 
   it('takes the shape relative to the first note, whatever register it sits in', () => {
     const project = makeProject([bar(0, [note('a', 67, 0), note('b', 69, 1)])]);
-    const captured = captureFormula(project, ['a', 'b'], C_MAJOR, 'Pair', 'f');
+    const captured = captureFormula(project, project.bars, ['a', 'b'], C_MAJOR, 'Pair', 'f');
     expect(captured!.formula.steps.map(s => s.degree)).toEqual([0, 1]);
   });
 
   it('records silence between blocks as a rest rather than a longer note', () => {
     const project = makeProject([bar(0, [note('a', 60, 0), note('b', 62, 3)])]);
-    const captured = captureFormula(project, ['a', 'b'], C_MAJOR, 'Gap', 'f');
+    const captured = captureFormula(project, project.bars, ['a', 'b'], C_MAJOR, 'Gap', 'f');
     expect(captured!.formula.steps).toEqual([
       { degree: 0, beats: 1, gapBeats: 2 },
       { degree: 1, beats: 1, gapBeats: undefined },
@@ -330,7 +331,7 @@ describe('captureFormula', () => {
 
   it('orders by position, not by the order the blocks were selected', () => {
     const project = makeProject([bar(0, [note('a', 60, 0), note('b', 64, 1)])]);
-    const captured = captureFormula(project, ['b', 'a'], C_MAJOR, 'Pair', 'f');
+    const captured = captureFormula(project, project.bars, ['b', 'a'], C_MAJOR, 'Pair', 'f');
     expect(captured!.formula.steps.map(s => s.degree)).toEqual([0, 2]);
   });
 
@@ -338,7 +339,7 @@ describe('captureFormula', () => {
     const project = makeProject([
       bar(0, [note('a', 69, 0, 1, A_MINOR), note('b', 71, 1, 1, A_MINOR)]),
     ]);
-    const captured = captureFormula(project, ['a', 'b'], C_MAJOR, 'Pair', 'f');
+    const captured = captureFormula(project, project.bars, ['a', 'b'], C_MAJOR, 'Pair', 'f');
     expect(captured!.formula.steps.map(s => s.degree)).toEqual([0, 1]);
   });
 
@@ -351,7 +352,7 @@ describe('captureFormula', () => {
       romanNumeral: 'I',
     };
     const project = makeProject([bar(0, [note('a', 60, 0), chord, note('b', 62, 2)])]);
-    const captured = captureFormula(project, ['a', 'c', 'b'], C_MAJOR, 'Pair', 'f');
+    const captured = captureFormula(project, project.bars, ['a', 'c', 'b'], C_MAJOR, 'Pair', 'f');
     expect(captured!.skipped).toBe(1);
     expect(captured!.formula.steps.map(s => s.degree)).toEqual([0, 1]);
   });
@@ -366,7 +367,7 @@ describe('captureFormula', () => {
         note('c', 74, 2, 1, D_DORIAN),
       ]),
     ]);
-    const captured = captureFormula(project, ['a', 'b', 'c'], D_DORIAN, 'Cadence', 'f');
+    const captured = captureFormula(project, project.bars, ['a', 'b', 'c'], D_DORIAN, 'Cadence', 'f');
 
     expect(captured!.formula.steps).toEqual([
       { degree: 0, alter: undefined, beats: 1, gapBeats: undefined },
@@ -385,7 +386,7 @@ describe('captureFormula', () => {
     // second is the plain seventh — read off the pitch alone they would be one note.
     const raised: ChordSegment = { ...note('a', 60, 0, 1, D_DORIAN), alter: 1 };
     const p = makeProject([bar(0, [raised, note('b', 60, 1, 1, D_DORIAN)])]);
-    const captured = captureFormula(p, ['a', 'b'], D_DORIAN, 'Pair', 'f');
+    const captured = captureFormula(p, p.bars, ['a', 'b'], D_DORIAN, 'Pair', 'f');
 
     expect(captured!.formula.steps.map(s => ({ degree: s.degree, alter: s.alter }))).toEqual([
       { degree: 0, alter: 1 },
@@ -403,7 +404,7 @@ describe('captureFormula', () => {
     const project = makeProject([
       bar(0, [note('a', 73, 0, 1, D_DORIAN), note('b', 74, 1, 1, D_DORIAN)]),
     ]);
-    const captured = captureFormula(project, ['a', 'b'], D_DORIAN, 'Lead', 'f');
+    const captured = captureFormula(project, project.bars, ['a', 'b'], D_DORIAN, 'Lead', 'f');
     expect(captured!.formula.steps.map(s => ({ degree: s.degree, alter: s.alter }))).toEqual([
       { degree: 0, alter: 1 },
       { degree: 1, alter: undefined },
@@ -415,6 +416,6 @@ describe('captureFormula', () => {
 
   it('answers null when the selection holds no notes at all', () => {
     const project = makeProject([bar(0, [])]);
-    expect(captureFormula(project, ['nope'], C_MAJOR, 'Empty', 'f')).toBeNull();
+    expect(captureFormula(project, project.bars, ['nope'], C_MAJOR, 'Empty', 'f')).toBeNull();
   });
 });

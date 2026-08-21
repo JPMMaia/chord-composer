@@ -10,7 +10,7 @@ import { newId } from '@/engine/formulaLibrary';
 import { getDiatonicChords } from '@/engine/chords';
 import { editorStore } from '@/store/editorStore';
 import { formulaLibraryStore } from '@/store/formulaLibraryStore';
-import { projectStore } from '@/store/projectStore';
+import { editSurface, projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { useFormulaLibraryState } from '@/context/formulaLibraryContext';
 import { FormulaEditor } from '@/components/FormulaEditor';
@@ -99,8 +99,13 @@ export const FormulaPalette: React.FC = () => {
   const capture = () => {
     const project = projectStore.getState().project;
     if (!project) return;
+    // Capture reads the phrase being edited: that is the timeline the selection was
+    // made on, and the only place those ids mean anything.
+    const surface = editSurface();
+    if (!surface) return;
     const captured = captureFormula(
       project,
+      surface.bars,
       selectedSegmentIds,
       scale,
       'Captured formula',

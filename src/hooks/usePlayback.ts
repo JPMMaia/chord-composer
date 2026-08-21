@@ -395,9 +395,13 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
     });
   
     // Mute and solo are read here, per note, rather than baked into `timings`,
-    // so toggling either during playback is heard on the next tick.
+    // so toggling either during playback is heard on the next tick. An audition set
+    // is read the same way and for the same reason: opening or closing the phrase
+    // editor mid-playback changes what is heard from the next tick rather than at the
+    // next Play. When one is given it stands alone — see `audibleTrackIds`.
     const audible = new Set(
-      cfg.tracks.filter(t => isTrackAudible(t, cfg.tracks, cfg.groups ?? [])).map(t => t.id)
+      cfg.audibleTrackIds ??
+        cfg.tracks.filter(t => isTrackAudible(t, cfg.tracks, cfg.groups ?? [])).map(t => t.id)
     );
   
     for (const note of due) {

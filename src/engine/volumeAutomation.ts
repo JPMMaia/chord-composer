@@ -142,6 +142,25 @@ export function withoutPoint(points: AutomationPoint[], index: number): Automati
 }
 
 /**
+ * Whether two curves say the same thing, down to every breakpoint.
+ *
+ * Absent and empty read as the same curve, since both mean "nothing is driving this".
+ * Used to leave a no-op edit off the undo stack, and to hand a recompile back the
+ * object it was given when nothing about it changed.
+ */
+export function samePoints(
+  a: AutomationPoint[] | undefined,
+  b: AutomationPoint[] | undefined
+): boolean {
+  const left = a ?? [];
+  const right = b ?? [];
+  return (
+    left.length === right.length &&
+    left.every((p, i) => p.beat === right[i].beat && p.value === right[i].value)
+  );
+}
+
+/**
  * Index of the first point at or after `beat`, or `points.length` when every point
  * is behind it. The scheduling cursor's seek, used to pick up a curve part-way
  * through after a Play from the middle or a loop wrap.

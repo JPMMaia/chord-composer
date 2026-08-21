@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useRef, useSyncExternalStore } from 'react';
+import { useEffect, useCallback, useMemo, useRef, useSyncExternalStore } from 'react';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { createUndoRedoMiddleware } from '@/engine/undoRedo';
@@ -17,8 +17,13 @@ import { ChordTimeline } from '@/components/ChordTimeline';
 import { PianoRoll } from '@/components/PianoRoll';
 import { HorizontalScrollbar } from '@/components/HorizontalScrollbar';
 import { SegmentInspector } from '@/components/SegmentInspector';
+import { ArrangementView } from '@/components/ArrangementView';
+import { PhraseInspector } from '@/components/PhraseInspector';
+import { phraseBarsAsTrack, phraseById } from '@/engine/phrases';
 import { usePlayback } from '@/hooks/usePlayback';
 import { useSegmentShortcuts } from '@/hooks/useSegmentShortcuts';
+import { usePhraseEditorGuard } from '@/hooks/usePhraseEditorGuard';
+import { usePhraseAudition } from '@/hooks/usePhraseAudition';
 import { useSegmentCopyPaste } from '@/hooks/useSegmentCopyPaste';
 import { usePlaybackShortcuts } from '@/hooks/usePlaybackShortcuts';
 import { useRecordShortcuts } from '@/hooks/useRecordShortcuts';
@@ -65,6 +70,8 @@ function App() {
   const setBpm = projectStore(s => s.setBpm);
   const addBar = projectStore(s => s.addBar);
   const removeBar = projectStore(s => s.removeBar);
+  const setPhraseLength = projectStore(s => s.setPhraseLength);
+  const removePhraseBarAt = projectStore(s => s.removePhraseBarAt);
 
   const selectedBarId = selectionStore(s => s.selectedBarId);
   const selectedTrackId = selectionStore(s => s.selectedTrackId);
@@ -79,6 +86,9 @@ function App() {
   const scrollX = editorStore(s => s.scrollX);
   const setScrollX = editorStore(s => s.setScrollX);
   const pixelsPerBeat = editorStore(s => s.pixelsPerBeat);
+
+  const view = editorStore(s => s.view);
+  const editingPhraseId = projectStore(s => s.editingPhraseId);
 
   const recordArmed = editorStore(s => s.recordArmed);
   const setRecordArmed = editorStore(s => s.setRecordArmed);
@@ -108,14 +118,61 @@ function App() {
     editorStore.getState().setPaletteScale(projectScale(opened.key, opened.keyMode));
   }, [projectId]);
 
-  const selectedBar = project?.bars.find(b => b.id === selectedBarId);
+  /**
+   * The phrase the timeline is editing, or null in the arrangement.
+   *
+   * Read here rather than only inside the timeline because the piano roll under it
+   * has to draw the same surface: a bar the user clicks in the phrase editor is a
+   * *phrase-local* bar, which `project.bars` does not contain.
+   */
+  const editingPhrase =
+    project && editingPhraseId ? phraseById(project.phrases, editingPhraseId) : null;
 
-  // Auto-select the first bar so the piano roll and bar panel have one to show.
+  /**
+   * The bars the piano roll and the bar panel show: the open phrase's, filed under
+   * the instrument playing it, or the compiled song when the arrangement is up.
+   */
+  const surfaceBars = useMemo(
+    () =>
+      editingPhrase && selectedTrackId && project
+        ? phraseBarsAsTrack(editingPhrase, project, selectedTrackId)
+        : (project?.bars ?? []),
+    [editingPhrase, project, selectedTrackId]
+  );
+
+  const selectedBar = surfaceBars.find(b => b.id === selectedBarId);
+
+  /**
+   * Add and Remove Bar act on whatever the timeline is showing.
+   *
+   * With a phrase open that is the *phrase's* bars, not the song's: the bar cursor is
+   * on one of them, the panel above these buttons is counting blocks in one of them,
+   * and the song grid underneath belongs to every other instrument playing at the same
+   * time. Lengthening the song there would leave the phrase — the thing being written
+   * into — exactly as short as it was.
+   */
+  const addSurfaceBar = () => {
+    if (editingPhrase) setPhraseLength(editingPhrase.id, editingPhrase.bars.length + 1);
+    else addBar();
+  };
+
+  const removeSurfaceBar = (barId: string) => {
+    if (editingPhrase) removePhraseBarAt(editingPhrase.id, barId);
+    else removeBar(barId);
+  };
+
+  // Auto-select the first bar so the piano roll and bar panel have one to show —
+  // and re-home the cursor when the surface changes under it, which opening or
+  // closing a phrase does: a phrase's bar ids are its own.
   useEffect(() => {
-    if (project && project.bars.length > 0 && !selectedBarId) {
-      selectBar(project.bars[0].id);
-    }
-  }, [project, selectedBarId, selectBar]);
+    if (surfaceBars.length === 0) return;
+    if (selectedBarId && surfaceBars.some(b => b.id === selectedBarId)) return;
+    selectBar(surfaceBars[0].id);
+  }, [surfaceBars, selectedBarId, selectBar]);
+
+  // Undo of a Make Unique, or a phrase deleted from under the editor, leaves it
+  // pointed at nothing. Mirrors the instrument re-homing above.
+  usePhraseEditorGuard();
 
   // Likewise the first instrument, so the timeline always has somewhere to drop a
   // block. Also re-homes the selection when the selected instrument is removed.
@@ -130,7 +187,16 @@ function App() {
   const selectedBarSegmentCount = selectedBarContent?.chords.length ?? 0;
   const selectedBarNoteCount = selectedBarContent?.notes.length ?? 0;
 
-  // Playback config
+  /**
+   * What Play means while a phrase is open, or null in the arrangement.
+   *
+   * The song is still what is scheduled; this only narrows it. See the hook.
+   */
+  const audition = usePhraseAudition();
+
+  // Playback config. An audition overrides the project's own range and repeat rather
+  // than editing them: the song's settings are untouched and come back the moment the
+  // arrangement does.
   const playbackConfig = project
     ? {
         bpm: project.bpm,
@@ -138,17 +204,24 @@ function App() {
         bars: project.bars,
         tracks: project.tracks,
         groups: project.trackGroups,
-        loopStart: project.loopStart ?? null,
-        loopEnd: project.loopEnd ?? null,
-        loopEnabled: project.loopEnabled ?? false,
+        loopStart: audition ? audition.loopStart : (project.loopStart ?? null),
+        loopEnd: audition ? audition.loopEnd : (project.loopEnd ?? null),
+        loopEnabled: audition ? true : (project.loopEnabled ?? false),
+        audibleTrackIds: audition ? audition.audibleTrackIds : null,
       }
     : null;
 
-  // The range reads as bar numbers rather than beats: that is how it was drawn.
-  const loopRangeLabel =
-    project && project.loopStart !== undefined && project.loopEnd !== undefined
-      ? barRangeLabel(project.bars, project.timeSignature, project.loopStart, project.loopEnd)
-      : null;
+  // The range reads as bar numbers rather than beats: that is how it was drawn. An
+  // audition's are the *phrase's* bar numbers, counted over the bars the editor is
+  // showing, so the readout names what the user can see rather than where in the song
+  // that phrase happens to sit.
+  const loopRangeLabel = !project
+    ? null
+    : audition
+      ? barRangeLabel(surfaceBars, project.timeSignature, audition.localStart, audition.localEnd)
+      : project.loopStart !== undefined && project.loopEnd !== undefined
+        ? barRangeLabel(project.bars, project.timeSignature, project.loopStart, project.loopEnd)
+        : null;
 
   // Playback state lives in the hook, which is the only thing that knows when sound
   // actually starts — a local copy would claim "playing" during the sample load.
@@ -165,7 +238,10 @@ function App() {
     ensureAudio,
   } = usePlayback(playbackConfig!, metronomeEnabled);
 
-  const playheadBeat = songTimeToBeat(currentTime, project?.bpm ?? 120);
+  // Absolute song beats — except while auditioning, where everything drawn is
+  // measured from the phrase's own bar 0 and the playhead has to be too.
+  const playheadBeat =
+    songTimeToBeat(currentTime, project?.bpm ?? 120) - (audition?.baseBeat ?? 0);
 
   // Handlers
   const handlePlay = useCallback(() => {
@@ -368,6 +444,7 @@ function App() {
         isLoading={isLoading}
         isMetronomeOn={metronomeEnabled}
         isRecordArmed={recordArmed}
+        canRecord={view === 'phrase'}
         recordQuantize={recordQuantize}
         midiStatus={midiStatus}
         getSongTime={getSongTime}
@@ -391,20 +468,41 @@ function App() {
 
         {/* Center — palette strip, chord timeline, piano roll */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          {/* Ungated by the bar cursor: the palette carries its own key, so it has
-              material to offer whether or not a bar is selected. */}
-          <ScalePalette />
+          {/* One surface at a time. The palettes go with the timeline rather than
+              staying put: they offer material to drop into a phrase, and there is
+              nowhere in the arrangement for a chord to land. */}
+          {view === 'arrangement' ? (
+            // Takes the height the piano roll gives up below, and scrolls when the
+            // song has more instruments than fit — the arrangement grows downwards
+            // with the band, which the timeline never did.
+            <div className="flex-1 overflow-y-auto">
+              <ArrangementView />
+            </div>
+          ) : (
+            <>
+              {/* Ungated by the bar cursor: the palette carries its own key, so it
+                  has material to offer whether or not a bar is selected. */}
+              <ScalePalette />
 
-          {/* Under the palette because it composes with it: a formula is realized
-              in the key and register the strip above is set to. */}
-          <FormulaPalette />
+              {/* Under the palette because it composes with it: a formula is
+                  realized in the key and register the strip above is set to. */}
+              <FormulaPalette />
 
-          <ChordTimeline />
+              <ChordTimeline />
+            </>
+          )}
 
+          {/* Only under the phrase editor. The roll draws the notes of *one selected
+              bar*, and the arrangement has no bar cursor to move — it would sit there
+              showing bar 1 of the compiled song for as long as the view was up, taking
+              half the height the rows need. Not tabs: the surface is already chosen by
+              the arrangement/phrase switch, and a second switch over the same choice
+              would only give the user two places to be lost in. */}
+          {view === 'phrase' && (
           <div className="flex-1 bg-gray-900 overflow-hidden">
             {selectedBar && (
               <PianoRoll
-                bars={project.bars}
+                bars={surfaceBars}
                 selectedBarId={selectedBar.id}
                 tracks={project.tracks}
                 selectedTrackId={selectedTrackId}
@@ -418,13 +516,14 @@ function App() {
               />
             )}
           </div>
+          )}
 
           {/* The editor's one horizontal scrollbar. Its content spans the key
               column as well, so its range matches what the panes can scroll. */}
           <HorizontalScrollbar
             contentWidth={
               PIANO_KEYS_WIDTH +
-              getTotalBeats(project.bars, project.timeSignature) * pixelsPerBeat
+              getTotalBeats(surfaceBars, project.timeSignature) * pixelsPerBeat
             }
           />
         </div>
@@ -439,6 +538,10 @@ function App() {
               cursor, so a chord stays selected — and editable — when the cursor
               moves to another bar. */}
           <div className="p-3">
+            {/* Exactly one of the two ever has something to show: picking a block in
+                the arrangement clears the segment selection, and the other way
+                round. */}
+            <PhraseInspector />
             <SegmentInspector />
           </div>
 
@@ -455,13 +558,23 @@ function App() {
                   {selectedBarNoteCount !== 1 ? 's' : ''}
                 </div>
                 <button
-                  onClick={addBar}
+                  onClick={addSurfaceBar}
+                  title={
+                    editingPhrase
+                      ? 'Add a bar to this phrase, everywhere it is played'
+                      : 'Add a bar to the end of the song'
+                  }
                   className="w-full px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 text-gray-200 rounded transition-colors"
                 >
                   Add Bar
                 </button>
                 <button
-                  onClick={() => removeBar(selectedBar.id)}
+                  onClick={() => removeSurfaceBar(selectedBar.id)}
+                  title={
+                    editingPhrase
+                      ? 'Take this bar out of the phrase'
+                      : 'Take this bar out of the song'
+                  }
                   className="w-full px-3 py-1.5 text-sm bg-red-600 hover:bg-red-500 text-white rounded transition-colors"
                 >
                   Remove Bar

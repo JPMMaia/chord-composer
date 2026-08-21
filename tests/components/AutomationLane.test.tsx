@@ -6,6 +6,8 @@ import { editorStore } from '@/store/editorStore';
 import { selectionStore } from '@/store/selectionStore';
 import { DEFAULT_SNAP_BEATS, getTotalBeats } from '@/engine/timeline';
 import { laneKey, VOLUME_LANE_KEY } from '@/engine/parameterAutomation';
+import { phraseById } from '@/engine/phrases';
+import { openTestPhrase } from '../helpers/phrases';
 import { PIXELS_PER_BEAT } from '@/utils/constants';
 
 /**
@@ -25,8 +27,23 @@ function trackId(): string {
   return projectStore.getState().project!.tracks[0].id;
 }
 
+/**
+ * The phrase the curves belong to — one, spanning the whole song, opened in
+ * `beforeEach`.
+ *
+ * A curve is written on the phrase rather than on the instrument, so every gesture
+ * here is checked by reading it back off the phrase. This one covers the song end to
+ * end, which is what makes a beat in the lane and a beat in the song the same number.
+ */
+let openPhraseId = '';
+const phraseId = (): string => openPhraseId;
+
+function phrase() {
+  return phraseById(projectStore.getState().project!.phrases, openPhraseId)!;
+}
+
 function points() {
-  return projectStore.getState().project!.tracks[0].volumeAutomation;
+  return phrase().volumeAutomation;
 }
 
 /**
@@ -45,15 +62,15 @@ function renderLane() {
     <AutomationLane
       laneKey={VOLUME_LANE_KEY}
       label="Volume"
-      points={track.volumeAutomation ?? []}
+      points={points() ?? []}
       flatLevel={track.volume}
       readPoints={() => points() ?? []}
-      onAdd={(beat, value) => store().addVolumePoint(track.id, beat, value)}
-      onMove={(i, beat, value) => store().moveVolumePoint(track.id, i, beat, value)}
-      onRemove={i => store().removeVolumePoint(track.id, i)}
-      bars={project.bars}
+      onAdd={(beat, value) => store().addVolumePoint(phraseId(), beat, value)}
+      onMove={(i, beat, value) => store().moveVolumePoint(phraseId(), i, beat, value)}
+      onRemove={i => store().removeVolumePoint(phraseId(), i)}
+      bars={phrase().bars}
       projectTs={project.timeSignature}
-      totalBeats={getTotalBeats(project.bars, project.timeSignature)}
+      totalBeats={getTotalBeats(phrase().bars, project.timeSignature)}
     />
   );
 }
@@ -84,6 +101,9 @@ describe('AutomationLane', () => {
     projectStore.getState().addBar();
     projectStore.getState().addBar();
     projectStore.getState().setTrackVolume(trackId(), 0.8);
+    // Two bars of phrase over the song's two, so a beat in the lane is a beat in
+    // the song and the cases can go on being written in absolute numbers.
+    openPhraseId = openTestPhrase(trackId(), 2).phraseId;
   });
 
   it('draws the flat volume when there is no curve', () => {
@@ -131,8 +151,8 @@ describe('AutomationLane', () => {
   });
 
   it('draws a curve once there are points', () => {
-    projectStore.getState().addVolumePoint(trackId(), 0, 1);
-    projectStore.getState().addVolumePoint(trackId(), 4, 0);
+    projectStore.getState().addVolumePoint(phraseId(), 0, 1);
+    projectStore.getState().addVolumePoint(phraseId(), 4, 0);
     renderLane();
 
     expect(screen.queryByTestId('automation-flat-line')).not.toBeInTheDocument();
@@ -151,14 +171,14 @@ describe('AutomationLane', () => {
   });
 
   it('labels each point with where it sits and how loud it is', () => {
-    projectStore.getState().addVolumePoint(trackId(), 4, 0.5);
+    projectStore.getState().addVolumePoint(phraseId(), 4, 0.5);
     renderLane();
 
     expect(screen.getByLabelText('Volume point at beat 4, 50%')).toBeInTheDocument();
   });
 
   it('moves a point on release, not on every move', () => {
-    projectStore.getState().addVolumePoint(trackId(), 0, 1);
+    projectStore.getState().addVolumePoint(phraseId(), 0, 1);
     renderLane();
 
     fireEvent.pointerDown(screen.getByTestId('automation-point-0'), at(0, 1));
@@ -173,7 +193,7 @@ describe('AutomationLane', () => {
   });
 
   it('leaves a point alone when the press never travels', () => {
-    projectStore.getState().addVolumePoint(trackId(), 2, 0.5);
+    projectStore.getState().addVolumePoint(phraseId(), 2, 0.5);
     renderLane();
 
     fireEvent.pointerDown(screen.getByTestId('automation-point-0'), at(2, 0.5));
@@ -183,7 +203,7 @@ describe('AutomationLane', () => {
   });
 
   it('does not also add a point when one is grabbed', () => {
-    projectStore.getState().addVolumePoint(trackId(), 2, 0.5);
+    projectStore.getState().addVolumePoint(phraseId(), 2, 0.5);
     renderLane();
 
     fireEvent.pointerDown(screen.getByTestId('automation-point-0'), at(2, 0.5));
@@ -192,8 +212,8 @@ describe('AutomationLane', () => {
   });
 
   it('re-sorts when a point is dragged past its neighbour', () => {
-    projectStore.getState().addVolumePoint(trackId(), 0, 1);
-    projectStore.getState().addVolumePoint(trackId(), 2, 0.5);
+    projectStore.getState().addVolumePoint(phraseId(), 0, 1);
+    projectStore.getState().addVolumePoint(phraseId(), 2, 0.5);
     renderLane();
 
     drag('automation-point-0', { beat: 4, value: 0.25 });
@@ -205,8 +225,8 @@ describe('AutomationLane', () => {
   });
 
   it('removes a point on a double click', () => {
-    projectStore.getState().addVolumePoint(trackId(), 0, 1);
-    projectStore.getState().addVolumePoint(trackId(), 4, 0);
+    projectStore.getState().addVolumePoint(phraseId(), 0, 1);
+    projectStore.getState().addVolumePoint(phraseId(), 4, 0);
     renderLane();
 
     fireEvent.doubleClick(screen.getByTestId('automation-point-1'));
@@ -215,7 +235,7 @@ describe('AutomationLane', () => {
   });
 
   it('goes back to the flat line once the last point is removed', () => {
-    projectStore.getState().addVolumePoint(trackId(), 4, 0.5);
+    projectStore.getState().addVolumePoint(phraseId(), 4, 0.5);
     const { rerender } = renderLane();
 
     fireEvent.doubleClick(screen.getByTestId('automation-point-0'));
@@ -231,9 +251,9 @@ describe('AutomationLane', () => {
         onAdd={() => {}}
         onMove={() => {}}
         onRemove={() => {}}
-        bars={project.bars}
+        bars={phrase().bars}
         projectTs={project.timeSignature}
-        totalBeats={getTotalBeats(project.bars, project.timeSignature)}
+        totalBeats={getTotalBeats(phrase().bars, project.timeSignature)}
       />
     );
 
@@ -242,7 +262,7 @@ describe('AutomationLane', () => {
   });
 
   it('clamps a drag that leaves the lane rather than refusing it', () => {
-    projectStore.getState().addVolumePoint(trackId(), 2, 0.5);
+    projectStore.getState().addVolumePoint(phraseId(), 2, 0.5);
     renderLane();
 
     // Well above the top of the lane and left of its start.
@@ -265,9 +285,9 @@ describe('AutomationLane', () => {
       fireEvent.keyDown(target, { key: k });
 
     beforeEach(() => {
-      projectStore.getState().addVolumePoint(trackId(), 0, 1);
-      projectStore.getState().addVolumePoint(trackId(), 4, 0.5);
-      projectStore.getState().addVolumePoint(trackId(), 8, 0);
+      projectStore.getState().addVolumePoint(phraseId(), 0, 1);
+      projectStore.getState().addVolumePoint(phraseId(), 4, 0.5);
+      projectStore.getState().addVolumePoint(phraseId(), 8, 0);
       selectVolumePoint(null);
     });
 
@@ -399,7 +419,7 @@ describe('AutomationLane', () => {
       selectVolumePoint(2);
       const { rerender } = renderLane();
 
-      projectStore.getState().clearVolumeAutomation(trackId());
+      projectStore.getState().clearVolumeAutomation(phraseId());
       const project = projectStore.getState().project!;
       rerender(
         <AutomationLane
@@ -411,9 +431,9 @@ describe('AutomationLane', () => {
           onAdd={() => {}}
           onMove={() => {}}
           onRemove={() => {}}
-          bars={project.bars}
+          bars={phrase().bars}
           projectTs={project.timeSignature}
-          totalBeats={getTotalBeats(project.bars, project.timeSignature)}
+          totalBeats={getTotalBeats(phrase().bars, project.timeSignature)}
         />
       );
 
@@ -432,8 +452,7 @@ describe('AutomationLane', () => {
     const KEY = laneKey(TARGET);
 
     /** The parameter lane's stored points, straight from the store. */
-    const paramPoints = () =>
-      projectStore.getState().project!.tracks[0].parameterAutomation?.[0].points ?? [];
+    const paramPoints = () => phrase().parameterAutomation?.[0].points ?? [];
 
     function renderParamLane() {
       const project = projectStore.getState().project!;
@@ -448,18 +467,18 @@ describe('AutomationLane', () => {
           // A parameter has no fader behind it, so there is no flat level to draw.
           flatLevel={null}
           readPoints={paramPoints}
-          onAdd={(beat, value) => store().addLanePoint(track.id, KEY, beat, value)}
-          onMove={(i, beat, value) => store().moveLanePoint(track.id, KEY, i, beat, value)}
-          onRemove={i => store().removeLanePoint(track.id, KEY, i)}
-          bars={project.bars}
+          onAdd={(beat, value) => store().addLanePoint(phraseId(), KEY, beat, value)}
+          onMove={(i, beat, value) => store().moveLanePoint(phraseId(), KEY, i, beat, value)}
+          onRemove={i => store().removeLanePoint(phraseId(), KEY, i)}
+          bars={phrase().bars}
           projectTs={project.timeSignature}
-          totalBeats={getTotalBeats(project.bars, project.timeSignature)}
+          totalBeats={getTotalBeats(phrase().bars, project.timeSignature)}
         />
       );
     }
 
     beforeEach(() => {
-      projectStore.getState().addLane(trackId(), TARGET, 'Cutoff');
+      projectStore.getState().addLane(phraseId(), TARGET, 'Cutoff');
     });
 
     // Nothing is driving the parameter, so a line at any level would be a claim
@@ -483,7 +502,7 @@ describe('AutomationLane', () => {
     });
 
     it('names itself and its points after the parameter', () => {
-      projectStore.getState().addLanePoint(trackId(), KEY, 4, 0.5);
+      projectStore.getState().addLanePoint(phraseId(), KEY, 4, 0.5);
       renderParamLane();
 
       expect(screen.getByLabelText('Cutoff automation lane')).toBeInTheDocument();
@@ -491,7 +510,7 @@ describe('AutomationLane', () => {
     });
 
     it('drags a point on release, like the volume lane does', () => {
-      projectStore.getState().addLanePoint(trackId(), KEY, 0, 1);
+      projectStore.getState().addLanePoint(phraseId(), KEY, 0, 1);
       renderParamLane();
 
       drag('automation-point-0', { beat: 2, value: 0.5 });
@@ -502,7 +521,7 @@ describe('AutomationLane', () => {
     // The reason the selection carries a lane key at all: an index picked in one
     // lane must not read as picked in another, or Delete would erase from both.
     it('does not answer to a point selected in the volume lane', () => {
-      projectStore.getState().addLanePoint(trackId(), KEY, 0, 1);
+      projectStore.getState().addLanePoint(phraseId(), KEY, 0, 1);
       selectVolumePoint(0);
       renderParamLane();
 
@@ -513,8 +532,8 @@ describe('AutomationLane', () => {
     });
 
     it('erases its own selected point on Delete', () => {
-      projectStore.getState().addLanePoint(trackId(), KEY, 0, 1);
-      projectStore.getState().addLanePoint(trackId(), KEY, 4, 0.5);
+      projectStore.getState().addLanePoint(phraseId(), KEY, 0, 1);
+      projectStore.getState().addLanePoint(phraseId(), KEY, 4, 0.5);
       renderParamLane();
 
       fireEvent.pointerDown(screen.getByTestId('automation-point-1'), at(4, 0.5));
@@ -526,7 +545,7 @@ describe('AutomationLane', () => {
   });
 
   it('redraws at the zoom the rest of the timeline is at', () => {
-    projectStore.getState().addVolumePoint(trackId(), 2, 0.5);
+    projectStore.getState().addVolumePoint(phraseId(), 2, 0.5);
     editorStore.getState().setPixelsPerBeat(160);
     renderLane();
 

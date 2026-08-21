@@ -3,6 +3,7 @@ import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { editorStore } from '@/store/editorStore';
 import { flattenSegments } from '@/engine/timeline';
+import { PHRASE_TRACK_KEY, phraseById } from '@/engine/phrases';
 import { isTextEntry } from '@/utils/keyboard';
 
 /**
@@ -44,13 +45,15 @@ export function useSegmentShortcuts(): void {
       // Select-all comes first: it is the one shortcut here that both carries a
       // modifier and works from an empty selection.
       if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'a' || e.key === 'A')) {
-        const project = projectStore.getState().project;
+        const { project, editingPhraseId } = projectStore.getState();
         if (!project) return;
-        // Select-all means "everything the timeline is showing", which is the
-        // selected instrument's blocks — not every instrument's at once.
-        const trackId = selectionStore.getState().selectedTrackId;
-        if (!trackId) return;
-        setSelectedSegments(flattenSegments(project.bars, trackId).map(s => s.id));
+        // Select-all means "everything the timeline is showing", which is the open
+        // phrase's blocks. Deliberately not the compiled song's: those carry a
+        // per-placement id that no segment action would recognise, and there would be
+        // two of every block for a phrase that is played twice.
+        const phrase = phraseById(project.phrases, editingPhraseId ?? '');
+        if (!phrase) return;
+        setSelectedSegments(flattenSegments(phrase.bars, PHRASE_TRACK_KEY).map(s => s.id));
         e.preventDefault();
         return;
       }

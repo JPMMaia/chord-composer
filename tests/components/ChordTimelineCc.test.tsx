@@ -12,6 +12,8 @@ import { editorStore } from '@/store/editorStore';
 import { resetVst3Cc, type Vst3CcInfo } from '@/engine/vst3Cc';
 import { vst3Ref } from '@/engine/instrumentRef';
 import { DEFAULT_SNAP_BEATS } from '@/engine/timeline';
+import { phraseById } from '@/engine/phrases';
+import { openTestPhrase } from '../helpers/phrases';
 import { PIXELS_PER_BEAT } from '@/utils/constants';
 
 const MARKER = '__TAURI_INTERNALS__';
@@ -34,9 +36,33 @@ const answer = (command: string) => {
 
 const trackId = () => projectStore.getState().project!.tracks[0].id;
 
+/**
+ * The phrase the timeline has open — the one a learned lane is added to.
+ *
+ * A CC curve is written on the phrase's own beats and heard at every placement of
+ * it, so learning a controller adds the lane there rather than on the instrument;
+ * the plugin the controller is *sent* to is still the selected instrument's.
+ */
+let phraseId = '';
+const phrase = () => phraseById(projectStore.getState().project!.phrases, phraseId)!;
+const lanes = () => phrase().parameterAutomation;
+
 const ccField = () =>
   screen.queryByLabelText('Controller number to learn') as HTMLInputElement | null;
 const sendButton = () => screen.getByRole('button', { name: /Send/ });
+
+/** The number field that adds a lane outright, which is always there. */
+const addField = () =>
+  screen.queryByLabelText('Controller number to automate') as HTMLInputElement | null;
+const addButton = () => screen.getByRole('button', { name: 'Add CC lane' });
+
+/** Add a lane by number, the way an instrument with no MIDI learn takes one. */
+function addLane(controller?: number) {
+  if (controller !== undefined) {
+    fireEvent.change(addField()!, { target: { value: String(controller) } });
+  }
+  fireEvent.click(addButton());
+}
 
 /** Let the memoised native call for the controller list settle. */
 const settle = () => screen.findByLabelText('Controller number to learn');
@@ -66,7 +92,10 @@ beforeEach(() => {
   });
   mapsCc = true;
   projectStore.getState().createProject();
+  // The stack draws the open phrase's curves against the selected instrument: the
+  // phrase for the lanes, the instrument for the plugin they are learned from.
   selectionStore.getState().selectTrack(trackId());
+  phraseId = openTestPhrase(trackId(), 2).phraseId;
 
   resetVst3Cc();
   invoke.mockReset();
@@ -123,7 +152,7 @@ describe('ChordTimeline MIDI CC lanes', () => {
       trackId: trackId(),
       controller: 20,
     });
-    expect(projectStore.getState().project!.tracks[0].parameterAutomation).toEqual([
+    expect(lanes()).toEqual([
       { target: { kind: 'cc', controller: 20 }, name: 'CC 20', points: [] },
     ]);
   });
@@ -189,7 +218,7 @@ describe('ChordTimeline MIDI CC lanes', () => {
     fireEvent.click(screen.getByLabelText('Remove CC 20 automation'));
 
     expect(screen.queryByLabelText('CC 20 automation lane')).not.toBeInTheDocument();
-    expect(projectStore.getState().project!.tracks[0].parameterAutomation).toBeUndefined();
+    expect(lanes()).toBeUndefined();
     expect(ccField()!.value).toBe('20');
   });
 
@@ -258,9 +287,7 @@ describe('ChordTimeline MIDI CC lanes', () => {
     fireEvent.change(input, { target: { value: 'Filter Cutoff' } });
     fireEvent.keyDown(input, { key: 'Enter' });
 
-    expect(projectStore.getState().project!.tracks[0].parameterAutomation![0].name).toBe(
-      'Filter Cutoff'
-    );
+    expect(lanes()![0].name).toBe('Filter Cutoff');
     expect(screen.getByLabelText('Filter Cutoff automation lane')).toBeInTheDocument();
   });
 
@@ -274,9 +301,7 @@ describe('ChordTimeline MIDI CC lanes', () => {
     fireEvent.change(input, { target: { value: 'Discarded' } });
     fireEvent.keyDown(input, { key: 'Escape' });
 
-    expect(projectStore.getState().project!.tracks[0].parameterAutomation![0].name).toBe(
-      'CC 20'
-    );
+    expect(lanes()![0].name).toBe('CC 20');
   });
 
   // The volume lane has a fader behind it and is not the user's to name.
@@ -286,5 +311,113 @@ describe('ChordTimeline MIDI CC lanes', () => {
     const gutter = screen.getByTestId('timeline-gutter');
     fireEvent.doubleClick(within(gutter).getByText('Volume'));
     expect(screen.queryByLabelText('Rename Volume lane')).toBeNull();
+  });
+
+  /**
+   * Adding a lane by number, which is what most projects have to go on.
+   *
+   * MIDI learn is a shortcut only a plugin publishing an `IMidiMapping` can offer,
+   * and for a long while it was the *only* way to a CC lane — so a General MIDI
+   * sound, a plugin that publishes no mapping, and a browser build could not
+   * automate a controller at all. The lane belongs to the phrase and reaches the
+   * MIDI export whatever ends up playing it, so the number field is always there.
+   */
+  describe('adding a lane by number', () => {
+    it('is there on a track that is not a plugin at all', () => {
+      render(<ChordTimeline />);
+
+      expect(addField()).toBeInTheDocument();
+      expect(ccField()).toBeNull();
+    });
+
+    it('is there when the plugin maps no controllers', async () => {
+      mapsCc = false;
+      usePlugin();
+      render(<ChordTimeline />);
+
+      await waitFor(() =>
+        expect(invoke).toHaveBeenCalledWith('vst3_list_cc', expect.anything())
+      );
+      expect(addField()).toBeInTheDocument();
+    });
+
+    it('opens on the first controller in the quiet block', () => {
+      render(<ChordTimeline />);
+
+      expect(addField()!.value).toBe('20');
+    });
+
+    // Nothing is sent anywhere: with no plugin to teach, the lane is simply made.
+    it('adds the lane without asking the native side for anything', () => {
+      render(<ChordTimeline />);
+      addLane();
+
+      expect(lanes()).toEqual([
+        { target: { kind: 'cc', controller: 20 }, name: 'CC 20', points: [] },
+      ]);
+      expect(invoke).not.toHaveBeenCalledWith('vst3_learn_cc', expect.anything());
+    });
+
+    it('draws the new lane alongside the volume lane', () => {
+      render(<ChordTimeline />);
+      addLane(74);
+
+      expect(screen.getByLabelText('CC 74 automation lane')).toBeInTheDocument();
+      expect(screen.getAllByTestId('automation-lane')).toHaveLength(2);
+    });
+
+    it('moves the suggestion on once a controller has a lane', () => {
+      render(<ChordTimeline />);
+      addLane();
+
+      expect(addField()!.value).toBe('21');
+    });
+
+    // A second lane for the same target would be a second answer to one question,
+    // and `normalizeParameterAutomation` would only merge them back anyway.
+    it('refuses a controller the phrase already automates', () => {
+      render(<ChordTimeline />);
+      addLane(20);
+
+      fireEvent.change(addField()!, { target: { value: '20' } });
+      expect(addButton()).toBeDisabled();
+    });
+
+    it('refuses a number no controller could be', () => {
+      render(<ChordTimeline />);
+
+      fireEvent.change(addField()!, { target: { value: '200' } });
+      expect(addButton()).toBeDisabled();
+    });
+
+    // Offering a number the plugin maps is what learn is for; typing one it does
+    // not is still allowed, because the lane is the phrase's and the export reads it.
+    it('takes a controller the plugin does not map', async () => {
+      usePlugin();
+      render(<ChordTimeline />);
+      await settle();
+
+      addLane(74);
+
+      expect(screen.getByLabelText('CC 74 automation lane')).toBeInTheDocument();
+    });
+
+    it('keeps it out of the gutter, like the learn panel', () => {
+      render(<ChordTimeline />);
+
+      expect(
+        within(screen.getByTestId('timeline-gutter')).queryByLabelText(
+          'Controller number to automate'
+        )
+      ).toBeNull();
+    });
+
+    it('goes with the rest of the stack when automation is toggled off', () => {
+      render(<ChordTimeline />);
+
+      fireEvent.click(screen.getByLabelText('Automation lanes'));
+
+      expect(addField()).toBeNull();
+    });
   });
 });

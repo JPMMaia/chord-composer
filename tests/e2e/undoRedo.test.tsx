@@ -5,6 +5,8 @@ import {
   setRecordingGate,
 } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
+import { editableBars, openTestPhrase } from '../helpers/phrases';
+import { PHRASE_TRACK_KEY } from '@/engine/phrases';
 import { UndoRedoContext, type UndoRedoContextValue } from '@/context/undoRedoContext';
 import { Transport } from '@/components/Transport';
 import { createUndoRedoMiddleware } from '@/engine/undoRedo';
@@ -19,6 +21,9 @@ function mountProject() {
   projectStore.getState().resetProject();
   projectStore.getState().createProject();
   for (let i = 0; i < 4; i++) projectStore.getState().addBar();
+  // An insertion needs a phrase to land in, so the arrangement gets one over the
+  // whole song — which is exactly what these tests assumed before phrases existed.
+  openTestPhrase(projectStore.getState().project!.tracks[0].id, 4);
 }
 
 function renderTransportWithUndoRedo(ur: ReturnType<typeof createUndoRedoMiddleware<Project | null>>) {
@@ -48,6 +53,7 @@ function renderTransportWithUndoRedo(ur: ReturnType<typeof createUndoRedoMiddlew
         loopRangeLabel={null}
         isMetronomeOn={false}
         isRecordArmed={false}
+        canRecord={false}
         recordQuantize={true}
         onPlay={() => {}}
         onPause={() => {}}
@@ -91,7 +97,7 @@ describe('E2E — Transport undo/redo buttons revert operations end-to-end', () 
 
   it('undo button reverts a segment insertion', () => {
     const project = projectStore.getState().project!;
-    const bar = project.bars[0];
+    const bar = editableBars()[0];
     const trackId = project.tracks[0].id;
     const segment: ChordSegment = {
       id: 'seg-e2e-undo',
@@ -127,7 +133,7 @@ describe('E2E — Transport undo/redo buttons revert operations end-to-end', () 
 
   it('undo then redo restores the inserted segment', () => {
     const project = projectStore.getState().project!;
-    const bar = project.bars[0];
+    const bar = editableBars()[0];
     const trackId = project.tracks[0].id;
     const segment: ChordSegment = {
       id: 'seg-e2e-roundtrip',

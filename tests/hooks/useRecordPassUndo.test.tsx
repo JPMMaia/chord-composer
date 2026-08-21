@@ -5,6 +5,8 @@ import { useRecordSession } from '@/hooks/useRecordSession';
 import { createUndoRedoMiddleware } from '@/engine/undoRedo';
 import { projectStore, setRecordingGate } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
+import { editableBars, openTestPhrase } from '../helpers/phrases';
+import { PHRASE_TRACK_KEY } from '@/engine/phrases';
 import { editorStore } from '@/store/editorStore';
 import { barChords } from '@/engine/timeline';
 import type { InstrumentPool } from '@/engine/instrumentPool';
@@ -113,6 +115,8 @@ describe('recording pass — Ctrl+Z erases the take', () => {
 
     selectionStore.getState().clearSelection();
     selectionStore.getState().selectTrack(trackId());
+    // A take lands in the open phrase; recording is refused when there is none.
+    openTestPhrase(trackId(), 4);
 
     editorStore.setState({
       paletteScale: { root: 'C', type: 'major' },
@@ -177,7 +181,7 @@ describe('recording pass — Ctrl+Z erases the take', () => {
   });
 
   it('steps back over a pre-recording edit once the take is erased', () => {
-    const bar = state().project!.bars[0];
+    const bar = editableBars()[0];
     state().insertSegment(bar.id, 0, {
       id: 'pre-existing',
       kind: 'chord',

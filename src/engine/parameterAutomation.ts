@@ -1,5 +1,5 @@
 import type { AutomationPoint, AutomationTarget, ParameterAutomation } from '@/types/music';
-import { normalizePoints } from '@/engine/volumeAutomation';
+import { normalizePoints, samePoints } from '@/engine/volumeAutomation';
 
 /**
  * A track's plugin curves, as a list of lanes.
@@ -167,5 +167,26 @@ export function withLaneName(
 
   return lanes.map(lane =>
     laneKey(lane.target) === key ? { ...lane, name: trimmed } : lane
+  );
+}
+
+/**
+ * Whether two lane lists say the same thing, down to every breakpoint.
+ *
+ * The lane-level counterpart to `samePoints`, and used for the same two things: a
+ * no-op edit stays off the undo stack, and a recompile that changed nothing hands
+ * back the object it was given.
+ */
+export function sameLanes(a: ParameterAutomation[], b: ParameterAutomation[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((lane, i) => {
+      const other = b[i];
+      return (
+        laneKey(lane.target) === laneKey(other.target) &&
+        lane.name === other.name &&
+        samePoints(lane.points, other.points)
+      );
+    })
   );
 }

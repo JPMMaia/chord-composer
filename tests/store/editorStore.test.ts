@@ -13,8 +13,10 @@ describe('editorStore', () => {
       viewportWidth: 0,
       paletteMode: 'chords',
       paletteOctave: 4,
+      view: 'arrangement',
       recordArmed: false,
       recordQuantize: true,
+      phraseLoop: null,
     });
   });
 
@@ -110,16 +112,81 @@ describe('editorStore', () => {
       expect(editorStore.getState().recordQuantize).toBe(true);
     });
 
-    it('arms and disarms', () => {
+    it('arms and disarms while a phrase is open', () => {
+      editorStore.getState().setView('phrase');
+
       editorStore.getState().setRecordArmed(true);
       expect(editorStore.getState().recordArmed).toBe(true);
       editorStore.getState().setRecordArmed(false);
       expect(editorStore.getState().recordArmed).toBe(false);
     });
 
+    // A take is written into the phrase the timeline has open, so arming in the
+    // arrangement would leave the transport pulsing at nothing.
+    it('refuses to arm with no phrase open', () => {
+      editorStore.getState().setRecordArmed(true);
+      expect(editorStore.getState().recordArmed).toBe(false);
+    });
+
+    it('disarms on the way back to the arrangement', () => {
+      editorStore.getState().setView('phrase');
+      editorStore.getState().setRecordArmed(true);
+
+      editorStore.getState().setView('arrangement');
+
+      expect(editorStore.getState().recordArmed).toBe(false);
+    });
+
     it('turns quantize off', () => {
       editorStore.getState().setRecordQuantize(false);
       expect(editorStore.getState().recordQuantize).toBe(false);
+    });
+  });
+
+  /**
+   * The stretch of the open phrase that Play repeats.
+   *
+   * A way of listening rather than part of the music: it names beats in one phrase,
+   * so it is never saved, never undone, and never outlives the phrase it was drawn on.
+   */
+  describe('audition loop', () => {
+    const loop = () => editorStore.getState().phraseLoop;
+
+    it('starts at the whole phrase', () => {
+      expect(loop()).toBeNull();
+    });
+
+    it('takes the stretch that was drawn', () => {
+      editorStore.getState().setPhraseLoop(2, 6);
+      expect(loop()).toEqual({ start: 2, end: 6 });
+    });
+
+    it('reads a backwards range as the same one', () => {
+      editorStore.getState().setPhraseLoop(6, 2);
+      expect(loop()).toEqual({ start: 2, end: 6 });
+    });
+
+    // What a click on open ruler sends, and the only way back to hearing all of it.
+    it('clears back to the whole phrase on nulls', () => {
+      editorStore.getState().setPhraseLoop(2, 6);
+      editorStore.getState().setPhraseLoop(null, null);
+
+      expect(loop()).toBeNull();
+    });
+
+    // A range with nothing in it would repeat silence for as long as it was left to.
+    it('refuses a range with nothing in it', () => {
+      editorStore.getState().setPhraseLoop(4, 4);
+      expect(loop()).toBeNull();
+    });
+
+    it('goes with the surface it was drawn on', () => {
+      editorStore.getState().setView('phrase');
+      editorStore.getState().setPhraseLoop(2, 6);
+
+      editorStore.getState().setView('arrangement');
+
+      expect(loop()).toBeNull();
     });
   });
 

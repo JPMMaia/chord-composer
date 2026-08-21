@@ -1,4 +1,4 @@
-import { projectStore } from '@/store/projectStore';
+import { editSurface, projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { findSegment } from '@/engine/timeline';
 import { currentKind, resolveSegmentChord, segmentVelocity } from '@/engine/chordOperations';
@@ -137,6 +137,7 @@ function ToggleButton({
  */
 export function SegmentInspector() {
   const project = projectStore(s => s.project);
+  const editingPhraseId = projectStore(s => s.editingPhraseId);
   const selectedSegmentIds = selectionStore(s => s.selectedSegmentIds);
 
   const setSegmentsInversion = projectStore(s => s.setSegmentsInversion);
@@ -151,9 +152,13 @@ export function SegmentInspector() {
   const convertSegmentsKind = projectStore(s => s.convertSegmentsKind);
   const setSegmentsScale = projectStore(s => s.setSegmentsScale);
 
-  const located = project
+  // Selected ids name blocks in the phrase being edited, not in the compiled song —
+  // see `editSurface`. Subscribing to `editingPhraseId` as well as to the project is
+  // what makes the panel re-read when the editor is pointed somewhere else.
+  const surface = editingPhraseId && project ? editSurface() : null;
+  const located = surface
     ? selectedSegmentIds
-        .map(id => findSegment(project.bars, id))
+        .map(id => findSegment(surface.bars, id))
         .filter((l): l is NonNullable<typeof l> => l !== null)
     : [];
 

@@ -20,6 +20,14 @@ interface TransportProps {
   isMetronomeOn: boolean;
   /** Whether the number keys write to the timeline once playback is running. */
   isRecordArmed: boolean;
+  /**
+   * Whether there is anywhere for a take to go — i.e. a phrase is open for editing.
+   *
+   * False in the arrangement view, where the button is disabled rather than hidden:
+   * a control that vanishes reads as a bug, while a disabled one with a reason on it
+   * says what to do about it.
+   */
+  canRecord: boolean;
   /** Whether a recorded take snaps to the timeline's grid. */
   recordQuantize: boolean;
   /**
@@ -112,6 +120,7 @@ export const Transport: React.FC<TransportProps> = ({
   isLoading = false,
   isMetronomeOn,
   isRecordArmed,
+  canRecord,
   recordQuantize,
   midiStatus,
   getSongTime,
@@ -192,8 +201,13 @@ export const Transport: React.FC<TransportProps> = ({
           onClick={onRecordToggle}
           aria-label="Record"
           aria-pressed={isRecordArmed}
-          title="Arm recording (R) — hold 1–7 while playing to lay down chords"
-          className={`px-3 py-1.5 text-sm rounded transition-colors ${
+          disabled={!canRecord}
+          title={
+            canRecord
+              ? 'Arm recording (R) — hold 1–7 while playing to lay down chords'
+              : 'Open a phrase to record into'
+          }
+          className={`px-3 py-1.5 text-sm rounded transition-colors disabled:bg-gray-700 disabled:text-gray-500 ${
             isRecordArmed
               ? `bg-red-600 text-white${isPlaying ? ' animate-pulse' : ''}`
               : 'bg-gray-600 text-gray-200 hover:bg-gray-500'

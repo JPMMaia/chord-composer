@@ -1,6 +1,12 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import type { AutomationPoint, Bar, ChordSegment, TimeSignature, Track } from '@/types/music';
-import { projectStore } from '@/store/projectStore';
+import React, { useEffect, useRef, useState } from 'react';
+import type { Bar, ChordSegment } from '@/types/music';
+import { editSurface, projectStore } from '@/store/projectStore';
+import {
+  PHRASE_TRACK_KEY,
+  phraseBarsForDisplay,
+  phraseById,
+  placementCount,
+} from '@/engine/phrases';
 import { selectionStore } from '@/store/selectionStore';
 import { editorStore, ZOOM_LEVELS } from '@/store/editorStore';
 import {
@@ -8,7 +14,6 @@ import {
   flattenSegments,
   getBarBeats,
   getBarPulse,
-  getBarIndexAtBeat,
   getBarStartBeat,
   getTotalBeats,
   laneOf,
@@ -17,7 +22,7 @@ import {
   SNAP_OPTIONS,
   trackLaneCount,
 } from '@/engine/timeline';
-import { describeMeter } from '@/engine/meterDisplay';
+import { describeMeter, formatTs } from '@/engine/meterDisplay';
 import { paletteItemToSegment, type PaletteItem } from '@/engine/palette';
 import {
   FORMULA_DRAG_TYPE,
@@ -29,37 +34,17 @@ import { findLoadedFormula } from '@/store/formulaLibraryStore';
 import type { CopiedSegment } from '@/store/clipboardStore';
 import { PALETTE_DRAG_TYPE } from '@/components/ScalePalette';
 import { ChordSegmentBlock } from '@/components/ChordSegmentBlock';
-import { AutomationLane, AUTOMATION_LANE_HEIGHT } from '@/components/AutomationLane';
-import { laneFor, laneKey, VOLUME_LANE_KEY } from '@/engine/parameterAutomation';
-import { nextFreeCc } from '@/engine/vst3Cc';
-import { useVst3Cc } from '@/hooks/useVst3Cc';
-import { LaneLabel } from '@/components/LaneLabel';
-import { LearnCcPanel } from '@/components/LearnCcPanel';
-import { SectionBand } from '@/components/SectionBand';
+import { PlayRangeRuler } from '@/components/PlayRangeRuler';
+import {
+  AutomationGutter,
+  AutomationLanes,
+  CcLaneStrip,
+  useAutomationLanes,
+} from '@/components/AutomationStack';
 import { BAR_LINE_WIDTH, PIANO_KEYS_WIDTH, PIXELS_PER_BEAT } from '@/utils/constants';
 
 /** Beats a freshly dropped block occupies before the user resizes it. */
 const DROP_DURATION_BEATS = 1;
-
-/** Meters offered per bar. */
-const TIME_SIGNATURES: TimeSignature[] = [
-  { beatsPerMeasure: 2, beatUnit: 4 },
-  { beatsPerMeasure: 3, beatUnit: 4 },
-  { beatsPerMeasure: 4, beatUnit: 4 },
-  { beatsPerMeasure: 5, beatUnit: 4 },
-  { beatsPerMeasure: 6, beatUnit: 8 },
-  { beatsPerMeasure: 7, beatUnit: 8 },
-  { beatsPerMeasure: 12, beatUnit: 8 },
-];
-
-function formatTs(ts: TimeSignature): string {
-  return `${ts.beatsPerMeasure}/${ts.beatUnit}`;
-}
-
-function parseTs(value: string): TimeSignature {
-  const [beatsPerMeasure, beatUnit] = value.split('/').map(Number);
-  return { beatsPerMeasure, beatUnit };
-}
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
@@ -96,36 +81,6 @@ function gridPositions(beats: number, steps: number[], covered: number[]): numbe
   }
 
   return positions.sort((a, b) => a - b);
-}
-
-/**
- * One row of the automation stack: what to draw, and what a gesture on it means.
- *
- * The volume curve and a plugin parameter differ only in which store actions they
- * reach, so they are described in one shape and rendered by one component.
- */
-interface AutomationLaneDef {
-  key: string;
-  label: string;
-  points: AutomationPoint[];
-  /** The dashed level shown when there are no points; null for a parameter. */
-  flatLevel: number | null;
-  readPoints: () => AutomationPoint[];
-  onAdd: (beat: number, value: number) => void;
-  onMove: (index: number, beat: number, value: number) => void;
-  onRemove: (index: number) => void;
-  /**
-   * Whether the lane can be taken away and renamed.
-   *
-   * True for a plugin target, false for volume — which has a fader behind it, so
-   * it is cleared rather than removed, and is not the user's to rename.
-   */
-  removable?: boolean;
-}
-
-/** The live copy of a track, for reading a curve back after a commit re-sorted it. */
-function trackInStore(trackId: string): Track | undefined {
-  return projectStore.getState().project?.tracks.find(t => t.id === trackId);
 }
 
 /** Where a block would land if released now, in the bar-relative terms it is drawn in. */
@@ -180,22 +135,6 @@ interface DragState {
 /** How far the pointer may wander before the gesture counts as a drag, in pixels. */
 const DRAG_THRESHOLD_PX = 3;
 
-/** A play-range drag in flight, in absolute beats from the start of the project. */
-interface RangeDragState {
-  /** The edge that stays put: the pointer's origin, or the far edge when resizing. */
-  anchorBeat: number;
-  /** Where the pointer went down. Only used to tell a click from a drag. */
-  originBeat: number;
-  /** The edge that follows the pointer. */
-  beat: number;
-  moved: boolean;
-  /** True when the gesture began on an existing edge handle rather than open ruler. */
-  fromHandle: boolean;
-}
-
-/** Width of the grab strips at the play range's edges, in pixels. */
-const RANGE_HANDLE_PX = 8;
-
 /** Attribute the drag hit-test looks for; a lane carries its bar's id. */
 const LANE_ATTRIBUTE = 'data-timeline-lane';
 
@@ -226,26 +165,32 @@ export const ChordTimeline: React.FC = () => {
   const pasteSegments = projectStore(s => s.pasteSegments);
   const removeSegment = projectStore(s => s.removeSegment);
   const resizeSegmentDuration = projectStore(s => s.resizeSegmentDuration);
-  const setBarTimeSignature = projectStore(s => s.setBarTimeSignature);
   const setTrackLaneCount = projectStore(s => s.setTrackLaneCount);
-  const clearVolumeAutomation = projectStore(s => s.clearVolumeAutomation);
-  const addVolumePoint = projectStore(s => s.addVolumePoint);
-  const moveVolumePoint = projectStore(s => s.moveVolumePoint);
-  const removeVolumePoint = projectStore(s => s.removeVolumePoint);
-  const addLane = projectStore(s => s.addLane);
-  const removeLane = projectStore(s => s.removeLane);
-  const renameLane = projectStore(s => s.renameLane);
-  const addLanePoint = projectStore(s => s.addLanePoint);
-  const moveLanePoint = projectStore(s => s.moveLanePoint);
-  const removeLanePoint = projectStore(s => s.removeLanePoint);
-  const setLoopRegion = projectStore(s => s.setLoopRegion);
 
   const moveSegments = projectStore(s => s.moveSegments);
 
   const selectedBarId = selectionStore(s => s.selectedBarId);
-  // The timeline is the *editing* surface, so it shows one instrument at a time.
-  // Other instruments stay visible on the piano roll below, in their own colours.
+  /**
+   * The timeline is the *editing* surface, and what it edits is one phrase.
+   *
+   * The instrument still matters — it decides the sound a block auditions with, the
+   * lanes available to stack in, and the automation shown underneath — but it is no
+   * longer where the blocks live. They live in the phrase, filed under
+   * `PHRASE_TRACK_KEY`, which is what lets the same phrase be dragged onto another
+   * row in the arrangement and simply be played by that instrument instead.
+   */
   const selectedTrackId = selectionStore(s => s.selectedTrackId);
+  const closePhrase = projectStore(s => s.closePhrase);
+  const renamePhrase = projectStore(s => s.renamePhrase);
+  const setPhraseLength = projectStore(s => s.setPhraseLength);
+  const insertPhraseBarsAt = projectStore(s => s.insertPhraseBarsAt);
+  const removePhraseBarsAt = projectStore(s => s.removePhraseBarsAt);
+  const phrase = projectStore(s =>
+    s.project && s.editingPhraseId ? phraseById(s.project.phrases, s.editingPhraseId) : null
+  );
+  const placements = projectStore(s =>
+    s.project && s.editingPhraseId ? placementCount(s.project.clips, s.editingPhraseId) : 0
+  );
   // Read up here rather than after the guard below, because the controller list
   // is a hook and hooks cannot be called conditionally. The reference is stable —
   // `find` hands back the object already in the store — so this does not
@@ -253,7 +198,28 @@ export const ChordTimeline: React.FC = () => {
   const selectedTrack = projectStore(s =>
     s.project?.tracks.find(t => t.id === selectedTrackId)
   );
-  const supportedCc = useVst3Cc(selectedTrack);
+  /**
+   * The curves under the lanes: the phrase's own, drawn against the instrument that
+   * plays it. A hook, so it is read up here for the same reason `selectedTrack` is.
+   */
+  const automationLanes = useAutomationLanes(phrase ?? undefined, selectedTrack);
+
+  /**
+   * The stretch Play repeats, in this phrase's own beats. Null is the whole of it.
+   *
+   * Cleared when the editor moves to another phrase: a range names beats in one
+   * piece of music, and carrying it across would repeat a stretch of something else.
+   * `setView` does the same on the way out to the arrangement, but re-opening a
+   * different block never passes through it — `openClip` is already in the phrase
+   * view — so the rule is stated at both doors.
+   */
+  const phraseLoop = editorStore(s => s.phraseLoop);
+  const setPhraseLoop = editorStore(s => s.setPhraseLoop);
+  const editingPhraseId = projectStore(s => s.editingPhraseId);
+  useEffect(() => {
+    setPhraseLoop(null, null);
+  }, [editingPhraseId, setPhraseLoop]);
+
   const selectedSegmentIds = selectionStore(s => s.selectedSegmentIds);
   const selectBar = selectionStore(s => s.selectBar);
   const selectSegment = selectionStore(s => s.selectSegment);
@@ -284,21 +250,8 @@ export const ChordTimeline: React.FC = () => {
     beat: number;
   } | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
-  const [rangeDrag, setRangeDrag] = useState<RangeDragState | null>(null);
-
-  /** The right-clicked ruler tick's bar and the click's screen position. */
-  const [insertMenu, setInsertMenu] = useState<{
-    barIndex: number;
-    x: number;
-    y: number;
-  } | null>(null);
-  const [insertCount, setInsertCount] = useState(1);
-  const insertBar = projectStore(s => s.insertBar);
-
   const rulerRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const rangeDragRef = useRef<RangeDragState | null>(null);
-  rangeDragRef.current = rangeDrag;
 
   // The live drag, for the window listeners, which are installed once.
   const dragRef = useRef<DragState | null>(null);
@@ -317,7 +270,12 @@ export const ChordTimeline: React.FC = () => {
 
       const currentProject = projectStore.getState().project;
       if (!currentProject) return;
-      const currentBars = currentProject.bars;
+      // Read live rather than closed over, so the gesture measures against the phrase
+      // as it is now — a drag that lengthens it mid-flight must not go on resolving
+      // beats against the bars it had when the pointer went down.
+      const surface = editSurface();
+      if (!surface) return;
+      const currentBars = surface.bars;
 
       // Hit-test rather than track the origin lane, so a block can be dragged
       // into a different bar.
@@ -430,60 +388,6 @@ export const ChordTimeline: React.FC = () => {
     };
   }, [snapBeats, moveSegments, pixelsPerBeat]);
 
-  /** Absolute beat under a viewport x coordinate, snapped to the editing grid. */
-  const rulerBeatAt = useCallback(
-    (clientX: number): number => {
-      const ruler = rulerRef.current;
-      if (!ruler) return 0;
-      const beat = (clientX - ruler.getBoundingClientRect().left) / pixelsPerBeat;
-      return snapBeat(Number.isFinite(beat) ? beat : 0, snapBeats);
-    },
-    [snapBeats, pixelsPerBeat]
-  );
-
-  // The play-range drag, on the same window-listener pattern as the segment drag
-  // above so a gesture survives the pointer leaving the ruler.
-  useEffect(() => {
-    const handleMove = (e: PointerEvent) => {
-      const state = rangeDragRef.current;
-      if (!state) return;
-
-      const beat = rulerBeatAt(e.clientX);
-      setRangeDrag({
-        ...state,
-        beat,
-        moved:
-          state.moved ||
-          Math.abs(beat - state.originBeat) * pixelsPerBeat > DRAG_THRESHOLD_PX,
-      });
-    };
-
-    const handleUp = () => {
-      const state = rangeDragRef.current;
-      setRangeDrag(null);
-      if (!state) return;
-
-      if (!state.moved) {
-        // A click on open ruler clears the range — the discoverable way to get the
-        // whole project playing again. A click on a handle just misses; leave it be.
-        if (!state.fromHandle) setLoopRegion(null, null);
-        return;
-      }
-
-      setLoopRegion(
-        Math.min(state.anchorBeat, state.beat),
-        Math.max(state.anchorBeat, state.beat)
-      );
-    };
-
-    window.addEventListener('pointermove', handleMove);
-    window.addEventListener('pointerup', handleUp);
-    return () => {
-      window.removeEventListener('pointermove', handleMove);
-      window.removeEventListener('pointerup', handleUp);
-    };
-  }, [rulerBeatAt, setLoopRegion, pixelsPerBeat]);
-
   // The lanes follow the shared offset, so scrolling the piano roll or the bar at
   // the bottom of the editor moves them too. Writing only on a real difference is
   // what keeps this from looping against the scroll handler that publishes it.
@@ -545,11 +449,11 @@ export const ChordTimeline: React.FC = () => {
   // a dead id and arm the keyboard shortcuts over nothing. Only write on a real
   // shrink, or this loops against its own update.
   useEffect(() => {
-    if (!project || !selectedTrackId || selectedSegmentIds.length === 0) return;
-    const live = new Set(flattenSegments(project.bars, selectedTrackId).map(s => s.id));
+    if (!phrase || selectedSegmentIds.length === 0) return;
+    const live = new Set(flattenSegments(phrase.bars, PHRASE_TRACK_KEY).map(s => s.id));
     const kept = selectedSegmentIds.filter(id => live.has(id));
     if (kept.length !== selectedSegmentIds.length) setSelectedSegments(kept);
-  }, [project, selectedTrackId, selectedSegmentIds, setSelectedSegments]);
+  }, [phrase, selectedSegmentIds, setSelectedSegments]);
 
   if (!project) return null;
 
@@ -566,70 +470,29 @@ export const ChordTimeline: React.FC = () => {
     );
   }
 
-  const { bars, timeSignature: projectTs } = project;
+  if (!phrase) {
+    return (
+      <div
+        data-testid="chord-timeline"
+        className="shrink-0 flex items-center justify-center h-24 bg-gray-900 border-b border-gray-700"
+      >
+        <p className="text-xs text-gray-500 italic" data-testid="no-phrase-open">
+          Open a phrase from the arrangement to edit it.
+        </p>
+      </div>
+    );
+  }
+
+  const { timeSignature: projectTs } = project;
+  /**
+   * The phrase's own bars, wearing the metre of the song bars its first placement
+   * covers. Metre is the bar's *capacity*, so showing one metre while the store
+   * refits against another would let a block into space the user cannot see.
+   */
+  const bars = phraseBarsForDisplay(phrase, project);
+  /** Where this surface's blocks are filed — never an instrument id. */
+  const trackKey = PHRASE_TRACK_KEY;
   const totalBeats = getTotalBeats(bars, projectTs);
-  /** Whether the selected instrument has a volume curve, and so something to clear. */
-  const hasAutomation = (selectedTrack?.volumeAutomation?.length ?? 0) > 0;
-
-  /**
-   * The curves the selected instrument shows, top to bottom: its volume, then one
-   * lane per automated plugin parameter.
-   *
-   * Built once and read by both halves of the layout — the label column and the
-   * lanes themselves live in different scroll containers, and the only thing
-   * keeping their rows aligned is that they are driven from the same list.
-   */
-  const automationLanes: AutomationLaneDef[] = selectedTrack
-    ? [
-        {
-          key: VOLUME_LANE_KEY,
-          label: 'Volume',
-          points: selectedTrack.volumeAutomation ?? [],
-          // The fader's value: what the instrument plays at with no curve drawn.
-          flatLevel: selectedTrack.volume,
-          readPoints: () => trackInStore(selectedTrack.id)?.volumeAutomation ?? [],
-          onAdd: (beat, value) => addVolumePoint(selectedTrack.id, beat, value),
-          onMove: (i, beat, value) => moveVolumePoint(selectedTrack.id, i, beat, value),
-          onRemove: i => removeVolumePoint(selectedTrack.id, i),
-        },
-        ...(selectedTrack.parameterAutomation ?? []).map(lane => {
-          const key = laneKey(lane.target);
-          return {
-            key,
-            // What the lane was named when it was made, or renamed to since — so
-            // a lane still names itself with the plugin missing.
-            label: lane.name || key,
-            points: lane.points,
-            // Nothing drives a target with no points, so there is no level to
-            // draw. See `AutomationLane`'s `flatLevel`.
-            flatLevel: null,
-            readPoints: () =>
-              laneFor(trackInStore(selectedTrack.id)?.parameterAutomation ?? [], key)
-                ?.points ?? [],
-            onAdd: (beat: number, value: number) =>
-              addLanePoint(selectedTrack.id, key, beat, value),
-            onMove: (i: number, beat: number, value: number) =>
-              moveLanePoint(selectedTrack.id, key, i, beat, value),
-            onRemove: (i: number) => removeLanePoint(selectedTrack.id, key, i),
-            removable: true,
-          };
-        }),
-      ]
-    : [];
-
-  /**
-   * The controller the learn panel offers, or null when there is none to offer.
-   *
-   * Recomputed from the lanes rather than held in state, so adding a lane moves
-   * the suggestion on by itself. `learnCc` overrides it while the user is typing.
-   */
-  const suggestedCc = nextFreeCc(
-    supportedCc,
-    (selectedTrack?.parameterAutomation ?? [])
-      .map(lane => (lane.target.kind === 'cc' ? lane.target.controller : -1))
-      .filter(cc => cc >= 0)
-  );
-
   /**
    * The sub-lane rows to draw, as indices.
    *
@@ -641,41 +504,25 @@ export const ChordTimeline: React.FC = () => {
    */
   const laneCount = Math.max(
     selectedTrack ? trackLaneCount(selectedTrack) : 1,
-    ...flattenSegments(bars, selectedTrackId).map(s => laneOf(s) + 1),
+    ...flattenSegments(bars, trackKey).map(s => laneOf(s) + 1),
     1
   );
   const laneIndices = Array.from({ length: laneCount }, (_, i) => i);
+  /**
+   * True while the phrase's last bar is empty, so dropping it takes nothing with it.
+   *
+   * The same rule `canRemoveLane` follows below, and for the same reason: the − beside
+   * a count is a nudge, not a decision to delete music. Shrinking a phrase over a bar
+   * that still holds blocks stays possible, but only through the inspector's length
+   * field, where the number typed says plainly how much is being thrown away.
+   */
+  const canRemoveBar =
+    bars.length > 1 && barChords(bars[bars.length - 1], trackKey).length === 0;
+
   /** True while the last lane is empty, so removing it takes nothing with it. */
   const canRemoveLane =
     laneCount > 1 &&
-    !flattenSegments(bars, selectedTrackId).some(s => laneOf(s) >= laneCount - 1);
-
-  /** The range to draw: the one being dragged if there is one, else the stored one. */
-  const shownRange = rangeDrag
-    ? {
-        start: Math.min(rangeDrag.anchorBeat, rangeDrag.beat),
-        end: Math.max(rangeDrag.anchorBeat, rangeDrag.beat),
-      }
-    : project.loopStart !== undefined && project.loopEnd !== undefined
-      ? { start: project.loopStart, end: project.loopEnd }
-      : null;
-
-  /**
-   * Begin a range gesture. `anchorBeat` is the edge that stays put — for a handle
-   * that is the range's opposite edge, which is what makes resizing fall out of the
-   * same code path as drawing.
-   */
-  const startRangeDrag = (e: React.PointerEvent, anchorBeat?: number) => {
-    e.stopPropagation();
-    const originBeat = rulerBeatAt(e.clientX);
-    setRangeDrag({
-      anchorBeat: anchorBeat ?? originBeat,
-      originBeat,
-      beat: originBeat,
-      moved: false,
-      fromHandle: anchorBeat !== undefined,
-    });
-  };
+    !flattenSegments(bars, trackKey).some(s => laneOf(s) >= laneCount - 1);
 
   /**
    * Length of the formula being dragged, in beats, or null when the drag is a
@@ -783,10 +630,10 @@ export const ChordTimeline: React.FC = () => {
   /** Where a block sits, by id, across the whole project — the drag's starting point. */
   const originOf = (segmentId: string): DragOrigin | null => {
     const barIndex = bars.findIndex(bar =>
-      barChords(bar, selectedTrackId).some(c => c.id === segmentId)
+      barChords(bar, trackKey).some(c => c.id === segmentId)
     );
     if (barIndex < 0) return null;
-    const segment = barChords(bars[barIndex], selectedTrackId).find(c => c.id === segmentId)!;
+    const segment = barChords(bars[barIndex], trackKey).find(c => c.id === segmentId)!;
     return {
       absoluteBeat: getBarStartBeat(bars, barIndex, projectTs) + (segment.startBeat ?? 0),
       lane: laneOf(segment),
@@ -818,7 +665,7 @@ export const ChordTimeline: React.FC = () => {
     const current = selectionStore.getState().selectedSegmentIds;
 
     if (e.shiftKey) {
-      const order = flattenSegments(bars, selectedTrackId).map(s => s.id);
+      const order = flattenSegments(bars, trackKey).map(s => s.id);
       const anchor = selectionStore.getState().anchorSegmentId;
       const from = anchor ? order.indexOf(anchor) : -1;
       const to = order.indexOf(segment.id);
@@ -896,7 +743,7 @@ export const ChordTimeline: React.FC = () => {
    * neighbours do so via z-index instead.
    */
   const laneSegments = (bar: Bar, barIndex: number, lane: number): ChordSegment[] => {
-    const chords = barChords(bar, selectedTrackId);
+    const chords = barChords(bar, trackKey);
     if (!drag) return chords.filter(s => laneOf(s) === lane);
 
     /** Where a block would land right now, or undefined when it is not being dragged. */
@@ -918,7 +765,7 @@ export const ChordTimeline: React.FC = () => {
     // copy of yet.
     const incoming = bars
       .flatMap((other, index) =>
-        barChords(other, selectedTrackId).map(s => ({ segment: s, barIndex: index }))
+        barChords(other, trackKey).map(s => ({ segment: s, barIndex: index }))
       )
       .filter(
         ({ segment, barIndex: from }) =>
@@ -939,6 +786,83 @@ export const ChordTimeline: React.FC = () => {
       className="shrink-0 flex flex-col bg-gray-900 border-b border-gray-700"
       onDragLeave={() => setDropIndicator(null)}
     >
+      {/* Which phrase this is, and the way back to the arrangement it is played in.
+          The timeline shows one phrase at a time and says nothing about where in the
+          song it sits, so without this strip there is no telling which of several
+          identical-looking four-bar blocks is open. */}
+      <div
+        data-testid="phrase-header"
+        className="flex items-center gap-2 px-2 py-1 border-b border-gray-800 text-xs"
+      >
+        <button
+          type="button"
+          onClick={closePhrase}
+          aria-label="Back to arrangement"
+          className="px-1.5 rounded border bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600"
+        >
+          ← Arrangement
+        </button>
+        <span
+          style={{ backgroundColor: phrase.color ?? undefined }}
+          className="w-2 h-2 rounded-sm"
+        />
+        <input
+          data-testid="phrase-name"
+          aria-label="Phrase name"
+          value={phrase.name}
+          onChange={e => renamePhrase(phrase.id, e.target.value)}
+          className="bg-transparent text-gray-200 font-medium border border-transparent rounded px-1 hover:border-gray-600 focus:outline-none focus:border-indigo-500"
+        />
+        {selectedTrack && <span className="text-gray-500">· {selectedTrack.name}</span>}
+        {/* An edit here reaches every placement, which is the whole point of a linked
+            block and exactly the thing that would otherwise surprise someone. */}
+        {placements > 1 && (
+          <span data-testid="phrase-placements" className="text-amber-400" title="Editing this phrase changes every placement of it">
+            · {placements} placements
+          </span>
+        )}
+
+        {/* How many bars the phrase is, and the way to make it more.
+            A phrase is not tied to the song grid — its bars are its own — so the
+            song's own "add bar" says nothing about it, and without this the length a
+            phrase was drawn at in the arrangement would be the length it is stuck
+            with while it is being written. Every placement grows at once, which is
+            what `placements` above is already warning about. */}
+        <span
+          data-testid="phrase-bar-count"
+          className="ml-auto flex items-center gap-0.5 text-gray-500"
+        >
+          <button
+            type="button"
+            aria-label="Remove bar"
+            title={
+              canRemoveBar
+                ? 'Shorten the phrase by a bar'
+                : bars.length > 1
+                  ? 'The last bar still holds blocks'
+                  : 'A phrase is at least one bar'
+            }
+            disabled={!canRemoveBar}
+            onClick={() => setPhraseLength(phrase.id, bars.length - 1)}
+            className="px-1 rounded text-gray-400 hover:bg-gray-700 hover:text-gray-200 disabled:opacity-30 disabled:hover:bg-transparent"
+          >
+            −
+          </button>
+          <span className="tabular-nums">
+            {bars.length} {bars.length === 1 ? 'bar' : 'bars'}
+          </span>
+          <button
+            type="button"
+            aria-label="Add bar"
+            title="Lengthen the phrase by a bar, everywhere it is played"
+            onClick={() => setPhraseLength(phrase.id, bars.length + 1)}
+            className="px-1 rounded text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+          >
+            +
+          </button>
+        </span>
+      </div>
+
       {/* Toolbar */}
       <div className="flex items-center gap-2 px-2 py-1 border-b border-gray-800 text-xs text-gray-400">
         <label className="flex items-center gap-1">
@@ -978,14 +902,14 @@ export const ChordTimeline: React.FC = () => {
           aria-label="Automation lanes"
           aria-pressed={showAutomation}
           onClick={() => setShowAutomation(!showAutomation)}
-          title="Show the curves for the selected instrument — its volume, and any plugin parameters"
+          title="Show this phrase's curves — its volume, and any plugin parameters"
           className={`px-1.5 rounded border ${
             showAutomation
               ? 'bg-indigo-600 border-indigo-500 text-white'
               : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
           }`}
         >
-          Volume
+          Automation
         </button>
 
         {/* Which instrument a drop will land on. The lanes show only this one's
@@ -1061,59 +985,9 @@ export const ChordTimeline: React.FC = () => {
           ))}
         </div>
 
-        {/* Bottom-aligned so these line up with the automation lanes across the two
-            columns, both being the last rows of the same stretched flex row. One
-            row per lane, driven by the same list, which is what keeps them in
-            step as parameters are added and removed. */}
-        {showAutomation &&
-          selectedTrack &&
-          automationLanes.map(lane => (
-            <div
-              key={lane.key}
-              style={{ height: `${AUTOMATION_LANE_HEIGHT}px` }}
-              className="flex items-center justify-between gap-1 px-2 text-xs text-gray-400 border-t border-gray-700"
-            >
-              <LaneLabel
-                label={lane.label}
-                onRename={
-                  lane.removable
-                    ? name => renameLane(selectedTrack.id, lane.key, name)
-                    : undefined
-                }
-              />
-
-              {!lane.removable
-                ? // Volume. Only once there is a curve to clear: an always-present
-                  // button that does nothing most of the time reads as broken, and
-                  // dropping the last point by hand is the only other way back to
-                  // the fader.
-                  hasAutomation && (
-                    <button
-                      type="button"
-                      aria-label={`Clear volume curve for ${selectedTrack.name}`}
-                      title="Remove every point and go back to the instrument's fader"
-                      onClick={() => clearVolumeAutomation(selectedTrack.id)}
-                      className="px-1 rounded text-[11px] text-gray-500 hover:text-red-400 hover:bg-gray-700 transition-colors"
-                    >
-                      Clear
-                    </button>
-                  )
-                : // A plugin lane goes away entirely rather than being cleared:
-                  // there is no fader behind it to hand control back to, so an
-                  // empty lane would only be a row that does nothing.
-                  (
-                    <button
-                      type="button"
-                      aria-label={`Remove ${lane.label} automation`}
-                      title="Stop automating this and remove its lane"
-                      onClick={() => removeLane(selectedTrack.id, lane.key)}
-                      className="shrink-0 px-1 rounded text-[11px] text-gray-500 hover:text-red-400 hover:bg-gray-700 transition-colors"
-                    >
-                      ✕
-                    </button>
-                  )}
-            </div>
-          ))}
+        {/* Bottom-aligned so these line up with the curves across the two columns,
+            both being the last rows of the same stretched flex row. */}
+        {showAutomation && <AutomationGutter phrase={phrase} lanes={automationLanes} />}
 
       </div>
 
@@ -1129,67 +1003,33 @@ export const ChordTimeline: React.FC = () => {
         {/* The arrangement's named spans, on the same beat axis as everything below.
             It overhangs the gutter as the ruler does — the gutter is bottom-aligned,
             so neither needs a row of its own over there. */}
-        <SectionBand totalBeats={totalBeats} />
+        {/* The phrase's own ruler, and the stretch of it Play repeats.
+            The same component the arrangement uses, handed this surface's beats: here
+            they are local to a phrase that may be played in several places at once, so
+            the range it draws is the audition's rather than the song's, and the bars
+            its bar menu opens up and takes away are the phrase's own — the section
+            band is the one thing that stays in the arrangement, being a label on the
+            song.
 
-        {/* Play-range ruler. One continuous strip rather than one piece per bar, so
-            pointer positions read as absolute beats with no per-bar arithmetic. */}
-        <div
-          ref={rulerRef}
-          data-testid="timeline-ruler"
-          onPointerDown={e => startRangeDrag(e)}
-          onContextMenu={e => {
-            // The native menu has nothing useful to offer here; ours does.
-            e.preventDefault();
-            const rect = e.currentTarget.getBoundingClientRect();
-            const beat = Math.max(0, (e.clientX - rect.left) / pixelsPerBeat);
-            // A fresh menu always offers one bar, however many the last one inserted.
-            setInsertCount(1);
-            setInsertMenu({
-              barIndex: getBarIndexAtBeat(bars, projectTs, beat),
-              x: e.clientX,
-              y: e.clientY,
-            });
-          }}
-          style={{ width: `${totalBeats * pixelsPerBeat}px` }}
-          title="Drag to set the play range, click to clear it"
-          className="relative h-5 bg-gray-800 border-b border-gray-700 cursor-ew-resize select-none"
-        >
-          {/* Bar ticks, lining up with the bar lines below */}
-          {bars.map((bar, barIndex) => (
-            <div
-              key={bar.id}
-              data-testid="ruler-tick"
-              style={{ left: `${getBarStartBeat(bars, barIndex, projectTs) * pixelsPerBeat}px` }}
-              className="absolute top-0 bottom-0 w-px bg-gray-600"
-            />
-          ))}
-
-          {shownRange && (
-            <div
-              data-testid="loop-range"
-              style={{
-                left: `${shownRange.start * pixelsPerBeat}px`,
-                width: `${(shownRange.end - shownRange.start) * pixelsPerBeat}px`,
-              }}
-              className="absolute top-0 bottom-0 bg-indigo-500/30 border-x-2 border-indigo-400"
-            >
-              {/* Edge handles. Each drags against the opposite edge as its anchor. */}
-              <div
-                role="button"
-                aria-label="Loop start"
-                onPointerDown={e => startRangeDrag(e, shownRange.end)}
-                style={{ width: `${RANGE_HANDLE_PX}px`, left: `${-RANGE_HANDLE_PX / 2}px` }}
-                className="absolute top-0 bottom-0 cursor-ew-resize"
-              />
-              <div
-                role="button"
-                aria-label="Loop end"
-                onPointerDown={e => startRangeDrag(e, shownRange.start)}
-                style={{ width: `${RANGE_HANDLE_PX}px`, right: `${-RANGE_HANDLE_PX / 2}px` }}
-                className="absolute top-0 bottom-0 cursor-ew-resize"
-              />
-            </div>
-          )}
+            The wrapper carries the ref and the width because the paste anchor measures
+            the pointer against the ruler's own box. */}
+        <div ref={rulerRef} style={{ width: `${totalBeats * pixelsPerBeat}px` }}>
+          <PlayRangeRuler
+            bars={bars}
+            timeSignature={projectTs}
+            range={phraseLoop}
+            onRangeChange={setPhraseLoop}
+            onInsertBars={(barIndex, count) => insertPhraseBarsAt(phrase.id, barIndex, count)}
+            onRemoveBars={(barIndex, count) => removePhraseBarsAt(phrase.id, barIndex, count)}
+            removeBlockedReason={(barIndex, count) =>
+              // The one run a phrase will not give up, and the same rule the header's
+              // − follows: a phrase with no bars covers nothing, so every placement of
+              // it would be dropped as zero-length.
+              Math.min(Math.max(1, Math.trunc(count)), bars.length - barIndex) >= bars.length
+                ? 'A phrase is at least one bar'
+                : null
+            }
+          />
         </div>
 
         <div className="flex items-stretch">
@@ -1222,20 +1062,19 @@ export const ChordTimeline: React.FC = () => {
                   isSelectedBar ? 'bg-indigo-900/50' : 'bg-gray-800'
                 }`}
               >
+                {/* The metre is shown but not editable here. It belongs to the
+                    *song's* bar, which every instrument shares, and a phrase may be
+                    played over several bars in several metres — so there is no one bar
+                    a change made in this view could honestly mean. It is edited in the
+                    arrangement, where each bar is itself. */}
                 <div className="flex items-center justify-between gap-1">
                   <span className="font-medium text-gray-200">Bar {barIndex + 1}</span>
-                  <select
-                    aria-label={`Time signature for bar ${barIndex + 1}`}
-                    value={formatTs(bar.timeSignature ?? projectTs)}
-                    onChange={e => setBarTimeSignature(bar.id, parseTs(e.target.value))}
-                    className="bg-gray-700 border border-gray-600 rounded text-gray-200 text-[10px] px-1 focus:outline-none focus:border-indigo-500"
+                  <span
+                    data-testid={`bar-time-signature-${barIndex + 1}`}
+                    className="text-gray-400 text-[10px] px-1"
                   >
-                    {TIME_SIGNATURES.map(ts => (
-                      <option key={formatTs(ts)} value={formatTs(ts)}>
-                        {formatTs(ts)}
-                      </option>
-                    ))}
-                  </select>
+                    {formatTs(bar.timeSignature ?? projectTs)}
+                  </span>
                 </div>
                 {/* Two bars of the same width may be in different metres, so say how
                     this one counts: 3/4 is three quarters, 6/8 two beats of three. */}
@@ -1360,91 +1199,27 @@ export const ChordTimeline: React.FC = () => {
         })}
         </div>
 
-        {/* The curves for the instrument being edited — its volume, then one lane
-            per automated plugin parameter. Inside the scroll container and after
-            the bar row, so they ride the same beat axis, zoom and scroll offset as
-            everything above them with no plumbing of their own — and each one
-            continuous, so a ramp crosses a bar line in one piece. */}
-        {showAutomation &&
-          selectedTrack &&
-          automationLanes.map(lane => (
-            <AutomationLane
-              key={lane.key}
-              laneKey={lane.key}
-              label={lane.label}
-              points={lane.points}
-              flatLevel={lane.flatLevel}
-              readPoints={lane.readPoints}
-              onAdd={lane.onAdd}
-              onMove={lane.onMove}
-              onRemove={lane.onRemove}
-              bars={bars}
-              projectTs={projectTs}
-              totalBeats={totalBeats}
-            />
-          ))}
+        {/* The phrase's curves, inside the scroll container and after the lanes, so
+            they ride the same beat axis, zoom and scroll offset as everything above
+            them with no plumbing of their own — and each one continuous, so a ramp
+            crosses a bar line in one piece. */}
+        {showAutomation && (
+          <AutomationLanes
+            lanes={automationLanes}
+            bars={bars}
+            projectTs={projectTs}
+            totalBeats={totalBeats}
+          />
+        )}
+
         </div>
       </div>
       </div>
 
-      {/* What adds a lane, in a strip of its own under the whole timeline.
-          Not in the gutter: that column is only as wide as the piano roll's key
-          column, and anything but a row of the same height as a lane there both
-          cramps itself and pushes the labels out of step with the curves they
-          name. Full width, so the learn steps read across.
+      {/* Full width under both columns: the gutter is only as wide as the piano
+          roll's key column, and the learn steps have to read across. */}
+      {showAutomation && selectedTrack && <CcLaneStrip phrase={phrase} track={selectedTrack} />}
 
-          Only for a plugin that answers `IMidiMapping` at all: one that does not
-          cannot be sent a controller, so there is no learn to offer — and a
-          browser build has no plugins. */}
-      {showAutomation && selectedTrack && supportedCc.length > 0 && (
-        <div className="flex items-center px-2 py-1 border-t border-gray-800">
-          <LearnCcPanel
-            trackId={selectedTrack.id}
-            supported={supportedCc}
-            suggested={suggestedCc}
-            onLearned={controller =>
-              addLane(selectedTrack.id, { kind: 'cc', controller }, `CC ${controller}`)
-            }
-          />
-        </div>
-      )}
-
-      {/* Where right-clicking a ruler tick inserts empty bars, before the
-          right-clicked bar. */}
-      {insertMenu && (
-        <div
-          data-testid="insert-menu"
-          style={{ position: 'fixed', left: insertMenu.x, top: insertMenu.y, zIndex: 50 }}
-          className="bg-gray-800 border border-gray-600 rounded p-2 flex items-center gap-2 shadow-lg"
-        >
-          <input
-            data-testid="insert-count"
-            type="number"
-            min={1}
-            value={insertCount}
-            onChange={e => setInsertCount(Number(e.target.value) || 1)}
-            className="w-14 bg-gray-700 border border-gray-600 rounded text-gray-200 px-1 focus:outline-none focus:border-indigo-500"
-            aria-label="Bars to insert"
-          />
-          <button
-            data-testid="insert-bars"
-            onClick={() => {
-              insertBar(insertMenu.barIndex, insertCount);
-              setInsertMenu(null);
-            }}
-            className="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-gray-100 transition-colors"
-          >
-            Insert
-          </button>
-          <button
-            data-testid="insert-cancel"
-            onClick={() => setInsertMenu(null)}
-            className="px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
-          >
-            Cancel
-          </button>
-        </div>
-      )}
     </div>
   );
 };

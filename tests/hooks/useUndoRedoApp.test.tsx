@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createUndoRedoMiddleware } from '@/engine/undoRedo';
 import { projectStore, setRecordingGate } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
+import { editableBars, openTestPhrase } from '../helpers/phrases';
+import { PHRASE_TRACK_KEY } from '@/engine/phrases';
 import { barChords } from '@/engine/timeline';
 import type { Project } from '@/types/music';
 
@@ -14,6 +16,10 @@ function mountProject() {
   for (let i = 0; i < 4; i++) state().addBar();
   // Select first track
   selectionStore.getState().selectTrack(state().project!.tracks[0].id);
+  // …and open a one-bar phrase on it, since that is where an edit now lands. One bar
+  // rather than four so that the bar-grid tests below still have bars free of any
+  // placement to remove.
+  openTestPhrase(state().project!.tracks[0].id, 1);
 }
 
 describe('useUndoRedo — integration', () => {
@@ -43,7 +49,7 @@ describe('useUndoRedo — integration', () => {
   // ------------------------------------------------------------------
   it('inserting a segment creates a history entry', () => {
     const project = state().project!;
-    const bar = project.bars[0];
+    const bar = editableBars()[0];
     const trackId = project.tracks[0].id;
     const segment = {
       id: 'seg-1',
@@ -67,7 +73,7 @@ describe('useUndoRedo — integration', () => {
   // ------------------------------------------------------------------
   it('undo returns the pre-insert state', () => {
     const project = state().project!;
-    const bar = project.bars[0];
+    const bar = editableBars()[0];
     const trackId = project.tracks[0].id;
     const segment = {
       id: 'seg-1',
@@ -95,7 +101,7 @@ describe('useUndoRedo — integration', () => {
   // ------------------------------------------------------------------
   it('redo restores the insert', () => {
     const project = state().project!;
-    const bar = project.bars[0];
+    const bar = editableBars()[0];
     const trackId = project.tracks[0].id;
     const segment = {
       id: 'seg-1',
@@ -121,7 +127,7 @@ describe('useUndoRedo — integration', () => {
   // ------------------------------------------------------------------
   it('nested undo: undo → edit → redo is invalid', () => {
     const project = state().project!;
-    const bar = project.bars[0];
+    const bar = editableBars()[0];
     const trackId = project.tracks[0].id;
     const segment = {
       id: 'seg-1',
@@ -188,7 +194,7 @@ describe('useUndoRedo — integration', () => {
   // ------------------------------------------------------------------
   it('switching projects clears history', () => {
     const project = state().project!;
-    const bar = project.bars[0];
+    const bar = editableBars()[0];
     const trackId = project.tracks[0].id;
     const segment = {
       id: 'seg-1',
@@ -366,7 +372,7 @@ describe('useUndoRedo — integration', () => {
 
     it('leaves redo intact after an erase, and drops it after a committed pass', () => {
       const trackId = state().project!.tracks[0].id;
-      projectStore.getState().insertSegment(state().project!.bars[0].id, 0, {
+      projectStore.getState().insertSegment(editableBars()[0].id, 0, {
         id: 'pre-existing',
         kind: 'chord',
         duration: 1,

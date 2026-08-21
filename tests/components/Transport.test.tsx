@@ -22,6 +22,7 @@ describe('Transport', () => {
     loopEnabled: false,
     loopRangeLabel: null,
     isRecordArmed: false,
+    canRecord: true,
     recordQuantize: true,
     getSongTime: () => 0,
     onRecordToggle: mockOnRecordToggle,
@@ -166,6 +167,15 @@ describe('Transport', () => {
 
       render(<Transport {...defaultProps} isRecordArmed isPlaying />);
       expect(record().className).toContain('animate-pulse');
+    });
+
+    // There is nowhere for a take to go from the arrangement view, so the button is
+    // disabled with the way out on it rather than quietly doing nothing.
+    it('cannot be armed with no phrase open, and says why', () => {
+      render(<Transport {...defaultProps} canRecord={false} />);
+
+      expect(record()).toBeDisabled();
+      expect(record()).toHaveAttribute('title', 'Open a phrase to record into');
     });
 
     it('toggles the arm on click', () => {

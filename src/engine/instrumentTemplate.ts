@@ -10,8 +10,8 @@
  * A template is `project.tracks` with everything song-specific stripped out. What stays
  * is what the instrument *is*: its name, its sound ref, its mix settings, and, for a
  * plugin, the plugin's own state blob. What goes is what belongs to one song or one
- * session: the track id, `volumeAutomation` and `parameterAutomation` (both are
- * curves positioned in the beats of a particular piece), `muted`/`solo`/`visible`,
+ * session: the track id, `volumeAutomation` and `parameterAutomation` (both derived
+ * from the phrases of a particular piece), `muted`/`solo`/`visible`,
  * and every bar of content.
  *
  * The reader is tolerant in the same way `fileIO.ts`'s is — an entry it cannot make

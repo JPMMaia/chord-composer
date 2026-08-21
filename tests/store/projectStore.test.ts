@@ -5,6 +5,8 @@ import { barChords, barNotes } from '@/engine/timeline';
 import { laneKey } from '@/engine/parameterAutomation';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
 import type { TemplateInstrument } from '@/engine/instrumentTemplate';
+import { addEditableBar, editKey, editableBars, openTestPhrase } from '../helpers/phrases';
+import { PHRASE_TRACK_KEY } from '@/engine/phrases';
 
 /**
  * The instrument these tests write to: the Piano every project is created with.
@@ -30,7 +32,7 @@ function chordSegment(overrides: Partial<ChordSegment> = {}): ChordSegment {
 
 /** Beats occupied in a bar, i.e. where the next block butts up against the last. */
 function endOf(bar: Bar): number {
-  return barChords(bar, trackId()).reduce((max, c) => Math.max(max, (c.startBeat ?? 0) + c.duration), 0);
+  return barChords(bar, editKey(trackId())).reduce((max, c) => Math.max(max, (c.startBeat ?? 0) + c.duration), 0);
 }
 
 /**
@@ -42,7 +44,7 @@ function appendSegment(segment: ChordSegment): void {
   const state = () => projectStore.getState();
   const project = state().project!;
 
-  for (const bar of project.bars) {
+  for (const bar of editableBars()) {
     const capacity = (bar.timeSignature ?? project.timeSignature).beatsPerMeasure;
     if (endOf(bar) + segment.duration <= capacity) {
       state().insertSegment(bar.id, endOf(bar), segment, trackId());
@@ -50,19 +52,19 @@ function appendSegment(segment: ChordSegment): void {
     }
   }
 
-  state().addBar();
-  const bars = state().project!.bars;
+  addEditableBar();
+  const bars = editableBars();
   state().insertSegment(bars[bars.length - 1].id, 0, segment, trackId());
 }
 
 /** The bar holding a given segment, or undefined. */
 function barOf(segmentId: string): Bar | undefined {
-  return projectStore.getState().project!.bars.find(b => barChords(b, trackId()).some(c => c.id === segmentId));
+  return editableBars().find(b => barChords(b, editKey(trackId())).some(c => c.id === segmentId));
 }
 
 /** `id@start` for every segment in a bar, so placement assertions read at a glance. */
 function layout(bar: Bar): string[] {
-  return barChords(bar, trackId()).map(c => `${c.id}@${c.startBeat}`);
+  return barChords(bar, editKey(trackId())).map(c => `${c.id}@${c.startBeat}`);
 }
 
 describe('projectStore', () => {
@@ -101,7 +103,7 @@ describe('projectStore', () => {
 
     it('creates an empty bars array', () => {
       projectStore.getState().createProject();
-      expect(projectStore.getState().project!.bars).toEqual([]);
+      expect(editableBars()).toEqual([]);
     });
 
     // A project with no instruments has nowhere to put a chord, so one is created
@@ -251,63 +253,63 @@ describe('projectStore', () => {
     });
 
     it('adds an empty bar', () => {
-      projectStore.getState().addBar();
-      const bars = projectStore.getState().project!.bars;
+      addEditableBar();
+      const bars = editableBars();
       expect(bars.length).toBe(1);
       expect(bars[0].content).toEqual({});
     });
 
     it('increments barIndex sequentially', () => {
-      projectStore.getState().addBar();
-      projectStore.getState().addBar();
-      projectStore.getState().addBar();
-      const bars = projectStore.getState().project!.bars;
+      addEditableBar();
+      addEditableBar();
+      addEditableBar();
+      const bars = editableBars();
       expect(bars[0].barIndex).toBe(0);
       expect(bars[1].barIndex).toBe(1);
       expect(bars[2].barIndex).toBe(2);
     });
 
     it('generates a unique bar id', () => {
-      projectStore.getState().addBar();
-      projectStore.getState().addBar();
-      const bars = projectStore.getState().project!.bars;
+      addEditableBar();
+      addEditableBar();
+      const bars = editableBars();
       expect(bars[0].id).not.toBe(bars[1].id);
     });
 
     it('creates empty chords and notes arrays', () => {
-      projectStore.getState().addBar();
-      const bar = projectStore.getState().project!.bars[0];
-      expect(barChords(bar, trackId())).toEqual([]);
-      expect(barNotes(bar, trackId())).toEqual([]);
+      addEditableBar();
+      const bar = editableBars()[0];
+      expect(barChords(bar, editKey(trackId()))).toEqual([]);
+      expect(barNotes(bar, editKey(trackId()))).toEqual([]);
     });
 
     it('creates multiple bars correctly', () => {
       for (let i = 0; i < 8; i++) {
-        projectStore.getState().addBar();
+        addEditableBar();
       }
-      expect(projectStore.getState().project!.bars.length).toBe(8);
+      expect(editableBars().length).toBe(8);
     });
   });
 
   describe('removeBar', () => {
     beforeEach(() => {
       projectStore.getState().createProject();
-      projectStore.getState().addBar();
-      projectStore.getState().addBar();
-      projectStore.getState().addBar();
+      addEditableBar();
+      addEditableBar();
+      addEditableBar();
     });
 
     it('removes a bar by id', () => {
-      const barId = projectStore.getState().project!.bars[1].id;
+      const barId = editableBars()[1].id;
       projectStore.getState().removeBar(barId);
-      expect(projectStore.getState().project!.bars.length).toBe(2);
+      expect(editableBars().length).toBe(2);
     });
 
     it('removes the correct bar', () => {
-      const middleBar = projectStore.getState().project!.bars[1];
+      const middleBar = editableBars()[1];
       projectStore.getState().removeBar(middleBar.id);
-      const bars = projectStore.getState().project!.bars;
-      expect(bars[0].id).toBe(projectStore.getState().project!.bars[0].id);
+      const bars = editableBars();
+      expect(bars[0].id).toBe(editableBars()[0].id);
       expect(bars[1].id).not.toBe(middleBar.id);
     });
 
@@ -316,17 +318,17 @@ describe('projectStore', () => {
     });
 
     it('allows removing the last bar', () => {
-      const lastBar = projectStore.getState().project!.bars[2];
+      const lastBar = editableBars()[2];
       projectStore.getState().removeBar(lastBar.id);
-      expect(projectStore.getState().project!.bars.length).toBe(2);
+      expect(editableBars().length).toBe(2);
     });
 
     it('allows removing all bars', () => {
-      const bars = [...projectStore.getState().project!.bars];
+      const bars = [...editableBars()];
       for (const bar of bars) {
         projectStore.getState().removeBar(bar.id);
       }
-      expect(projectStore.getState().project!.bars.length).toBe(0);
+      expect(editableBars().length).toBe(0);
     });
   });
 
@@ -335,17 +337,17 @@ describe('projectStore', () => {
 
     beforeEach(() => {
       state().createProject();
-      state().addBar();
-      state().addBar();
-      state().addBar();
+      addEditableBar();
+      addEditableBar();
+      addEditableBar();
     });
 
     it('inserts a fresh empty bar at the front and shifts the originals', () => {
-      const originalIds = state().project!.bars.map(b => b.id);
+      const originalIds = editableBars().map(b => b.id);
 
       state().insertBar(0, 1);
 
-      const bars = state().project!.bars;
+      const bars = editableBars();
       expect(bars).toHaveLength(4);
       expect(bars[0].content).toEqual({});
       expect(bars[0].id).not.toBe(originalIds[0]);
@@ -354,11 +356,11 @@ describe('projectStore', () => {
     });
 
     it('inserts a bar in the middle and re-indexes the bars after it', () => {
-      const ids = state().project!.bars.map(b => b.id);
+      const ids = editableBars().map(b => b.id);
 
       state().insertBar(2, 1);
 
-      const bars = state().project!.bars;
+      const bars = editableBars();
       expect(bars).toHaveLength(4);
       expect(bars.map(b => b.id)).toEqual([ids[0], ids[1], bars[2].id, ids[2]]);
       expect(bars.map(b => b.barIndex)).toEqual([0, 1, 2, 3]);
@@ -366,11 +368,11 @@ describe('projectStore', () => {
     });
 
     it('appends a bar at the end when the index is at the end', () => {
-      const ids = state().project!.bars.map(b => b.id);
+      const ids = editableBars().map(b => b.id);
 
       state().insertBar(3, 1);
 
-      const bars = state().project!.bars;
+      const bars = editableBars();
       expect(bars).toHaveLength(4);
       expect(bars.map(b => b.id)).toEqual([...ids, bars[3].id]);
       expect(bars[3].barIndex).toBe(3);
@@ -379,59 +381,133 @@ describe('projectStore', () => {
     it('inserts several bars at once, re-indexing the whole list', () => {
       state().insertBar(1, 2);
 
-      const bars = state().project!.bars;
+      const bars = editableBars();
       expect(bars).toHaveLength(5);
       expect(bars.map(b => b.barIndex)).toEqual([0, 1, 2, 3, 4]);
     });
 
     it('preserves the existing bars\' content while shifting their indexes', () => {
-      const barId = state().project!.bars[1].id;
-      state().insertSegment(barId, 0, chordSegment({ id: 'a' }), trackId());
-      const before = state().project!.bars[1];
-      expect(layout(before)).toEqual(['a@0']);
+      // Placed at song bar 1, so the block it holds sounds there.
+      const clipId = state().addPhraseClip(trackId(), 1, 1)!;
+      state().openClip(clipId);
+      state().insertSegment(editableBars()[0].id, 0, chordSegment({ id: 'a' }), trackId());
+      expect(barChords(state().project!.bars[1], trackId())).toHaveLength(1);
 
       state().insertBar(0, 1);
 
-      const moved = state().project!.bars.find(b => b.id === barId)!;
-      expect(moved.barIndex).toBe(2);
-      expect(layout(moved)).toEqual(['a@0']);
+      // The placement moved along with the bar it was written against, so the music
+      // is one bar later and nothing was lost on the way.
+      expect(state().project!.clips[0].startBar).toBe(2);
+      expect(barChords(state().project!.bars[1], trackId())).toHaveLength(0);
+      expect(barChords(state().project!.bars[2], trackId())).toHaveLength(1);
+      expect(barChords(state().project!.bars[2], trackId())[0].startBeat).toBe(0);
+    });
+  });
+
+  describe('removeBars', () => {
+    const state = () => projectStore.getState();
+
+    beforeEach(() => {
+      state().createProject();
+      addEditableBar();
+      addEditableBar();
+      addEditableBar();
+    });
+
+    it('takes the named bar and the ones after it, re-indexing the rest', () => {
+      addEditableBar();
+      const ids = editableBars().map(b => b.id);
+
+      state().removeBars(1, 2);
+
+      const bars = editableBars();
+      expect(bars.map(b => b.id)).toEqual([ids[0], ids[3]]);
+      expect(bars.map(b => b.barIndex)).toEqual([0, 1]);
+    });
+
+    it('closes the placements after the run up behind it', () => {
+      for (let i = 0; i < 8; i++) addEditableBar();
+      state().addPhraseClip(trackId(), 8, 2);
+
+      state().removeBars(1, 2);
+
+      expect(state().project!.clips[0].startBar).toBe(6);
+    });
+
+    // A placement is as long as its phrase and cannot be trimmed, so the grid would
+    // grow straight back underneath it on the next compile.
+    it('refuses the whole run when anything is playing over any of it', () => {
+      for (let i = 0; i < 8; i++) addEditableBar();
+      state().addPhraseClip(trackId(), 3, 2);
+      const before = state().project;
+
+      state().removeBars(2, 3);
+
+      expect(state().project).toBe(before);
+    });
+
+    it('refuses a run that would take every bar', () => {
+      const before = state().project;
+
+      state().removeBars(0, 4);
+
+      expect(state().project).toBe(before);
+    });
+
+    it('does nothing for a non-positive count or an index past the end', () => {
+      const before = state().project;
+
+      state().removeBars(1, 0);
+      state().removeBars(1, -2);
+      state().removeBars(99, 1);
+
+      expect(state().project).toBe(before);
     });
   });
 
   describe('setBarTimeSignature', () => {
     beforeEach(() => {
       projectStore.getState().createProject();
-      projectStore.getState().addBar();
+      addEditableBar();
     });
 
     it('sets a per-bar time signature', () => {
-      const barId = projectStore.getState().project!.bars[0].id;
+      const barId = editableBars()[0].id;
       projectStore.getState().setBarTimeSignature(barId, { beatsPerMeasure: 3, beatUnit: 4 });
-      expect(projectStore.getState().project!.bars[0].timeSignature).toEqual({
+      expect(editableBars()[0].timeSignature).toEqual({
         beatsPerMeasure: 3,
         beatUnit: 4,
       });
     });
 
     it('leaves other bars on the project time signature', () => {
-      projectStore.getState().addBar();
-      const barId = projectStore.getState().project!.bars[0].id;
+      addEditableBar();
+      const barId = editableBars()[0].id;
       projectStore.getState().setBarTimeSignature(barId, { beatsPerMeasure: 3, beatUnit: 4 });
-      expect(projectStore.getState().project!.bars[1].timeSignature).toBeUndefined();
+      expect(editableBars()[1].timeSignature).toBeUndefined();
     });
 
-    it('reflows segments that no longer fit the shortened bar', () => {
+    it('leaves the music alone when a bar it plays over is shortened', () => {
+      const clipId = projectStore.getState().addPhraseClip(trackId(), 0, 1)!;
+      projectStore.getState().openClip(clipId);
       for (let i = 0; i < 4; i++) appendSegment(chordSegment());
       const barId = projectStore.getState().project!.bars[0].id;
+
       projectStore.getState().setBarTimeSignature(barId, { beatsPerMeasure: 3, beatUnit: 4 });
 
-      const bars = projectStore.getState().project!.bars;
-      expect(barChords(bars[0], trackId()).length).toBe(3);
-      expect(barChords(bars[1], trackId()).length).toBe(1);
+      // The song lost a beat, but the phrase did not lose a block. A phrase may be
+      // playing over several bars in several metres, so no one of them gets to rewrite
+      // it; the fourth block simply sounds past the bar line, as a held chord always
+      // could.
+      expect(projectStore.getState().project!.bars[0].timeSignature).toEqual({
+        beatsPerMeasure: 3,
+        beatUnit: 4,
+      });
+      expect(barChords(editableBars()[0], PHRASE_TRACK_KEY)).toHaveLength(4);
     });
 
     it('rejects an invalid time signature', () => {
-      const barId = projectStore.getState().project!.bars[0].id;
+      const barId = editableBars()[0].id;
       expect(() =>
         projectStore.getState().setBarTimeSignature(barId, { beatsPerMeasure: 0, beatUnit: 4 })
       ).toThrow('Invalid time signature');
@@ -447,33 +523,34 @@ describe('projectStore', () => {
   describe('insertSegment', () => {
     beforeEach(() => {
       projectStore.getState().createProject();
-      projectStore.getState().addBar();
+      addEditableBar();
+      openTestPhrase(trackId(), editableBars().length);
     });
 
-    const firstBarId = () => projectStore.getState().project!.bars[0].id;
+    const firstBarId = () => editableBars()[0].id;
 
     it('inserts a segment at the beat it was dropped on', () => {
       projectStore.getState().insertSegment(firstBarId(), 2, chordSegment({ id: 'a' }), trackId());
-      expect(layout(projectStore.getState().project!.bars[0])).toEqual(['a@2']);
+      expect(layout(editableBars()[0])).toEqual(['a@2']);
     });
 
     it('leaves the space before a segment as silence', () => {
       projectStore.getState().insertSegment(firstBarId(), 2, chordSegment({ id: 'a' }), trackId());
-      const notes = barNotes(projectStore.getState().project!.bars[0], trackId());
+      const notes = barNotes(editableBars()[0], editKey(trackId()));
       expect(notes.every(n => n.startBeat === 2)).toBe(true);
     });
 
     it('snaps nothing itself — it places exactly where it is told', () => {
       // Snapping is the caller's job, so an unsnapped beat survives intact.
       projectStore.getState().insertSegment(firstBarId(), 1.5, chordSegment({ id: 'a' }), trackId());
-      expect(barChords(projectStore.getState().project!.bars[0], trackId())[0].startBeat).toBe(1.5);
+      expect(barChords(editableBars()[0], editKey(trackId()))[0].startBeat).toBe(1.5);
     });
 
     it('lets a dropped block hang over the bar line', () => {
       projectStore
         .getState()
         .insertSegment(firstBarId(), 3.5, chordSegment({ id: 'wide', duration: 2 }), trackId());
-      expect(layout(projectStore.getState().project!.bars[0])).toEqual(['wide@3.5']);
+      expect(layout(editableBars()[0])).toEqual(['wide@3.5']);
     });
 
     it('holds a dropped block’s onset inside the bar it was dropped on', () => {
@@ -482,20 +559,20 @@ describe('projectStore', () => {
         .insertSegment(firstBarId(), 9, chordSegment({ id: 'late' }), trackId());
       // Four beats in 4/4, so the last beat a block can begin on is one
       // thirty-second short of the bar line.
-      expect(layout(projectStore.getState().project!.bars[0])).toEqual(['late@3.875']);
+      expect(layout(editableBars()[0])).toEqual(['late@3.875']);
     });
 
     it('pushes the block it lands on to the right', () => {
       appendSegment(chordSegment({ id: 'a' }));
       appendSegment(chordSegment({ id: 'b' }));
       projectStore.getState().insertSegment(firstBarId(), 0, chordSegment({ id: 'new' }), trackId());
-      expect(layout(projectStore.getState().project!.bars[0])).toEqual(['new@0', 'a@1', 'b@2']);
+      expect(layout(editableBars()[0])).toEqual(['new@0', 'a@1', 'b@2']);
     });
 
     it('spills the last block into the next bar when the ripple fills the bar', () => {
       for (let i = 0; i < 4; i++) appendSegment(chordSegment({ id: `s${i}` }));
       projectStore.getState().insertSegment(firstBarId(), 0, chordSegment({ id: 'new' }), trackId());
-      const bars = projectStore.getState().project!.bars;
+      const bars = editableBars();
       expect(bars).toHaveLength(2);
       expect(layout(bars[0])).toEqual(['new@0', 's0@1', 's1@2', 's2@3']);
       expect(layout(bars[1])).toEqual(['s3@0']);
@@ -505,7 +582,7 @@ describe('projectStore', () => {
       projectStore
         .getState()
         .insertSegment(firstBarId(), 0, chordSegment({ root: 'C', quality: 'major' }), trackId());
-      const notes = barNotes(projectStore.getState().project!.bars[0], trackId());
+      const notes = barNotes(editableBars()[0], editKey(trackId()));
       expect(notes.map(n => n.pitch)).toEqual([60, 64, 67]);
     });
 
@@ -513,14 +590,14 @@ describe('projectStore', () => {
       projectStore
         .getState()
         .insertSegment(firstBarId(), 0, chordSegment({ root: 'C', quality: 'maj7' }), trackId());
-      expect(barNotes(projectStore.getState().project!.bars[0], trackId()).length).toBe(4);
+      expect(barNotes(editableBars()[0], editKey(trackId())).length).toBe(4);
     });
 
     it('generates exactly one note for a note segment', () => {
       projectStore
         .getState()
         .insertSegment(firstBarId(), 0, chordSegment({ kind: 'note', pitch: 62 }), trackId());
-      const notes = barNotes(projectStore.getState().project!.bars[0], trackId());
+      const notes = barNotes(editableBars()[0], editKey(trackId()));
       expect(notes.length).toBe(1);
       expect(notes[0].pitch).toBe(62);
     });
@@ -530,14 +607,14 @@ describe('projectStore', () => {
         appendSegment(chordSegment({ id: `s${i}`, root: 'C', quality: 'major' }));
       }
       projectStore.getState().insertSegment(firstBarId(), 0, chordSegment({ id: 'new' }), trackId());
-      const bars = projectStore.getState().project!.bars;
-      expect(barNotes(bars[1], trackId()).map(n => n.pitch)).toEqual([60, 64, 67]);
-      expect(barNotes(bars[1], trackId())[0].startBeat).toBe(0);
+      const bars = editableBars();
+      expect(barNotes(bars[1], editKey(trackId())).map(n => n.pitch)).toEqual([60, 64, 67]);
+      expect(barNotes(bars[1], editKey(trackId()))[0].startBeat).toBe(0);
     });
 
     it('ignores an unknown bar id', () => {
       projectStore.getState().insertSegment('nope', 0, chordSegment({ id: 'a' }), trackId());
-      expect(barChords(projectStore.getState().project!.bars[0], trackId())).toEqual([]);
+      expect(barChords(editableBars()[0], editKey(trackId()))).toEqual([]);
     });
   });
 
@@ -546,13 +623,14 @@ describe('projectStore', () => {
 
     beforeEach(() => {
       state().createProject();
+      openTestPhrase(trackId(), editableBars().length);
       // Four bars, so an absolute beat can name something other than bar 1.
-      for (let i = 0; i < 3; i++) state().addBar();
+      for (let i = 0; i < 3; i++) addEditableBar();
     });
 
     /** `id@start+duration` for one bar, since a take's length is the point here. */
     const spans = (barIndex: number): string[] =>
-      barChords(state().project!.bars[barIndex], trackId()).map(
+      barChords(editableBars()[barIndex], editKey(trackId())).map(
         c => `${c.id}@${c.startBeat}+${c.duration}`
       );
 
@@ -562,8 +640,8 @@ describe('projectStore', () => {
     });
 
     it('overwrites what it lands on instead of rippling it', () => {
-      state().insertSegment(state().project!.bars[0].id, 0, chordSegment({ id: 'old' }), trackId());
-      state().insertSegment(state().project!.bars[0].id, 2, chordSegment({ id: 'keep' }), trackId());
+      state().insertSegment(editableBars()[0].id, 0, chordSegment({ id: 'old' }), trackId());
+      state().insertSegment(editableBars()[0].id, 2, chordSegment({ id: 'keep' }), trackId());
 
       state().recordSegment(trackId(), 0, chordSegment({ id: 'take' }));
 
@@ -573,7 +651,7 @@ describe('projectStore', () => {
 
     it('trims a block it only partly covers', () => {
       state()
-        .insertSegment(state().project!.bars[0].id, 0, chordSegment({ id: 'long', duration: 4 }), trackId());
+        .insertSegment(editableBars()[0].id, 0, chordSegment({ id: 'long', duration: 4 }), trackId());
 
       state().recordSegment(trackId(), 2, chordSegment({ id: 'take', duration: 2 }));
 
@@ -595,7 +673,7 @@ describe('projectStore', () => {
     });
 
     it('clears what a growing take reaches over', () => {
-      state().insertSegment(state().project!.bars[1].id, 0, chordSegment({ id: 'next' }), trackId());
+      state().insertSegment(editableBars()[1].id, 0, chordSegment({ id: 'next' }), trackId());
       const take = chordSegment({ id: 'take', duration: 0.25 });
       state().recordSegment(trackId(), 3, take);
       state().recordSegment(trackId(), 3, { ...take, duration: 3 });
@@ -607,30 +685,35 @@ describe('projectStore', () => {
     it('leaves another instrument alone', () => {
       state().addTrack('Strings');
       const other = state().project!.tracks[1].id;
-      state().insertSegment(state().project!.bars[0].id, 0, chordSegment({ id: 'theirs' }), other);
+      const mine = projectStore.getState().editingPhraseId!;
+      // The other instrument gets a phrase of its own, since a take can only ever
+      // land in the one that is open.
+      openTestPhrase(other, 1);
+      state().insertSegment(editableBars()[0].id, 0, chordSegment({ id: 'theirs' }), other);
+      state().openPhrase(mine);
 
       state().recordSegment(trackId(), 0, chordSegment({ id: 'take' }));
 
-      expect(barChords(state().project!.bars[0], other).map(c => c.id)).toEqual(['theirs']);
+      expect(barChords(state().project!.bars[0], other)).toHaveLength(1);
     });
 
     it('ignores an unknown instrument', () => {
       state().recordSegment('nope', 0, chordSegment({ id: 'a' }));
-      expect(barChords(state().project!.bars[0], trackId())).toEqual([]);
+      expect(barChords(editableBars()[0], editKey(trackId()))).toEqual([]);
     });
 
     it('ignores a beat past the end of the song', () => {
-      const before = state().project!.bars.length;
+      const before = editableBars().length;
       state().recordSegment(trackId(), 999, chordSegment({ id: 'a' }));
-      expect(state().project!.bars.length).toBe(before);
-      expect(state().project!.bars.every(b => barChords(b, trackId()).length === 0)).toBe(true);
+      expect(editableBars().length).toBe(before);
+      expect(editableBars().every(b => barChords(b, editKey(trackId())).length === 0)).toBe(true);
     });
 
     // Recording a chord is several simultaneous blocks, one per key. A lane is
     // what gives each of them somewhere to be.
     describe('sub-lanes', () => {
       const laneSpans = (barIndex: number) =>
-        barChords(state().project!.bars[barIndex], trackId()).map(
+        barChords(editableBars()[barIndex], editKey(trackId())).map(
           c => `${c.id}@${c.startBeat}/${c.lane ?? 0}`
         );
 
@@ -680,7 +763,7 @@ describe('projectStore', () => {
         state().setTrackLaneCount(trackId(), 1);
 
         expect(state().project!.tracks[0].laneCount).toBe(3);
-        expect(barChords(state().project!.bars[0], trackId())).toHaveLength(1);
+        expect(barChords(editableBars()[0], editKey(trackId()))).toHaveLength(1);
       });
 
       it('never goes below one lane, and ignores nonsense', () => {
@@ -699,21 +782,22 @@ describe('projectStore', () => {
   describe('removeSegment', () => {
     beforeEach(() => {
       projectStore.getState().createProject();
-      projectStore.getState().addBar();
+      addEditableBar();
+      openTestPhrase(trackId(), editableBars().length);
     });
 
     it('removes a segment by id', () => {
       appendSegment(chordSegment({ id: 'a' }));
       appendSegment(chordSegment({ id: 'b' }));
       projectStore.getState().removeSegment('a');
-      expect(barChords(projectStore.getState().project!.bars[0], trackId()).map(c => c.id)).toEqual(['b']);
+      expect(barChords(editableBars()[0], editKey(trackId())).map(c => c.id)).toEqual(['b']);
     });
 
     it('empties the generated notes when the last segment goes', () => {
       appendSegment(chordSegment({ id: 'a' }));
-      expect(barNotes(projectStore.getState().project!.bars[0], trackId()).length).toBe(3);
+      expect(barNotes(editableBars()[0], editKey(trackId())).length).toBe(3);
       projectStore.getState().removeSegment('a');
-      expect(barNotes(projectStore.getState().project!.bars[0], trackId())).toEqual([]);
+      expect(barNotes(editableBars()[0], editKey(trackId()))).toEqual([]);
     });
 
     it('leaves the hole where a segment was, rather than closing it up', () => {
@@ -721,20 +805,21 @@ describe('projectStore', () => {
       // drag everything after it a beat earlier.
       for (let i = 0; i < 3; i++) appendSegment(chordSegment({ id: `s${i}` }));
       projectStore.getState().removeSegment('s0');
-      expect(layout(projectStore.getState().project!.bars[0])).toEqual(['s1@1', 's2@2']);
+      expect(layout(editableBars()[0])).toEqual(['s1@1', 's2@2']);
     });
 
     it('ignores an unknown segment id', () => {
       appendSegment(chordSegment({ id: 'a' }));
       projectStore.getState().removeSegment('nope');
-      expect(barChords(projectStore.getState().project!.bars[0], trackId()).length).toBe(1);
+      expect(barChords(editableBars()[0], editKey(trackId())).length).toBe(1);
     });
   });
 
   describe('removeSegments', () => {
     beforeEach(() => {
       projectStore.getState().createProject();
-      projectStore.getState().addBar();
+      addEditableBar();
+      openTestPhrase(trackId(), editableBars().length);
     });
 
     it('removes every named segment in one write', () => {
@@ -743,29 +828,29 @@ describe('projectStore', () => {
 
       projectStore.getState().removeSegments(['s0', 's2']);
 
-      expect(layout(projectStore.getState().project!.bars[0])).toEqual(['s1@1', 's3@3']);
+      expect(layout(editableBars()[0])).toEqual(['s1@1', 's3@3']);
       // One store write, so one undo step however many blocks went.
       expect(projectStore.getState().project).not.toBe(before);
     });
 
     it('removes segments spanning several bars', () => {
-      projectStore.getState().addBar();
+      addEditableBar();
       appendSegment(chordSegment({ id: 'a' }));
-      const second = projectStore.getState().project!.bars[1].id;
+      const second = editableBars()[1].id;
       projectStore.getState().insertSegment(second, 0, chordSegment({ id: 'b' }), trackId());
 
       projectStore.getState().removeSegments(['a', 'b']);
 
-      const bars = projectStore.getState().project!.bars;
-      expect(barChords(bars[0], trackId())).toEqual([]);
-      expect(barChords(bars[1], trackId())).toEqual([]);
+      const bars = editableBars();
+      expect(barChords(bars[0], editKey(trackId()))).toEqual([]);
+      expect(barChords(bars[1], editKey(trackId()))).toEqual([]);
     });
 
     it('leaves known segments alone when an unknown id rides along', () => {
       appendSegment(chordSegment({ id: 'a' }));
       appendSegment(chordSegment({ id: 'b' }));
       projectStore.getState().removeSegments(['nope', 'a']);
-      expect(barChords(projectStore.getState().project!.bars[0], trackId()).map(c => c.id)).toEqual(['b']);
+      expect(barChords(editableBars()[0], editKey(trackId())).map(c => c.id)).toEqual(['b']);
     });
 
     it('leaves the project untouched when nothing matches', () => {
@@ -786,12 +871,13 @@ describe('projectStore', () => {
   // Destinations are beats from the start of the project, so with four-beat bars
   // beat 6 means "bar 2, beat 2".
   describe('moveSegments, one block', () => {
-    const bars = () => projectStore.getState().project!.bars;
+    const bars = () => editableBars();
 
     beforeEach(() => {
       projectStore.getState().createProject();
-      projectStore.getState().addBar();
-      projectStore.getState().addBar();
+      addEditableBar();
+      addEditableBar();
+      openTestPhrase(trackId(), editableBars().length);
       appendSegment(chordSegment({ id: 'a' }));
       appendSegment(chordSegment({ id: 'b' }));
     });
@@ -810,14 +896,14 @@ describe('projectStore', () => {
 
     it('regenerates the notes in both the bar it left and the bar it joined', () => {
       projectStore.getState().moveSegments([{ segmentId: 'a', absoluteBeat: 6 }]);
-      expect(barNotes(bars()[0], trackId()).every(n => n.startBeat === 1)).toBe(true);
-      expect(barNotes(bars()[1], trackId()).every(n => n.startBeat === 2)).toBe(true);
+      expect(barNotes(bars()[0], editKey(trackId())).every(n => n.startBeat === 1)).toBe(true);
+      expect(barNotes(bars()[1], editKey(trackId())).every(n => n.startBeat === 2)).toBe(true);
     });
 
     it('lets a moved block hang over the bar line', () => {
       projectStore.getState().resizeSegmentDuration('a', 2, 0.25);
       projectStore.getState().moveSegments([{ segmentId: 'a', absoluteBeat: 3.5 }]);
-      expect(barChords(barOf('a')!, trackId()).find(c => c.id === 'a')!.startBeat).toBe(3.5);
+      expect(barChords(barOf('a')!, editKey(trackId())).find(c => c.id === 'a')!.startBeat).toBe(3.5);
       // It still belongs to the bar its onset falls in, not the one it reaches into.
       expect(barOf('a')!.id).toBe(bars()[0].id);
     });
@@ -845,12 +931,13 @@ describe('projectStore', () => {
   });
 
   describe('moveSegments', () => {
-    const bars = () => projectStore.getState().project!.bars;
+    const bars = () => editableBars();
 
     beforeEach(() => {
       projectStore.getState().createProject();
-      projectStore.getState().addBar();
-      projectStore.getState().addBar();
+      addEditableBar();
+      addEditableBar();
+      openTestPhrase(trackId(), editableBars().length);
       appendSegment(chordSegment({ id: 'a' }));
       appendSegment(chordSegment({ id: 'b' }));
       appendSegment(chordSegment({ id: 'c' }));
@@ -877,7 +964,8 @@ describe('projectStore', () => {
     it('is order-independent: the destinations decide the ripple', () => {
       const listedBackwards = () => {
         projectStore.getState().createProject();
-        projectStore.getState().addBar();
+        addEditableBar();
+        openTestPhrase(trackId(), editableBars().length);
         appendSegment(chordSegment({ id: 'a' }));
         appendSegment(chordSegment({ id: 'b' }));
         projectStore.getState().moveSegments([
@@ -919,8 +1007,8 @@ describe('projectStore', () => {
 
     it('regenerates notes once, for every bar the batch touched', () => {
       projectStore.getState().moveSegments([{ segmentId: 'a', absoluteBeat: 6 }]);
-      expect(barNotes(bars()[1], trackId()).every(n => n.startBeat === 2)).toBe(true);
-      expect(barNotes(bars()[0], trackId()).some(n => n.startBeat === 0)).toBe(false);
+      expect(barNotes(bars()[1], editKey(trackId())).every(n => n.startBeat === 2)).toBe(true);
+      expect(barNotes(bars()[0], editKey(trackId())).some(n => n.startBeat === 0)).toBe(false);
     });
 
     it('skips unknown ids rather than failing the whole gesture', () => {
@@ -942,16 +1030,17 @@ describe('projectStore', () => {
   });
 
   describe('multi-segment pitch edits', () => {
-    const bars = () => projectStore.getState().project!.bars;
+    const bars = () => editableBars();
     const segmentOf = (id: string) =>
       bars()
-        .flatMap(b => barChords(b, trackId()))
+        .flatMap(b => barChords(b, editKey(trackId())))
         .find(c => c.id === id)!;
 
     beforeEach(() => {
       projectStore.getState().createProject();
-      projectStore.getState().addBar();
-      projectStore.getState().addBar();
+      addEditableBar();
+      addEditableBar();
+      openTestPhrase(trackId(), editableBars().length);
       appendSegment(chordSegment({ id: 'a' }));
       // 'b' is written in G major, 'a' in the project's C — the two keys are what
       // makes "each within its own" mean anything below.
@@ -1004,52 +1093,53 @@ describe('projectStore', () => {
   describe('resizeSegmentDuration', () => {
     beforeEach(() => {
       projectStore.getState().createProject();
-      projectStore.getState().addBar();
+      addEditableBar();
+      openTestPhrase(trackId(), editableBars().length);
     });
 
     it('sets a new duration', () => {
       appendSegment(chordSegment({ id: 'a' }));
       projectStore.getState().resizeSegmentDuration('a', 2, 0.25);
-      expect(barChords(projectStore.getState().project!.bars[0], trackId())[0].duration).toBe(2);
+      expect(barChords(editableBars()[0], editKey(trackId()))[0].duration).toBe(2);
     });
 
     it('updates the generated notes duration', () => {
       appendSegment(chordSegment({ id: 'a' }));
       projectStore.getState().resizeSegmentDuration('a', 2, 0.25);
-      const notes = barNotes(projectStore.getState().project!.bars[0], trackId());
+      const notes = barNotes(editableBars()[0], editKey(trackId()));
       expect(notes.every(n => n.duration === 2)).toBe(true);
     });
 
     it('snaps to the editing grid', () => {
       appendSegment(chordSegment({ id: 'a' }));
       projectStore.getState().resizeSegmentDuration('a', 1.3, 0.25);
-      expect(barChords(projectStore.getState().project!.bars[0], trackId())[0].duration).toBe(1.25);
+      expect(barChords(editableBars()[0], editKey(trackId()))[0].duration).toBe(1.25);
     });
 
     it('clamps to the end of the song', () => {
       appendSegment(chordSegment({ id: 'a' }));
       projectStore.getState().resizeSegmentDuration('a', 99, 0.25);
-      expect(barChords(projectStore.getState().project!.bars[0], trackId())[0].duration).toBe(4);
+      expect(barChords(editableBars()[0], editKey(trackId()))[0].duration).toBe(4);
     });
 
     it('grows straight through the bar line', () => {
       // A block on beat 3 of bar 1 has one beat of bar left but three of song, and
       // a chord held over the barline is ordinary music.
-      projectStore.getState().addBar();
-      const barId = projectStore.getState().project!.bars[0].id;
+      addEditableBar();
+      const barId = editableBars()[0].id;
       projectStore.getState().insertSegment(barId, 3, chordSegment({ id: 'a' }), trackId());
       projectStore.getState().resizeSegmentDuration('a', 4, 0.25);
-      const bar = projectStore.getState().project!.bars[0];
-      expect(barChords(bar, trackId())[0].duration).toBe(4);
+      const bar = editableBars()[0];
+      expect(barChords(bar, editKey(trackId()))[0].duration).toBe(4);
       // It stays in the bar it starts in, and its notes are written from there.
-      expect(barNotes(bar, trackId()).every(n => n.startBeat === 3 && n.duration === 4)).toBe(true);
+      expect(barNotes(bar, editKey(trackId())).every(n => n.startBeat === 3 && n.duration === 4)).toBe(true);
     });
 
     it('caps growth at the end of the last bar', () => {
-      const barId = projectStore.getState().project!.bars[0].id;
+      const barId = editableBars()[0].id;
       projectStore.getState().insertSegment(barId, 3, chordSegment({ id: 'a' }), trackId());
       projectStore.getState().resizeSegmentDuration('a', 99, 0.25);
-      expect(barChords(projectStore.getState().project!.bars[0], trackId())[0].duration).toBe(1);
+      expect(barChords(editableBars()[0], editKey(trackId()))[0].duration).toBe(1);
     });
 
     it('pushes later segments over the bar line when it grows', () => {
@@ -1058,15 +1148,15 @@ describe('projectStore', () => {
       appendSegment(chordSegment({ id: 'c' }));
       appendSegment(chordSegment({ id: 'd' }));
       projectStore.getState().resizeSegmentDuration('a', 2, 0.25);
-      const bars = projectStore.getState().project!.bars;
-      expect(barChords(bars[0], trackId()).map(c => c.id)).toEqual(['a', 'b', 'c']);
-      expect(barChords(bars[1], trackId()).map(c => c.id)).toEqual(['d']);
+      const bars = editableBars();
+      expect(barChords(bars[0], editKey(trackId())).map(c => c.id)).toEqual(['a', 'b', 'c']);
+      expect(barChords(bars[1], editKey(trackId())).map(c => c.id)).toEqual(['d']);
     });
 
     it('ignores an unknown segment id', () => {
       appendSegment(chordSegment({ id: 'a' }));
       projectStore.getState().resizeSegmentDuration('nope', 2, 0.25);
-      expect(barChords(projectStore.getState().project!.bars[0], trackId())[0].duration).toBe(1);
+      expect(barChords(editableBars()[0], editKey(trackId()))[0].duration).toBe(1);
     });
   });
 
@@ -1074,20 +1164,21 @@ describe('projectStore', () => {
     const segmentOf = (id: string) =>
       projectStore
         .getState()
-        .project!.bars.flatMap(b => barChords(b, trackId()))
+        .project!.phrases.flatMap(p => p.bars).flatMap(b => barChords(b, editKey(trackId())))
         .find(c => c.id === id)!;
 
     beforeEach(() => {
       projectStore.getState().createProject();
-      projectStore.getState().addBar();
+      addEditableBar();
+      openTestPhrase(trackId(), editableBars().length);
     });
 
     it('re-interprets roman numerals against the new scale', () => {
       appendSegment(chordSegment({ id: 'a', root: undefined, quality: undefined, romanNumeral: 'I' }));
-      expect(barNotes(projectStore.getState().project!.bars[0], trackId()).map(n => n.pitch)).toEqual([60, 64, 67]);
+      expect(barNotes(editableBars()[0], editKey(trackId())).map(n => n.pitch)).toEqual([60, 64, 67]);
 
       projectStore.getState().setSegmentsScale(['a'], { root: 'D', type: 'major' });
-      expect(barNotes(projectStore.getState().project!.bars[0], trackId()).map(n => n.pitch)).toEqual([62, 66, 69]);
+      expect(barNotes(editableBars()[0], editKey(trackId())).map(n => n.pitch)).toEqual([62, 66, 69]);
     });
 
     it('retunes segments that carry an explicit root and quality', () => {
@@ -1098,10 +1189,10 @@ describe('projectStore', () => {
       );
       projectStore.getState().setSegmentsScale(['a'], { root: 'D', type: 'major' });
 
-      const bar = projectStore.getState().project!.bars[0];
-      expect(barChords(bar, trackId())[0].root).toBe('D');
-      expect(barChords(bar, trackId())[0].chordSymbol).toBe('D');
-      expect(barNotes(bar, trackId()).map(n => n.pitch)).toEqual([62, 66, 69]);
+      const bar = editableBars()[0];
+      expect(barChords(bar, editKey(trackId()))[0].root).toBe('D');
+      expect(barChords(bar, editKey(trackId()))[0].chordSymbol).toBe('D');
+      expect(barNotes(bar, editKey(trackId())).map(n => n.pitch)).toEqual([62, 66, 69]);
     });
 
     it('follows the new scale when the degree quality changes', () => {
@@ -1110,10 +1201,10 @@ describe('projectStore', () => {
       );
       projectStore.getState().setSegmentsScale(['a'], { root: 'A', type: 'naturalMinor' });
 
-      const bar = projectStore.getState().project!.bars[0];
-      expect(barChords(bar, trackId())[0].chordSymbol).toBe('B°');
+      const bar = editableBars()[0];
+      expect(barChords(bar, editKey(trackId()))[0].chordSymbol).toBe('B°');
       // B diminished: B, D, F.
-      expect(barNotes(bar, trackId()).map(n => n.pitch)).toEqual([71, 74, 77]);
+      expect(barNotes(bar, editKey(trackId())).map(n => n.pitch)).toEqual([71, 74, 77]);
     });
 
     it('records the key on the segment, so a second edit retunes from it', () => {
@@ -1178,7 +1269,7 @@ describe('projectStore', () => {
   describe('resetProject', () => {
     it('clears project state', () => {
       projectStore.getState().createProject();
-      projectStore.getState().addBar();
+      addEditableBar();
       projectStore.getState().resetProject();
       expect(projectStore.getState().project).toBeNull();
     });
@@ -1204,8 +1295,8 @@ describe('projectStore', () => {
 
     beforeEach(() => {
       state().createProject();
-      state().addBar();
-      state().addBar(); // two 4/4 bars: eight beats of song
+      addEditableBar();
+      addEditableBar(); // two 4/4 bars: eight beats of song
     });
 
     it('starts with no range and repeat off', () => {
@@ -1259,8 +1350,8 @@ describe('projectStore', () => {
 
     beforeEach(() => {
       state().createProject();
-      state().addBar();
-      state().addBar(); // two 4/4 bars: eight beats of song
+      addEditableBar();
+      addEditableBar(); // two 4/4 bars: eight beats of song
     });
 
     it('starts with none', () => {
@@ -1339,14 +1430,15 @@ describe('projectStore', () => {
     });
 
     it('leaves every block where it was when a section is removed', () => {
-      const bar = state().project!.bars[0];
+      openTestPhrase(trackId(), editableBars().length);
+      const bar = editableBars()[0];
       state().insertSegment(bar.id, 0, chordSegment({ id: 'seg-1' }), trackId());
 
       const id = state().addSection(0, 4)!;
       state().removeSection(id);
 
       expect(sections()).toEqual([]);
-      expect(barChords(state().project!.bars[0], trackId()).map(c => c.id)).toEqual(['seg-1']);
+      expect(barChords(editableBars()[0], editKey(trackId())).map(c => c.id)).toEqual(['seg-1']);
     });
   });
 
@@ -1355,12 +1447,13 @@ describe('projectStore', () => {
 
     /** The segment with this id, wherever in the project it lives. */
     const segmentOf = (id: string): ChordSegment =>
-      state().project!.bars.flatMap(b => barChords(b, trackId())).find(c => c.id === id)!;
+      editableBars().flatMap(b => barChords(b, editKey(trackId()))).find(c => c.id === id)!;
 
     beforeEach(() => {
       state().createProject();
-      state().addBar();
-      state().addBar();
+      addEditableBar();
+      addEditableBar();
+      openTestPhrase(trackId(), editableBars().length);
     });
 
     describe('stepSegmentPitch', () => {
@@ -1380,7 +1473,7 @@ describe('projectStore', () => {
           chordSymbol: 'G',
           scale: { root: 'A', type: 'naturalMinor' },
         });
-        state().insertSegment(state().project!.bars[1].id, 0, segment, trackId());
+        state().insertSegment(editableBars()[1].id, 0, segment, trackId());
 
         state().stepSegmentPitch(segment.id, 1);
 
@@ -1391,12 +1484,12 @@ describe('projectStore', () => {
       it('regenerates the bar\'s notes so the roll follows', () => {
         const segment = chordSegment({ romanNumeral: 'I', chordSymbol: 'C', octave: 4 });
         appendSegment(segment);
-        expect(barNotes(barOf(segment.id)!, trackId()).map(n => n.pitch)).toEqual([60, 64, 67]);
+        expect(barNotes(barOf(segment.id)!, editKey(trackId())).map(n => n.pitch)).toEqual([60, 64, 67]);
 
         state().stepSegmentPitch(segment.id, 1);
 
         // Dm at octave 4.
-        expect(barNotes(barOf(segment.id)!, trackId()).map(n => n.pitch)).toEqual([62, 65, 69]);
+        expect(barNotes(barOf(segment.id)!, editKey(trackId())).map(n => n.pitch)).toEqual([62, 65, 69]);
       });
 
       it('ignores an unknown segment id', () => {
@@ -1414,7 +1507,7 @@ describe('projectStore', () => {
         state().shiftSegmentOctave(segment.id, 1);
 
         expect(segmentOf(segment.id).pitch).toBe(72);
-        expect(barNotes(barOf(segment.id)!, trackId()).map(n => n.pitch)).toEqual([72]);
+        expect(barNotes(barOf(segment.id)!, editKey(trackId())).map(n => n.pitch)).toEqual([72]);
       });
 
       it('moves a chord down a register', () => {
@@ -1424,7 +1517,7 @@ describe('projectStore', () => {
         state().shiftSegmentOctave(segment.id, -1);
 
         expect(segmentOf(segment.id).octave).toBe(3);
-        expect(barNotes(barOf(segment.id)!, trackId()).map(n => n.pitch)).toEqual([48, 52, 55]);
+        expect(barNotes(barOf(segment.id)!, editKey(trackId())).map(n => n.pitch)).toEqual([48, 52, 55]);
       });
 
       it('ignores an unknown segment id', () => {
@@ -1441,12 +1534,12 @@ describe('projectStore', () => {
 
         state().cycleSegmentInversion(segment.id);
         expect(segmentOf(segment.id).inversion).toBe(1);
-        expect(barNotes(barOf(segment.id)!, trackId()).map(n => n.pitch)).toEqual([64, 67, 72]);
+        expect(barNotes(barOf(segment.id)!, editKey(trackId())).map(n => n.pitch)).toEqual([64, 67, 72]);
 
         state().cycleSegmentInversion(segment.id);
         state().cycleSegmentInversion(segment.id);
         expect(segmentOf(segment.id).inversion).toBe(0);
-        expect(barNotes(barOf(segment.id)!, trackId()).map(n => n.pitch)).toEqual([60, 64, 67]);
+        expect(barNotes(barOf(segment.id)!, editKey(trackId())).map(n => n.pitch)).toEqual([60, 64, 67]);
       });
 
       it('ignores an unknown segment id', () => {
@@ -1458,7 +1551,7 @@ describe('projectStore', () => {
 
     describe('voicing', () => {
       const pitchesOf = (id: string) =>
-        barNotes(barOf(id)!, trackId()).map(n => n.pitch);
+        barNotes(barOf(id)!, editKey(trackId())).map(n => n.pitch);
 
       it('spaces a chord by a preset and seeds the offsets it implies', () => {
         const segment = chordSegment({ octave: 4 });
@@ -1534,7 +1627,7 @@ describe('projectStore', () => {
         const after = segmentOf(segment.id);
         expect(after.startBeat).toBe(before.startBeat);
         expect(after.duration).toBe(before.duration);
-        expect(barNotes(barOf(segment.id)!, trackId()).map(n => n.startBeat)).toEqual([0, 1, 2]);
+        expect(barNotes(barOf(segment.id)!, editKey(trackId())).map(n => n.startBeat)).toEqual([0, 1, 2]);
       });
 
       it('applies to a whole selection spanning different keys', () => {
@@ -1547,7 +1640,7 @@ describe('projectStore', () => {
           octave: 4,
           scale: { root: 'A', type: 'naturalMinor' },
         });
-        state().insertSegment(state().project!.bars[1].id, 0, second, trackId());
+        state().insertSegment(editableBars()[1].id, 0, second, trackId());
 
         state().setSegmentsSpacing([first.id, second.id], 'drop2');
 
@@ -1634,7 +1727,7 @@ describe('projectStore', () => {
 
       describe('velocity', () => {
         const velocitiesOf = (id: string) =>
-          barNotes(barOf(id)!, trackId()).map(n => n.velocity);
+          barNotes(barOf(id)!, editKey(trackId())).map(n => n.velocity);
 
         it('applies to every kind in one selection, and regenerates the notes', () => {
           // The one segment edit that is not chords-only: a note sounds at some
@@ -1692,7 +1785,7 @@ describe('projectStore', () => {
 
     beforeEach(() => {
       state().createProject();
-      state().addBar();
+      addEditableBar();
       state().addTrack('Strings');
     });
 
@@ -1732,22 +1825,36 @@ describe('projectStore', () => {
       expect(() => state().removeTrack('nope')).not.toThrow();
     });
 
+    /**
+     * Write one segment into each instrument's own phrase, both placed at bar 0.
+     *
+     * Two instruments can no longer be written to through one open surface, because a
+     * phrase holds one part. So each gets its own, and what they play together is read
+     * off the compiled song rather than out of either phrase.
+     */
+    const writeToBoth = (a: ChordSegment, b: ChordSegment) => {
+      openTestPhrase(trackId(), 1);
+      state().insertSegment(editableBars()[0].id, 0, a, trackId());
+      openTestPhrase(second(), 1);
+      state().insertSegment(editableBars()[0].id, 0, b, second());
+    };
+
     // The whole point of the per-instrument content model: writing to one
     // instrument must be invisible to every other.
     it('keeps each instrument\'s segments separate', () => {
-      const barId = state().project!.bars[0].id;
-      state().insertSegment(barId, 0, chordSegment({ id: 'piano-1' }), trackId());
-      state().insertSegment(barId, 0, chordSegment({ id: 'strings-1' }), second());
+      writeToBoth(chordSegment({ id: 'piano-1' }), chordSegment({ id: 'strings-1' }));
 
       const bar = state().project!.bars[0];
-      expect(barChords(bar, trackId()).map(c => c.id)).toEqual(['piano-1']);
-      expect(barChords(bar, second()).map(c => c.id)).toEqual(['strings-1']);
+      expect(barChords(bar, trackId())).toHaveLength(1);
+      expect(barChords(bar, second())).toHaveLength(1);
+      expect(barChords(bar, trackId())[0].id).not.toBe(barChords(bar, second())[0].id);
     });
 
     it('generates notes for each instrument from its own segments', () => {
-      const barId = state().project!.bars[0].id;
-      state().insertSegment(barId, 0, chordSegment({ root: 'C', quality: 'major' }), trackId());
-      state().insertSegment(barId, 0, chordSegment({ root: 'D', quality: 'minor' }), second());
+      writeToBoth(
+        chordSegment({ root: 'C', quality: 'major' }),
+        chordSegment({ root: 'D', quality: 'minor' })
+      );
 
       const bar = state().project!.bars[0];
       expect(barNotes(bar, trackId()).map(n => n.pitch)).toEqual([60, 64, 67]);
@@ -1755,9 +1862,7 @@ describe('projectStore', () => {
     });
 
     it('drops an instrument\'s content along with the instrument', () => {
-      const barId = state().project!.bars[0].id;
-      state().insertSegment(barId, 0, chordSegment({ id: 'piano-1' }), trackId());
-      state().insertSegment(barId, 0, chordSegment({ id: 'strings-1' }), second());
+      writeToBoth(chordSegment({ id: 'piano-1' }), chordSegment({ id: 'strings-1' }));
       const removed = second();
 
       state().removeTrack(removed);
@@ -1765,11 +1870,11 @@ describe('projectStore', () => {
       expect(tracks()).toHaveLength(1);
       expect(state().project!.bars[0].content[removed]).toBeUndefined();
       // The instrument that stayed keeps everything it had.
-      expect(barChords(state().project!.bars[0], trackId()).map(c => c.id)).toEqual(['piano-1']);
+      expect(barChords(state().project!.bars[0], trackId())).toHaveLength(1);
     });
 
     it('refuses a segment aimed at an instrument that does not exist', () => {
-      const barId = state().project!.bars[0].id;
+      const barId = editableBars()[0].id;
       const before = state().project;
 
       state().insertSegment(barId, 0, chordSegment({ id: 'orphan' }), 'no-such-track');
@@ -1781,10 +1886,19 @@ describe('projectStore', () => {
   describe('duplicateTrack', () => {
     const state = () => projectStore.getState();
     const tracks = () => state().project!.tracks;
+    /**
+     * The compiled song, where an instrument's material can be read back per bar.
+     *
+     * A duplicated instrument plays the *same phrases* as its source — the copy is a
+     * second set of placements, not a second copy of the music — so what it plays is
+     * visible in the song rather than in any phrase of its own.
+     */
+    const songBars = () => state().project!.bars;
 
     beforeEach(() => {
       state().createProject();
-      state().addBar();
+      addEditableBar();
+      openTestPhrase(trackId(), editableBars().length);
     });
 
     it('creates a copy with " (copy)" appended to the name', () => {
@@ -1841,19 +1955,20 @@ describe('projectStore', () => {
     });
 
     it('copies chord segments across all bars with new ids', () => {
-      const barId = state().project!.bars[0].id;
+      const barId = editableBars()[0].id;
       state().insertSegment(barId, 0, chordSegment({ id: 'a' }), trackId());
       state().insertSegment(barId, 1, chordSegment({ id: 'b' }), trackId());
 
       const newId = state().duplicateTrack(trackId());
       expect(newId).not.toBeNull();
 
-      const bar = state().project!.bars[0];
+      const bar = songBars()[0];
       const sourceChords = barChords(bar, trackId());
       const copyChords = barChords(bar, newId!);
 
       expect(copyChords.length).toBe(2);
-      // New ids, not the originals
+      // Each placement puts the material into the timeline under its own ids, so the
+      // two instruments' blocks stay distinguishable even sharing one phrase.
       expect(copyChords[0].id).not.toBe(sourceChords[0].id);
       expect(copyChords[1].id).not.toBe(sourceChords[1].id);
       // But same properties
@@ -1864,57 +1979,57 @@ describe('projectStore', () => {
     });
 
     it('copies segments across multiple bars', () => {
-      state().addBar();
-      const bar0 = state().project!.bars[0].id;
-      const bar1 = state().project!.bars[1].id;
+      addEditableBar();
+      const bar0 = editableBars()[0].id;
+      const bar1 = editableBars()[1].id;
       state().insertSegment(bar0, 0, chordSegment({ id: 'a' }), trackId());
       state().insertSegment(bar1, 2, chordSegment({ id: 'b' }), trackId());
 
       const newId = state().duplicateTrack(trackId());
 
-      expect(barChords(state().project!.bars[0], newId!).length).toBe(1);
-      expect(barChords(state().project!.bars[1], newId!).length).toBe(1);
-      expect(barChords(state().project!.bars[1], newId!)[0].startBeat).toBe(2);
+      expect(barChords(songBars()[0], newId!).length).toBe(1);
+      expect(barChords(songBars()[1], newId!).length).toBe(1);
+      expect(barChords(songBars()[1], newId!)[0].startBeat).toBe(2);
     });
 
     it('skips bars the source has no content in', () => {
-      state().addBar();
-      state().addBar();
+      addEditableBar();
+      addEditableBar();
       // Only bar 0 has content; bars 1 and 2 are empty for this track
-      state().insertSegment(state().project!.bars[0].id, 0, chordSegment({ id: 'a' }), trackId());
+      state().insertSegment(editableBars()[0].id, 0, chordSegment({ id: 'a' }), trackId());
 
       const newId = state().duplicateTrack(trackId());
 
       // Copy only has content in bar 0
-      expect(state().project!.bars[0].content[newId!]).toBeDefined();
-      expect(state().project!.bars[1].content[newId!]).toBeUndefined();
-      expect(state().project!.bars[2].content[newId!]).toBeUndefined();
+      expect(songBars()[0].content[newId!]).toBeDefined();
+      expect(songBars()[1].content[newId!]).toBeUndefined();
+      expect(songBars()[2].content[newId!]).toBeUndefined();
     });
 
     it('regenerates notes for the copy', () => {
-      const barId = state().project!.bars[0].id;
+      const barId = editableBars()[0].id;
       state().insertSegment(barId, 0, chordSegment({ root: 'C', quality: 'major' }), trackId());
 
       const newId = state().duplicateTrack(trackId());
 
-      const copyNotes = barNotes(state().project!.bars[0], newId!);
+      const copyNotes = barNotes(songBars()[0], newId!);
       expect(copyNotes.map(n => n.pitch)).toEqual([60, 64, 67]);
     });
 
     it('copies voicing from source segments', () => {
-      const barId = state().project!.bars[0].id;
+      const barId = editableBars()[0].id;
       const seg = chordSegment({ id: 'a', root: 'C', quality: 'major', octave: 4 });
       state().insertSegment(barId, 0, seg, trackId());
       state().setSegmentSpacing(seg.id, 'drop2');
 
       const newId = state().duplicateTrack(trackId());
-      const copySeg = barChords(state().project!.bars[0], newId!)[0];
+      const copySeg = barChords(songBars()[0], newId!)[0];
 
       expect(copySeg.voicing).toMatchObject({ spacing: 'drop2', offsets: [0, -1, 0] });
     });
 
     it('copies segment keys (scale) from source segments', () => {
-      const barId = state().project!.bars[0].id;
+      const barId = editableBars()[0].id;
       const seg = chordSegment({
         id: 'a',
         root: 'G',
@@ -1925,19 +2040,19 @@ describe('projectStore', () => {
       state().insertSegment(barId, 0, seg, trackId());
 
       const newId = state().duplicateTrack(trackId());
-      const copySeg = barChords(state().project!.bars[0], newId!)[0];
+      const copySeg = barChords(songBars()[0], newId!)[0];
 
       expect(copySeg.scale).toEqual({ root: 'C', type: 'major' });
     });
 
     it('leaves the source instrument untouched', () => {
-      const barId = state().project!.bars[0].id;
+      const barId = editableBars()[0].id;
       state().insertSegment(barId, 0, chordSegment({ id: 'a' }), trackId());
 
-      const before = barChords(state().project!.bars[0], trackId());
+      const before = barChords(editableBars()[0], editKey(trackId()));
       state().duplicateTrack(trackId());
 
-      expect(barChords(state().project!.bars[0], trackId())).toEqual(before);
+      expect(barChords(editableBars()[0], editKey(trackId()))).toEqual(before);
     });
 
     it('returns null when source track id does not exist', () => {
@@ -1970,7 +2085,7 @@ describe('projectStore', () => {
 
     beforeEach(() => {
       state().createProject();
-      state().addBar();
+      addEditableBar();
     });
 
     it('adds the instruments after the ones already there', () => {
@@ -2017,15 +2132,15 @@ describe('projectStore', () => {
     });
 
     it('leaves the existing instruments and all bar content untouched', () => {
-      const barId = state().project!.bars[0].id;
+      const barId = editableBars()[0].id;
       state().insertSegment(barId, 0, chordSegment({ id: 'a' }), trackId());
-      const before = state().project!.bars.map(b => b.content);
+      const before = editableBars().map(b => b.content);
 
       state().appendInstruments([entry()]);
 
       expect(tracks()[0].name).toBe('Piano');
-      expect(state().project!.bars.map(b => b.content)).toEqual(before);
-      expect(state().project!.bars[0].content[tracks()[1].id]).toBeUndefined();
+      expect(editableBars().map(b => b.content)).toEqual(before);
+      expect(editableBars()[0].content[tracks()[1].id]).toBeUndefined();
     });
 
     it('returns null for an empty template or no project', () => {
@@ -2073,11 +2188,12 @@ describe('projectStore', () => {
 
     it('pastes a single segment into the target bar', () => {
       state().createProject();
-      state().addBar(); // bar 0 at index 0
-      state().insertSegment(state().project!.bars[0].id, 0, chordSegment({ root: 'C', quality: 'major', duration: 1 }), trackId());
-      state().addBar(); // bar 1 at index 1
+      addEditableBar(); // bar 0 at index 0
+      openTestPhrase(trackId(), editableBars().length);
+      state().insertSegment(editableBars()[0].id, 0, chordSegment({ root: 'C', quality: 'major', duration: 1 }), trackId());
+      addEditableBar(); // bar 1 at index 1
 
-      const before = state().project!.bars.length;
+      const before = editableBars().length;
       const ids = state().pasteSegments(
         [
           {
@@ -2094,8 +2210,8 @@ describe('projectStore', () => {
       expect(ids).not.toBeNull();
       expect(ids!.length).toBe(1);
 
-      const bar = state().project!.bars[1];
-      const chords = barChords(bar, trackId());
+      const bar = editableBars()[1];
+      const chords = barChords(bar, editKey(trackId()));
       expect(chords.length).toBe(1);
       expect(chords[0].root).toBe('D');
       expect(chords[0].quality).toBe('minor');
@@ -2103,14 +2219,15 @@ describe('projectStore', () => {
       expect(chords[0].duration).toBe(1);
       // Pasted segments get a fresh id.
       expect(chords[0].id).not.toBe('seg-paste-target');
-      expect(state().project!.bars.length).toBe(before);
+      expect(editableBars().length).toBe(before);
     });
 
     it('pastes a single segment at an offset within the target bar', () => {
       state().createProject();
-      state().addBar(); // bar 0
-      state().insertSegment(state().project!.bars[0].id, 0, chordSegment({ duration: 1 }), trackId());
-      state().addBar(); // bar 1
+      addEditableBar(); // bar 0
+      openTestPhrase(trackId(), editableBars().length);
+      state().insertSegment(editableBars()[0].id, 0, chordSegment({ duration: 1 }), trackId());
+      addEditableBar(); // bar 1
 
       state().pasteSegments(
         [
@@ -2125,16 +2242,17 @@ describe('projectStore', () => {
         1
       );
 
-      const bar = state().project!.bars[1];
-      const chords = barChords(bar, trackId());
+      const bar = editableBars()[1];
+      const chords = barChords(bar, editKey(trackId()));
       expect(chords.length).toBe(1);
       expect(chords[0].startBeat).toBe(2);
     });
 
     it('offsets multiple segments so the first lands at the cursor', () => {
       state().createProject();
-      state().addBar(); // bar 0
-      state().addBar(); // bar 1
+      addEditableBar(); // bar 0
+      addEditableBar(); // bar 1
+      openTestPhrase(trackId(), editableBars().length);
 
       // Paste two segments: originally at startBeat 0 and 2 in bar 0,
       // into bar 1 with baseStartBeat 0. The offset is 0, so positions stay.
@@ -2157,8 +2275,8 @@ describe('projectStore', () => {
         1
       );
 
-      const bar = state().project!.bars[1];
-      const chords = barChords(bar, trackId());
+      const bar = editableBars()[1];
+      const chords = barChords(bar, editKey(trackId()));
       expect(chords.length).toBe(2);
       expect(chords[0].startBeat).toBe(0);
       expect(chords[1].startBeat).toBe(2);
@@ -2166,8 +2284,9 @@ describe('projectStore', () => {
 
     it('shifts segments when baseStartBeat is non-zero', () => {
       state().createProject();
-      state().addBar(); // bar 0
-      state().addBar(); // bar 1
+      addEditableBar(); // bar 0
+      addEditableBar(); // bar 1
+      openTestPhrase(trackId(), editableBars().length);
 
       // Segments at startBeat 1 and 3, baseStartBeat 1.
       // Paste target is bar 1 with offsetBarIndex 1.
@@ -2192,8 +2311,8 @@ describe('projectStore', () => {
         1
       );
 
-      const bar = state().project!.bars[1];
-      const chords = barChords(bar, trackId());
+      const bar = editableBars()[1];
+      const chords = barChords(bar, editKey(trackId()));
       expect(chords.length).toBe(2);
       // Offset: startBeat - baseStartBeat = 1 - 1 = 0 for first, 3 - 1 = 2 for second
       expect(chords[0].startBeat).toBe(0);
@@ -2202,9 +2321,10 @@ describe('projectStore', () => {
 
     it('appends bars when the paste destination exceeds existing bars', () => {
       state().createProject();
-      // No bars exist yet
+      addEditableBar();
+      openTestPhrase(trackId(), 1);
 
-      const before = state().project!.bars.length;
+      const before = editableBars().length;
       const ids = state().pasteSegments(
         [
           {
@@ -2219,18 +2339,22 @@ describe('projectStore', () => {
       );
 
       expect(ids).not.toBeNull();
-      expect(state().project!.bars.length).toBe(before + 2);
+      // The phrase grew to reach the destination bar, rather than the paste being
+      // clamped back into the bar it already had.
+      expect(before).toBe(1);
+      expect(editableBars().length).toBe(2);
       // The segment was at barIndex 2, offsetBarIndex 1, so target bar = 1 + (2 - 2) = 1
-      const targetBar = state().project!.bars[1];
-      const chords = barChords(targetBar, trackId());
+      const targetBar = editableBars()[1];
+      const chords = barChords(targetBar, editKey(trackId()));
       expect(chords.length).toBe(1);
       expect(chords[0].root).toBe('X');
     });
 
     it('preserves original segment properties (voicing, scale, etc.)', () => {
       state().createProject();
-      state().addBar(); // bar 0
-      state().addBar(); // bar 1
+      addEditableBar(); // bar 0
+      addEditableBar(); // bar 1
+      openTestPhrase(trackId(), editableBars().length);
 
       state().pasteSegments(
         [
@@ -2254,8 +2378,8 @@ describe('projectStore', () => {
         1
       );
 
-      const bar = state().project!.bars[1];
-      const chords = barChords(bar, trackId());
+      const bar = editableBars()[1];
+      const chords = barChords(bar, editKey(trackId()));
       expect(chords.length).toBe(1);
       expect(chords[0].root).toBe('G');
       expect(chords[0].quality).toBe('dominant7');
@@ -2267,11 +2391,12 @@ describe('projectStore', () => {
 
     it('does not affect segments in other tracks', () => {
       state().createProject();
-      state().addBar(); // bar 0
+      addEditableBar(); // bar 0
+      openTestPhrase(trackId(), editableBars().length);
       const otherTrackId = state().addTrack('Other');
-      state().insertSegment(state().project!.bars[0].id, 0, chordSegment({ root: 'C' }), trackId());
-      state().insertSegment(state().project!.bars[0].id, 0, chordSegment({ root: 'C' }), otherTrackId!);
-      state().addBar(); // bar 1
+      state().insertSegment(editableBars()[0].id, 0, chordSegment({ root: 'C' }), trackId());
+      state().insertSegment(editableBars()[0].id, 0, chordSegment({ root: 'C' }), otherTrackId!);
+      addEditableBar(); // bar 1
 
       state().pasteSegments(
         [
@@ -2287,21 +2412,39 @@ describe('projectStore', () => {
       );
 
       // Target track has the pasted segment in bar 1
-      const targetBar = state().project!.bars[1];
-      expect(barChords(targetBar, trackId()).length).toBe(1);
-      expect(barChords(targetBar, trackId())[0].root).toBe('P');
+      const targetBar = editableBars()[1];
+      expect(barChords(targetBar, editKey(trackId())).length).toBe(1);
+      expect(barChords(targetBar, editKey(trackId()))[0].root).toBe('P');
 
       // Other track is untouched
       expect(barChords(targetBar, otherTrackId!).length).toBe(0);
     });
   });
 
+  /**
+   * Curves live on the *phrase* now, not on the instrument.
+   *
+   * A curve written once on a phrase's own beats is heard at every placement of it,
+   * so every action below is addressed by phrase id; what lands on the instrument is
+   * the compiled result of its placements, which no action writes to directly.
+   */
   describe('volume automation', () => {
     const state = () => projectStore.getState();
-    const points = () => state().project!.tracks[0].volumeAutomation;
+
+    /** The phrase these tests write to, placed on the Piano at bar 0. */
+    let phraseId = '';
+    const phrase = () => state().project!.phrases.find(p => p.id === phraseId)!;
+    const points = () => phrase().volumeAutomation;
+
+    /** A second phrase, on the same instrument, to prove edits stay put. */
+    const otherPhrase = (startBar: number) => {
+      const clipId = state().addPhraseClip(trackId(), startBar, 1)!;
+      return state().project!.clips.find(c => c.id === clipId)!.phraseId;
+    };
 
     beforeEach(() => {
       state().createProject();
+      phraseId = openTestPhrase(trackId(), 2).phraseId;
     });
 
     it('starts with no curve, so the flat volume stands', () => {
@@ -2309,18 +2452,18 @@ describe('projectStore', () => {
     });
 
     it('adds points in beat order however they arrive', () => {
-      state().addVolumePoint(trackId(), 8, 0);
-      state().addVolumePoint(trackId(), 4, 1);
+      state().addVolumePoint(phraseId, 6, 0);
+      state().addVolumePoint(phraseId, 4, 1);
 
       expect(points()).toEqual([
         { beat: 4, value: 1 },
-        { beat: 8, value: 0 },
+        { beat: 6, value: 0 },
       ]);
     });
 
     it('replaces a point already on that beat', () => {
-      state().addVolumePoint(trackId(), 4, 1);
-      state().addVolumePoint(trackId(), 4, 0.25);
+      state().addVolumePoint(phraseId, 4, 1);
+      state().addVolumePoint(phraseId, 4, 0.25);
 
       expect(points()).toEqual([{ beat: 4, value: 0.25 }]);
     });
@@ -2328,94 +2471,109 @@ describe('projectStore', () => {
     it('clamps rather than throwing, unlike setTrackVolume', () => {
       // These come from a pointer drag: out of range means the gesture left the
       // lane, which is not a programming error.
-      expect(() => state().addVolumePoint(trackId(), -5, 3)).not.toThrow();
+      expect(() => state().addVolumePoint(phraseId, -5, 3)).not.toThrow();
       expect(points()).toEqual([{ beat: 0, value: 1 }]);
     });
 
     it('ignores a non-finite position', () => {
-      state().addVolumePoint(trackId(), Number.NaN, 0.5);
+      state().addVolumePoint(phraseId, Number.NaN, 0.5);
       expect(points()).toEqual([{ beat: 0, value: 0.5 }]);
     });
 
     it('moves a point and re-sorts', () => {
-      state().addVolumePoint(trackId(), 4, 1);
-      state().addVolumePoint(trackId(), 8, 0);
-      state().moveVolumePoint(trackId(), 0, 12, 0.5);
+      state().addVolumePoint(phraseId, 2, 1);
+      state().addVolumePoint(phraseId, 4, 0);
+      state().moveVolumePoint(phraseId, 0, 6, 0.5);
 
       expect(points()).toEqual([
-        { beat: 8, value: 0 },
-        { beat: 12, value: 0.5 },
+        { beat: 4, value: 0 },
+        { beat: 6, value: 0.5 },
       ]);
     });
 
     it('replaces the occupant when a move lands on another point', () => {
-      state().addVolumePoint(trackId(), 4, 1);
-      state().addVolumePoint(trackId(), 8, 0);
-      state().moveVolumePoint(trackId(), 0, 8, 0.5);
+      state().addVolumePoint(phraseId, 4, 1);
+      state().addVolumePoint(phraseId, 6, 0);
+      state().moveVolumePoint(phraseId, 0, 6, 0.5);
 
-      expect(points()).toEqual([{ beat: 8, value: 0.5 }]);
+      expect(points()).toEqual([{ beat: 6, value: 0.5 }]);
     });
 
     it('removes a point by index', () => {
-      state().addVolumePoint(trackId(), 4, 1);
-      state().addVolumePoint(trackId(), 8, 0);
-      state().removeVolumePoint(trackId(), 0);
+      state().addVolumePoint(phraseId, 4, 1);
+      state().addVolumePoint(phraseId, 6, 0);
+      state().removeVolumePoint(phraseId, 0);
 
-      expect(points()).toEqual([{ beat: 8, value: 0 }]);
+      expect(points()).toEqual([{ beat: 6, value: 0 }]);
     });
 
     it('drops the array entirely once the last point goes, so the fader takes over', () => {
-      state().addVolumePoint(trackId(), 4, 1);
-      state().removeVolumePoint(trackId(), 0);
+      state().addVolumePoint(phraseId, 4, 1);
+      state().removeVolumePoint(phraseId, 0);
 
       expect(points()).toBeUndefined();
     });
 
     it('clears the whole curve', () => {
-      state().addVolumePoint(trackId(), 4, 1);
-      state().addVolumePoint(trackId(), 8, 0);
-      state().clearVolumeAutomation(trackId());
+      state().addVolumePoint(phraseId, 4, 1);
+      state().addVolumePoint(phraseId, 6, 0);
+      state().clearVolumeAutomation(phraseId);
 
       expect(points()).toBeUndefined();
     });
 
-    it('leaves the project alone for an unknown instrument', () => {
+    it('leaves the project alone for an unknown phrase', () => {
       const before = state().project;
-      state().addVolumePoint('no-such-track', 4, 1);
+      state().addVolumePoint('no-such-phrase', 4, 1);
       expect(state().project).toBe(before);
     });
 
     it('leaves the project alone for an index that is not there', () => {
-      state().addVolumePoint(trackId(), 4, 1);
+      state().addVolumePoint(phraseId, 4, 1);
       const before = state().project;
-      state().moveVolumePoint(trackId(), 9, 1, 1);
-      state().removeVolumePoint(trackId(), 9);
+      state().moveVolumePoint(phraseId, 9, 1, 1);
+      state().removeVolumePoint(phraseId, 9);
       expect(state().project).toBe(before);
     });
 
-    it('touches only the instrument it is aimed at', () => {
-      const other = state().addTrack('Strings')!;
-      state().addVolumePoint(trackId(), 4, 0.5);
+    it('touches only the phrase it is aimed at', () => {
+      const other = otherPhrase(2);
+      state().addVolumePoint(phraseId, 4, 0.5);
 
-      expect(state().project!.tracks.find(t => t.id === other)!.volumeAutomation).toBeUndefined();
+      expect(state().project!.phrases.find(p => p.id === other)!.volumeAutomation).toBeUndefined();
     });
 
-    it('is carried by duplicateTrack', () => {
-      state().addVolumePoint(trackId(), 4, 1);
-      state().addVolumePoint(trackId(), 8, 0);
+    // The instrument's own curve is compiled from its placements, so it appears
+    // without ever being written to, on the song's beats rather than the phrase's.
+    it('reaches the instrument through the placement', () => {
+      state().addVolumePoint(phraseId, 4, 0.5);
+
+      expect(state().project!.tracks[0].volumeAutomation).toContainEqual({
+        beat: 4,
+        value: 0.5,
+      });
+    });
+
+    // The copy plays the same phrases at the same places, so the same curve is
+    // compiled onto it — not because anything was copied, but because the
+    // placements were.
+    it('is carried by duplicateTrack, through the placements', () => {
+      state().addVolumePoint(phraseId, 4, 1);
+      state().addVolumePoint(phraseId, 6, 0);
       state().duplicateTrack(trackId());
 
       const copy = state().project!.tracks.find(t => t.name === 'Piano (copy)')!;
-      expect(copy.volumeAutomation).toEqual([
-        { beat: 4, value: 1 },
-        { beat: 8, value: 0 },
-      ]);
+      expect(copy.volumeAutomation).toEqual(state().project!.tracks[0].volumeAutomation);
+      expect(copy.volumeAutomation).toContainEqual({ beat: 4, value: 1 });
     });
   });
 
   describe('plugin parameter automation', () => {
     const state = () => projectStore.getState();
-    const lanes = () => state().project!.tracks[0].parameterAutomation;
+
+    let phraseId = '';
+    const phrase = () => state().project!.phrases.find(p => p.id === phraseId)!;
+    const lanes = () => phrase().parameterAutomation;
     const keys = () => lanes()!.map(l => laneKey(l.target));
     const pointsOf = (key: string) => lanes()?.find(l => laneKey(l.target) === key)?.points;
     /** A parameter target, which most of these cases do not care about. */
@@ -2423,6 +2581,7 @@ describe('projectStore', () => {
 
     beforeEach(() => {
       state().createProject();
+      phraseId = openTestPhrase(trackId(), 2).phraseId;
     });
 
     it('starts with no lanes, so nothing drives the plugin', () => {
@@ -2432,123 +2591,124 @@ describe('projectStore', () => {
     // Unlike a volume curve, an empty lane survives: it is one just added, and
     // there is no fader behind it to hand control back to.
     it('keeps a lane that has no points yet', () => {
-      state().addLane(trackId(), param(7), 'Cutoff');
+      state().addLane(phraseId, param(7), 'Cutoff');
 
       expect(lanes()).toEqual([{ target: param(7), name: 'Cutoff', points: [] }]);
     });
 
     it('sorts lanes by key however they arrive', () => {
-      state().addLane(trackId(), param(9), 'Resonance');
-      state().addLane(trackId(), param(2), 'Cutoff');
+      state().addLane(phraseId, param(9), 'Resonance');
+      state().addLane(phraseId, param(2), 'Cutoff');
 
       expect(keys()).toEqual(['param:2', 'param:9']);
     });
 
     it('leaves an existing lane alone rather than wiping its curve', () => {
-      state().addLane(trackId(), param(7), 'Cutoff');
-      state().addLanePoint(trackId(), 'param:7', 4, 0.5);
-      state().addLane(trackId(), param(7), 'Cutoff');
+      state().addLane(phraseId, param(7), 'Cutoff');
+      state().addLanePoint(phraseId, 'param:7', 4, 0.5);
+      state().addLane(phraseId, param(7), 'Cutoff');
 
       expect(pointsOf('param:7')).toEqual([{ beat: 4, value: 0.5 }]);
     });
 
     it('adds points in beat order however they arrive', () => {
-      state().addLane(trackId(), param(7), 'Cutoff');
-      state().addLanePoint(trackId(), 'param:7', 8, 0);
-      state().addLanePoint(trackId(), 'param:7', 4, 1);
+      state().addLane(phraseId, param(7), 'Cutoff');
+      state().addLanePoint(phraseId, 'param:7', 6, 0);
+      state().addLanePoint(phraseId, 'param:7', 4, 1);
 
       expect(pointsOf('param:7')).toEqual([
         { beat: 4, value: 1 },
-        { beat: 8, value: 0 },
+        { beat: 6, value: 0 },
       ]);
     });
 
     it('moves a point and re-sorts, like the volume curve', () => {
-      state().addLane(trackId(), param(7), 'Cutoff');
-      state().addLanePoint(trackId(), 'param:7', 4, 1);
-      state().addLanePoint(trackId(), 'param:7', 8, 0);
-      state().moveLanePoint(trackId(), 'param:7', 0, 12, 0.5);
+      state().addLane(phraseId, param(7), 'Cutoff');
+      state().addLanePoint(phraseId, 'param:7', 2, 1);
+      state().addLanePoint(phraseId, 'param:7', 4, 0);
+      state().moveLanePoint(phraseId, 'param:7', 0, 6, 0.5);
 
       expect(pointsOf('param:7')).toEqual([
-        { beat: 8, value: 0 },
-        { beat: 12, value: 0.5 },
+        { beat: 4, value: 0 },
+        { beat: 6, value: 0.5 },
       ]);
     });
 
     it('removes a point by index, leaving the lane standing', () => {
-      state().addLane(trackId(), param(7), 'Cutoff');
-      state().addLanePoint(trackId(), 'param:7', 4, 1);
-      state().removeLanePoint(trackId(), 'param:7', 0);
+      state().addLane(phraseId, param(7), 'Cutoff');
+      state().addLanePoint(phraseId, 'param:7', 4, 1);
+      state().removeLanePoint(phraseId, 'param:7', 0);
 
       expect(pointsOf('param:7')).toEqual([]);
     });
 
     it('removes a whole lane', () => {
-      state().addLane(trackId(), param(7), 'Cutoff');
-      state().addLane(trackId(), param(9), 'Resonance');
-      state().removeLane(trackId(), 'param:7');
+      state().addLane(phraseId, param(7), 'Cutoff');
+      state().addLane(phraseId, param(9), 'Resonance');
+      state().removeLane(phraseId, 'param:7');
 
       expect(keys()).toEqual(['param:9']);
     });
 
     it('drops the array entirely once the last lane goes', () => {
-      state().addLane(trackId(), param(7), 'Cutoff');
-      state().removeLane(trackId(), 'param:7');
+      state().addLane(phraseId, param(7), 'Cutoff');
+      state().removeLane(phraseId, 'param:7');
 
       expect(lanes()).toBeUndefined();
     });
 
     it('edits one lane without disturbing another', () => {
-      state().addLane(trackId(), param(7), 'Cutoff');
-      state().addLane(trackId(), param(9), 'Resonance');
-      state().addLanePoint(trackId(), 'param:9', 4, 0.5);
-      state().addLanePoint(trackId(), 'param:7', 2, 1);
+      state().addLane(phraseId, param(7), 'Cutoff');
+      state().addLane(phraseId, param(9), 'Resonance');
+      state().addLanePoint(phraseId, 'param:9', 4, 0.5);
+      state().addLanePoint(phraseId, 'param:7', 2, 1);
 
       expect(pointsOf('param:7')).toEqual([{ beat: 2, value: 1 }]);
       expect(pointsOf('param:9')).toEqual([{ beat: 4, value: 0.5 }]);
     });
 
     it('leaves the volume curve alone', () => {
-      state().addVolumePoint(trackId(), 4, 0.5);
-      state().addLane(trackId(), param(7), 'Cutoff');
-      state().removeLane(trackId(), 'param:7');
+      state().addVolumePoint(phraseId, 4, 0.5);
+      state().addLane(phraseId, param(7), 'Cutoff');
+      state().removeLane(phraseId, 'param:7');
 
-      expect(state().project!.tracks[0].volumeAutomation).toEqual([{ beat: 4, value: 0.5 }]);
+      expect(phrase().volumeAutomation).toEqual([{ beat: 4, value: 0.5 }]);
     });
 
-    it('leaves the project alone for an unknown instrument', () => {
+    it('leaves the project alone for an unknown phrase', () => {
       const before = state().project;
-      state().addLane('no-such-track', param(7), 'Cutoff');
+      state().addLane('no-such-phrase', param(7), 'Cutoff');
       expect(state().project).toBe(before);
     });
 
     // A no-op must not land an entry on the undo stack, which is snapshot-based
     // and pushes on every `set`.
     it('leaves the project alone for a parameter with no lane', () => {
-      state().addLane(trackId(), param(7), 'Cutoff');
+      state().addLane(phraseId, param(7), 'Cutoff');
       const before = state().project;
 
-      state().addLanePoint(trackId(), 'param:99', 4, 0.5);
-      state().removeLane(trackId(), 'param:99');
+      state().addLanePoint(phraseId, 'param:99', 4, 0.5);
+      state().removeLane(phraseId, 'param:99');
 
       expect(state().project).toBe(before);
     });
 
-    it('touches only the instrument it is aimed at', () => {
-      const other = state().addTrack('Strings')!;
-      state().addLane(trackId(), param(7), 'Cutoff');
+    it('touches only the phrase it is aimed at', () => {
+      const clipId = state().addPhraseClip(trackId(), 2, 1)!;
+      const other = state().project!.clips.find(c => c.id === clipId)!.phraseId;
+      state().addLane(phraseId, param(7), 'Cutoff');
 
       expect(
-        state().project!.tracks.find(t => t.id === other)!.parameterAutomation
+        state().project!.phrases.find(p => p.id === other)!.parameterAutomation
       ).toBeUndefined();
     });
 
     // A parameter and a controller of the same number are different things, and
     // one lane must never stand in for the other.
     it('keeps a controller lane beside a parameter lane of the same number', () => {
-      state().addLane(trackId(), param(20), 'Slot 20');
-      state().addLane(trackId(), { kind: 'cc', controller: 20 }, 'CC 20');
-      state().addLanePoint(trackId(), 'cc:20', 4, 0.5);
+      state().addLane(phraseId, param(20), 'Slot 20');
+      state().addLane(phraseId, { kind: 'cc', controller: 20 }, 'CC 20');
+      state().addLanePoint(phraseId, 'cc:20', 4, 0.5);
 
       expect(keys()).toEqual(['cc:20', 'param:20']);
       expect(pointsOf('param:20')).toEqual([]);
@@ -2558,28 +2718,28 @@ describe('projectStore', () => {
     // The name a curve carries has to be the user's: "CC 20" says nothing about
     // what it drives, and a sampler titles all its slots the same thing.
     it('renames a lane, leaving its curve alone', () => {
-      state().addLane(trackId(), { kind: 'cc', controller: 20 }, 'CC 20');
-      state().addLanePoint(trackId(), 'cc:20', 4, 0.5);
-      state().renameLane(trackId(), 'cc:20', 'Filter Cutoff');
+      state().addLane(phraseId, { kind: 'cc', controller: 20 }, 'CC 20');
+      state().addLanePoint(phraseId, 'cc:20', 4, 0.5);
+      state().renameLane(phraseId, 'cc:20', 'Filter Cutoff');
 
       expect(lanes()![0].name).toBe('Filter Cutoff');
       expect(pointsOf('cc:20')).toEqual([{ beat: 4, value: 0.5 }]);
     });
 
     it('leaves the project alone for a rename that changes nothing', () => {
-      state().addLane(trackId(), param(7), 'Cutoff');
+      state().addLane(phraseId, param(7), 'Cutoff');
       const before = state().project;
 
-      state().renameLane(trackId(), 'param:7', 'Cutoff');
-      state().renameLane(trackId(), 'param:7', '  ');
-      state().renameLane(trackId(), 'param:99', 'Nowhere');
+      state().renameLane(phraseId, 'param:7', 'Cutoff');
+      state().renameLane(phraseId, 'param:7', '  ');
+      state().renameLane(phraseId, 'param:99', 'Nowhere');
 
       expect(state().project).toBe(before);
     });
 
-    it('is carried by duplicateTrack, like the preset and the volume curve', () => {
-      state().addLane(trackId(), param(7), 'Cutoff');
-      state().addLanePoint(trackId(), 'param:7', 4, 1);
+    it('is carried by duplicateTrack, through the placements', () => {
+      state().addLane(phraseId, param(7), 'Cutoff');
+      state().addLanePoint(phraseId, 'param:7', 4, 1);
       state().duplicateTrack(trackId());
 
       const copy = state().project!.tracks.find(t => t.name === 'Piano (copy)')!;

@@ -322,27 +322,34 @@ export interface Track {
    * take it away again, so the strip's height never changes under the cursor.
    */
   laneCount?: number;
+  /**
+   * The fader: the level this instrument plays at, and what every curve on it is
+   * scaled by. Never overridden, so there is always one number the user can move.
+   */
   volume: number;
   /**
-   * Volume over time: breakpoints with linear ramps between them, sorted by beat
-   * and with no two on the same beat.
+   * Volume over time in absolute song beats — **derived**, like `Bar.content`.
    *
-   * Absent or empty means the flat `volume` above; one point or more overrides it
-   * entirely, so there is only ever one number in the audio path and no write/read
-   * mode to explain. Absent in every project written before automation existed.
+   * Recompiled by `compileAutomation` from the curves of the phrases placed on this
+   * instrument, each shifted to where its clip sits and multiplied by `volume`
+   * above. Never authored and never written to file: the curve belongs to the
+   * phrase, which is the thing that gets placed, copied and played twice.
+   *
+   * Absent means nothing placed here is automated, which hands playback back to the
+   * flat `volume`.
    */
   volumeAutomation?: AutomationPoint[];
   /**
-   * Plugin parameter curves, at most one per `paramId`.
+   * Plugin parameter curves in absolute song beats, at most one per target —
+   * **derived** from the placed phrases exactly as `volumeAutomation` above is.
    *
-   * Absent or empty in every project written before parameter automation, and on
-   * every track that is not a plugin — a General MIDI or SFZ sound has nothing to
-   * automate but its volume, which has `volumeAutomation` above.
+   * Absent or empty on every track that is not a plugin: a General MIDI or SFZ
+   * sound has nothing to automate but its volume.
    *
-   * Unlike `volumeAutomation` there is no flat fallback field beside it: a
-   * parameter with no curve is simply not driven, and keeps whatever its preset
-   * or the plugin's own editor last set it to. There is no value the app could
-   * put there that would not be an invention.
+   * Unlike `volumeAutomation` there is no flat fallback field beside it, and no
+   * fader scaling it: a parameter with no curve is simply not driven, and keeps
+   * whatever its preset or the plugin's own editor last set it to. There is no
+   * value the app could put there that would not be an invention.
    */
   parameterAutomation?: ParameterAutomation[];
   pan: number;
@@ -396,6 +403,73 @@ export interface Bar {
   content: Record<string, TrackContent>;
 }
 
+/**
+ * A named, reusable block of one instrument's material.
+ *
+ * The first thing in this app that *owns* music and is instanced. `Section` and
+ * `TrackGroup` are the near neighbours in shape, and both go out of their way to say
+ * they own nothing; a phrase is the opposite, and everything it owns lives in its own
+ * local `bars`, indexed from zero. That locality is the whole trick: the same phrase
+ * can be placed at bar 1 and again at bar 17 without either placement knowing the
+ * other exists, because neither position is written down inside it.
+ *
+ * Its content is filed under `PHRASE_TRACK_KEY` rather than under a track id. A phrase
+ * names chords and notes, not a sound, and that is what lets a block be dragged off the
+ * piano's row onto the strings' row and simply be played by the strings.
+ *
+ * `Bar.timeSignature` is unused inside a phrase: metre belongs to the song's bars, so
+ * every instrument shares it (see `Bar.timeSignature` above). A phrase that carried its
+ * own metre could not honestly be placed at two positions whose metres differ.
+ */
+export interface Phrase {
+  id: string;
+  name: string;
+  /** Absent means "assigned by index from TRACK_COLORS", as `Track.color` does. */
+  color?: string;
+  /** Local bars, `barIndex` running 0..n-1. Content keyed by `PHRASE_TRACK_KEY`. */
+  bars: Bar[];
+  /**
+   * Volume over the phrase, in beats from its own bar 0: breakpoints with linear
+   * ramps between them, sorted, with no two on the same beat.
+   *
+   * A *shape*, not a level — 1 is "as loud as the instrument's fader", 0 silence —
+   * which is what lets the same swell be played by the piano at one level and the
+   * strings at another. `compileAutomation` multiplies it by `Track.volume` and
+   * shifts it to each placement, so a phrase placed three times swells three times.
+   *
+   * Absent or empty means the placement plays flat at the fader, which is what every
+   * phrase written before curves lived here does.
+   */
+  volumeAutomation?: AutomationPoint[];
+  /**
+   * Plugin parameter curves over the phrase, on the same local beat axis.
+   *
+   * A target is named by controller number or parameter id rather than by plugin, so
+   * a lane survives the phrase being dragged onto another instrument — it simply
+   * drives that instrument's plugin instead, or nothing at all when it has none.
+   */
+  parameterAutomation?: ParameterAutomation[];
+}
+
+/**
+ * One placement of a phrase: which instrument plays it, and from which bar.
+ *
+ * Positioned in whole bars, unlike `Section`, which is drawn across the music in
+ * absolute beats. A phrase *is* a run of bars, so a placement starting mid-bar would
+ * leave its first segment with no bar to live in.
+ *
+ * Carries no length of its own. The length is the phrase's, and a clip able to disagree
+ * with its phrase about how long it is would be a second truth to keep in step.
+ */
+export interface PhraseClip {
+  id: string;
+  phraseId: string;
+  /** The instrument that plays it, by `Track.id`. */
+  trackId: string;
+  /** Index into `Project.bars` where the phrase's local bar 0 lands. */
+  startBar: number;
+}
+
 // Project
 export interface Project {
   id: string;
@@ -417,6 +491,29 @@ export interface Project {
    * group with no members yet, which `tracks` cannot place.
    */
   trackGroups?: TrackGroup[];
+  /**
+   * Every phrase the project knows, placed or not.
+   *
+   * This is where all music lives from schema 1.17 on. A phrase with no clip is not
+   * a leak: it is an idea in the library, waiting to be dragged onto a row, and
+   * deleting its last placement should remove a placement rather than destroy it.
+   *
+   * Required rather than optional, unlike `sections` and `trackGroups`. Its *absence*
+   * is the shape `deserializeProject` migrates a pre-1.17 file on, so an empty array
+   * and a missing key have to stay distinguishable.
+   */
+  phrases: Phrase[];
+  /** Where each phrase is played, and by which instrument. Normalised, never overlapping. */
+  clips: PhraseClip[];
+  /**
+   * The song's bar grid.
+   *
+   * `id`, `barIndex` and `timeSignature` are authored. `content` is **derived** —
+   * recompiled from `clips` by `compileBars` after every edit and never written to
+   * file, exactly like `TrackContent.notes` one level down. Nothing outside
+   * `projectStore` should write it, and nothing at all should author it: an edit
+   * belongs in the phrase the clip points at.
+   */
   bars: Bar[];
   /**
    * Play range, in absolute beats from the start of the project. Absent means the

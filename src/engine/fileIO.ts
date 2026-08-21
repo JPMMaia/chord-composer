@@ -2,6 +2,7 @@ import type {
   ArpeggioPattern,
   AutomationPoint,
   AutomationTarget,
+  Bar,
   ChordQuality,
   ChordSegment,
   Note,
@@ -17,11 +18,23 @@ import type {
   SpacingPreset,
   TimeSignature,
   Track,
+  Phrase,
+  PhraseClip,
   TrackContent,
   TrackGroup,
 } from '@/types/music';
-import { barChords, getTotalBeats, isValidTimeSignature } from '@/engine/timeline';
-import { normalizePoints } from '@/engine/volumeAutomation';
+import { barChords, barContent, getTotalBeats, isValidTimeSignature } from '@/engine/timeline';
+import {
+  PHRASE_TRACK_KEY,
+  clipBeats,
+  clipEndBar,
+  clipStartBeat,
+  compileAutomation,
+  compileBars,
+  normalizeClips,
+} from '@/engine/phrases';
+import { generateId } from '@/utils/id';
+import { normalizePoints, valueAtBeat } from '@/engine/volumeAutomation';
 import { MAX_CC, normalizeParameterAutomation } from '@/engine/parameterAutomation';
 import { normalizeSections } from '@/engine/sections';
 import { normalizeTrackOrder } from '@/engine/trackGroups';
@@ -149,8 +162,41 @@ const LEGACY_TRACK_ID = 'track-legacy';
  * re-normalizes into a contiguous run whatever order the file had them in. Both keys
  * are omitted when nothing is grouped, so an ungrouped project serialises byte for byte
  * as it did under 1.15, and a pre-1.16 file reads back as the flat sidebar it always was.
+ *
+ * 1.17 moved the music. `phrases` holds named, reusable blocks of one part, each with
+ * its own bars numbered from zero, and `clips` says which instrument plays which phrase
+ * from which bar. `Bar.content` is no longer written at all: it is derived from the
+ * placements by `compileBars` on read, exactly as `TrackContent.notes` is derived from
+ * its chords one level down, and writing it would have doubled the file and left two
+ * things that could disagree about what the song plays.
+ *
+ * This is the first version whose absence, rather than whose value, is the migration
+ * signal: a file with no `phrases` key is pre-1.17, and its per-instrument bar content
+ * is lifted into one phrase per instrument, placed at bar 0 and running the whole
+ * length of the piece. That is what those files always were — one part per instrument,
+ * spanning the song — so every block keeps its bar, its beat, its lane and its id, and
+ * the compile that follows puts it back exactly where the file had it. An instrument
+ * with nothing anywhere gets no phrase rather than an empty one.
+ *
+ * 1.18 moved the curves after the music. A volume or parameter curve is stated on the
+ * *phrase*, in beats from its own bar 0, and `compileAutomation` shifts a copy of it to
+ * every placement — so a swell written once is heard at each of the three places the
+ * phrase is played, and follows the block when it is dragged. A track's own
+ * `volumeAutomation` and `parameterAutomation` became derived and are no longer
+ * written, exactly as `Bar.content` did in 1.17.
+ *
+ * The phrase's curve is a *shape* rather than a level: `Track.volume` scales it, so the
+ * fader is live again on an automated instrument, and one phrase can be played loudly
+ * by the strings and quietly by the piano. A pre-1.18 curve overrode the fader instead,
+ * so a track carrying one reads back with its (until now inert) fader at 1 and the
+ * curve's own values kept — which is the level that file always played at.
+ *
+ * The curve itself is cut up on read: each placement takes the stretch of the track's
+ * absolute-beat curve that covers it, re-based to bar 0 of the phrase it plays, with
+ * the level the curve had reached pinned at the join. A phrase placed twice takes the
+ * shape over its first placement, since a phrase can only hold one.
  */
-export const SCHEMA_VERSION = '1.16';
+export const SCHEMA_VERSION = '1.18';
 
 /**
  * Validation error returned by validateProject.
@@ -193,6 +239,59 @@ const VALID_SCALE_TYPES = [
  * Dates are converted to ISO strings. A version field is added for future
  * schema compatibility checks.
  */
+/**
+ * One bar's per-key content, as it goes to file.
+ *
+ * Written for a *phrase's* bars from 1.17 on, keyed by `PHRASE_TRACK_KEY`. The shape is
+ * unchanged from 1.5's per-instrument content, so a reader that understands one
+ * understands the other — which is what lets the pre-1.17 migration hand a song bar's
+ * content straight to the same reader.
+ */
+function serializeContent(content: Record<string, TrackContent>) {
+  return Object.fromEntries(
+    Object.entries(content).map(([key, trackContent]) => [
+      key,
+      {
+        chords: trackContent.chords.map(c => ({
+          id: c.id,
+          startBeat: c.startBeat,
+          // Absent means lane 0, so a project with nothing stacked gains no
+          // bytes and round-trips exactly as it did under 1.10.
+          lane: c.lane,
+          kind: c.kind ?? 'chord',
+          romanNumeral: c.romanNumeral,
+          chordSymbol: c.chordSymbol,
+          duration: c.duration,
+          pitch: c.pitch,
+          // Which degree an off-scale note means, as semitones off it. Absent on
+          // every unaltered note, so a piece with no accidentals in it serialises
+          // exactly as it did under 1.11.
+          alter: c.alter,
+          octave: c.octave,
+          root: c.root,
+          inversion: c.inversion,
+          quality: c.quality,
+          velocity: c.velocity,
+          // The key this block is written in — a bar-level `scale` is no
+          // longer written, so this is where a 1.8 file states its keys.
+          scale: c.scale,
+          // Absent on an unvoiced chord, and an absent key drops out of the
+          // JSON entirely — so a project nobody has voiced still serialises
+          // byte for byte as it did under 1.5.
+          voicing: c.voicing,
+        })),
+        notes: trackContent.notes.map(n => ({
+          id: n.id,
+          pitch: n.pitch,
+          startBeat: n.startBeat,
+          duration: n.duration,
+          velocity: n.velocity,
+        })),
+      },
+    ])
+  );
+}
+
 export function serializeProject(project: Project): string {
   const payload = {
     version: SCHEMA_VERSION,
@@ -243,14 +342,10 @@ export function serializeProject(project: Project): string {
       // Absent means the single lane every instrument had before 1.11.
       laneCount: t.laneCount !== undefined && t.laneCount > 1 ? t.laneCount : undefined,
       volume: t.volume,
-      // Omitted when there is no curve, so an unautomated project gains no bytes
-      // and still round-trips byte for byte as it did under 1.9.
-      volumeAutomation:
-        t.volumeAutomation && t.volumeAutomation.length > 0 ? t.volumeAutomation : undefined,
-      // Omitted on the same terms, and additionally without its empty lanes: a
-      // lane with no points survives an edit — it is one just added, waiting to be
-      // drawn on — but saving one would preserve a gesture rather than a curve.
-      parameterAutomation: serializeParameterAutomation(t.parameterAutomation),
+      // `volumeAutomation` and `parameterAutomation` are no longer written: from 1.18
+      // they are derived from the placed phrases by `compileAutomation`, exactly as
+      // `Bar.content` is derived from them by `compileBars`. Writing them would leave
+      // two things that could disagree about what the instrument plays.
       pan: t.pan,
       muted: t.muted,
       solo: t.solo,
@@ -260,56 +355,42 @@ export function serializeProject(project: Project): string {
       // Only plugins have one, and only once the plugin has been asked for it.
       vst3State: t.vst3State,
     })),
+    // Phrases are where all music lives from 1.17 on. Their bars are local, numbered
+    // from zero, and carry no metre of their own — the song's bars own that.
+    phrases: (project.phrases ?? []).map(p => ({
+      id: p.id,
+      name: p.name,
+      color: p.color,
+      // Omitted when there is no curve, so a project nobody has automated gains no
+      // bytes over one written before curves lived here.
+      volumeAutomation:
+        p.volumeAutomation && p.volumeAutomation.length > 0 ? p.volumeAutomation : undefined,
+      // Omitted on the same terms, and additionally without its empty lanes: a lane
+      // with no points survives an edit — it is one just added, waiting to be drawn
+      // on — but saving one would preserve a gesture rather than a curve.
+      parameterAutomation: serializeParameterAutomation(p.parameterAutomation),
+      bars: p.bars.map(b => ({
+        id: b.id,
+        barIndex: b.barIndex,
+        content: serializeContent(b.content),
+      })),
+    })),
+    clips: (project.clips ?? []).map(c => ({
+      id: c.id,
+      phraseId: c.phraseId,
+      trackId: c.trackId,
+      startBar: c.startBar,
+    })),
     bars: project.bars.map(b => ({
       id: b.id,
       barIndex: b.barIndex,
       // Written only when the bar overrides the project meter, so a uniform
       // project still serialises exactly as it did under schema 1.0.
       timeSignature: b.timeSignature,
-      // Per-instrument from 1.5 on. The inner shape is unchanged from 1.4, so a
-      // reader that understands one bar's chords understands these.
-      content: Object.fromEntries(
-        Object.entries(b.content).map(([trackId, trackContent]) => [
-          trackId,
-          {
-            chords: trackContent.chords.map(c => ({
-              id: c.id,
-              startBeat: c.startBeat,
-              // Absent means lane 0, so a project with nothing stacked gains no
-              // bytes and round-trips exactly as it did under 1.10.
-              lane: c.lane,
-              kind: c.kind ?? 'chord',
-              romanNumeral: c.romanNumeral,
-              chordSymbol: c.chordSymbol,
-              duration: c.duration,
-              pitch: c.pitch,
-              // Which degree an off-scale note means, as semitones off it. Absent on
-              // every unaltered note, so a piece with no accidentals in it serialises
-              // exactly as it did under 1.11.
-              alter: c.alter,
-              octave: c.octave,
-              root: c.root,
-              inversion: c.inversion,
-              quality: c.quality,
-              velocity: c.velocity,
-              // The key this block is written in — a bar-level `scale` is no
-              // longer written, so this is where a 1.8 file states its keys.
-              scale: c.scale,
-              // Absent on an unvoiced chord, and an absent key drops out of the
-              // JSON entirely — so a project nobody has voiced still serialises
-              // byte for byte as it did under 1.5.
-              voicing: c.voicing,
-            })),
-            notes: trackContent.notes.map(n => ({
-              id: n.id,
-              pitch: n.pitch,
-              startBeat: n.startBeat,
-              duration: n.duration,
-              velocity: n.velocity,
-            })),
-          },
-        ])
-      ),
+      // `content` is no longer written: from 1.17 it is derived from the phrases by
+      // `compileBars`, exactly as `TrackContent.notes` is derived from its chords one
+      // level down. Writing it would double the file and create a second thing that
+      // could disagree with the phrases about what the song plays.
     })),
     createdAt: project.createdAt.toISOString(),
     updatedAt: project.updatedAt.toISOString(),
@@ -542,6 +623,75 @@ function readSections(raw: unknown, songEnd: number): Section[] | undefined {
  * Deserialize a JSON string back to a Project.
  * Throws on invalid JSON or missing required fields.
  */
+
+/**
+ * The phrases with a pre-1.18 track curve cut up among the placements that play them.
+ *
+ * A curve used to be one line across the whole song, drawn under one instrument. A
+ * phrase's curve is local to the phrase and heard at each of its placements, so the
+ * two cannot be the same array: what a placement covers is what that phrase's curve
+ * becomes, re-based to its own bar 0.
+ *
+ * The level the old curve had *reached* at the join is pinned as a point at local beat
+ * 0, so a placement landing half way up a long fade opens where the fade was rather
+ * than at the fade's beginning. Values are kept verbatim, which sounds identical
+ * because the loader hands an automated track a fader of 1 — see `SCHEMA_VERSION`.
+ *
+ * A phrase that already carries a curve keeps it, which is what makes this a no-op on
+ * a 1.18 file and gives the first placement of a phrase played twice the say.
+ */
+function sliceCurvesIntoPhrases(
+  phrases: Phrase[],
+  clips: PhraseClip[],
+  legacy: Map<string, { volume: AutomationPoint[]; lanes: ParameterAutomation[] }>,
+  bars: Bar[],
+  projectTs: TimeSignature
+): Phrase[] {
+  if (legacy.size === 0) return phrases;
+
+  /** The stretch of `points` covering [start, end), re-based to 0 and pinned at 0. */
+  const sliceCurve = (
+    points: AutomationPoint[],
+    start: number,
+    end: number
+  ): AutomationPoint[] => {
+    if (points.length === 0) return [];
+    const inside = points
+      .filter(point => point.beat > start && point.beat < end)
+      .map(point => ({ beat: point.beat - start, value: point.value }));
+    // `valueAtBeat` holds the first point before it and the last after it, so this is
+    // the level the old curve was actually at when the placement began — including
+    // when it began before the curve's first point or after its last.
+    return normalizePoints([{ beat: 0, value: valueAtBeat(points, start, points[0].value) }, ...inside]);
+  };
+
+  const written = new Map<string, Phrase>();
+  for (const clip of clips) {
+    const curves = legacy.get(clip.trackId);
+    const phrase = phrases.find(ph => ph.id === clip.phraseId);
+    if (!curves || !phrase || written.has(phrase.id)) continue;
+    if (phrase.volumeAutomation || phrase.parameterAutomation) continue;
+
+    const start = clipStartBeat(clip, bars, projectTs);
+    const end = start + clipBeats(clip, phrases, bars, projectTs);
+
+    const volume = sliceCurve(curves.volume, start, end);
+    const lanes = curves.lanes
+      .map(lane => ({ ...lane, points: sliceCurve(lane.points, start, end) }))
+      .filter(lane => lane.points.length > 0);
+
+    if (volume.length === 0 && lanes.length === 0) continue;
+    written.set(phrase.id, {
+      ...phrase,
+      volumeAutomation: volume.length > 0 ? volume : undefined,
+      parameterAutomation: lanes.length > 0 ? lanes : undefined,
+    });
+  }
+
+  return written.size === 0 ? phrases : phrases.map(ph => written.get(ph.id) ?? ph);
+}
+
+
 export function deserializeProject(json: string): Project {
   let parsed: unknown;
   try {
@@ -607,16 +757,13 @@ export function deserializeProject(json: string): Project {
             : DEFAULT_INSTRUMENT_ID,
         // Pre-1.11 tracks had one lane, which is what an absent count means.
         laneCount: readLaneCount(t.laneCount),
-        volume: typeof t.volume === 'number' ? t.volume : 1.0,
-        // Normalised on read rather than trusted: it is the one field a hand-edited
-        // file can put out of order, and everything downstream assumes it is sorted.
-        // Anything malformed is dropped, which lands the track back on its flat
-        // volume rather than failing the whole load.
-        volumeAutomation: parseAutomation(t.volumeAutomation),
-        // Normalised for the same reason, and dropped on the same terms: a lane
-        // naming no parameter drives nothing, and losing it is better than
-        // failing the load over it.
-        parameterAutomation: readParameterAutomation(t.parameterAutomation),
+        // A pre-1.18 curve overrode the fader, so the fader it overrode is not the
+        // level that file played at — 1 is, and the curve is kept verbatim below.
+        volume: parseAutomation(t.volumeAutomation)
+          ? 1.0
+          : typeof t.volume === 'number'
+            ? t.volume
+            : 1.0,
         pan: typeof t.pan === 'number' ? t.pan : 0,
         muted: t.muted === true,
         solo: t.solo === true,
@@ -627,6 +774,27 @@ export function deserializeProject(json: string): Project {
         vst3State: typeof t.vst3State === 'string' ? t.vst3State : undefined,
       }))
     : [];
+
+  /**
+   * The absolute-beat curves a pre-1.18 file states on its tracks, by track id.
+   *
+   * Read aside rather than onto the track, because from 1.18 a track's curves are
+   * derived: whatever lands there is about to be overwritten by `compileAutomation`.
+   * `sliceCurvesIntoPhrases` below is what keeps them, by cutting each one up among
+   * the placements it covers. Normalised on the way in rather than trusted — it is
+   * the one field a hand-edited file can put out of order — and anything malformed is
+   * dropped, which costs a curve rather than the whole load.
+   */
+  const legacyCurves = new Map<string, { volume: AutomationPoint[]; lanes: ParameterAutomation[] }>();
+  if (Array.isArray(p.tracks)) {
+    for (const [i, t] of (p.tracks as Record<string, unknown>[]).entries()) {
+      const volume = parseAutomation(t.volumeAutomation) ?? [];
+      const lanes = readParameterAutomation(t.parameterAutomation) ?? [];
+      if (volume.length > 0 || lanes.length > 0) {
+        legacyCurves.set((t.id as string) ?? `track-${i}`, { volume, lanes });
+      }
+    }
+  }
 
   // A file with no tracks at all is pre-1.5 — and pre-instruments, since 1.5 always
   // writes at least one. Its flat bar arrays are a piano part, so it gets a piano to
@@ -729,6 +897,24 @@ export function deserializeProject(json: string): Project {
         }))
       : [];
 
+  /** A bar's per-key content — per instrument on a song bar, one key on a phrase's. */
+  const readContent = (
+    raw: unknown,
+    barIndex: number,
+    legacyBarScale: Scale | undefined
+  ): Record<string, TrackContent> =>
+    raw && typeof raw === 'object'
+      ? Object.fromEntries(
+          Object.entries(raw as Record<string, Record<string, unknown>>).map(([key, entry]) => [
+            key,
+            {
+              chords: readChords(entry?.chords, barIndex, legacyBarScale),
+              notes: readNotes(entry?.notes, barIndex),
+            },
+          ])
+        )
+      : {};
+
   const bars = Array.isArray(p.bars)
     ? (p.bars as Record<string, unknown>[]).map((b, i) => {
         // 1.5 and later carry `content`; anything earlier carries flat arrays that
@@ -739,17 +925,7 @@ export function deserializeProject(json: string): Project {
 
         const content: Record<string, TrackContent> =
           b.content && typeof b.content === 'object'
-            ? Object.fromEntries(
-                Object.entries(b.content as Record<string, Record<string, unknown>>).map(
-                  ([trackId, raw]) => [
-                    trackId,
-                    {
-                      chords: readChords(raw?.chords, i, legacyBarScale),
-                      notes: readNotes(raw?.notes, i),
-                    },
-                  ]
-                )
-              )
+            ? readContent(b.content, i, legacyBarScale)
             : {
                 [legacyTrackId]: {
                   chords: readChords(b.chords, i, legacyBarScale),
@@ -769,6 +945,84 @@ export function deserializeProject(json: string): Project {
       })
     : [];
 
+  /**
+   * The phrases and placements this file describes.
+   *
+   * 1.17 and later state them outright. Anything earlier authored its music straight
+   * onto the song's bars, one part per instrument running the whole length of the
+   * piece — which *is* a phrase per instrument, placed at bar 0. So the migration is a
+   * re-filing rather than a reinterpretation: every block keeps its bar, its beat, its
+   * lane and its id, and the compile that follows puts it back exactly where the file
+   * had it. An instrument with nothing anywhere gets no phrase, since an empty one
+   * would only clutter the library.
+   */
+  const readPhrases = (): { phrases: Phrase[]; clips: PhraseClip[] } => {
+    if (Array.isArray(p.phrases)) {
+      const phrases = (p.phrases as Record<string, unknown>[]).map((ph, i) => ({
+        id: (ph.id as string) ?? `phrase-${i}`,
+        name: typeof ph.name === 'string' ? ph.name : `Phrase ${i + 1}`,
+        color: typeof ph.color === 'string' ? ph.color : undefined,
+        // Normalised on read for the reason every stored curve is: it is what a
+        // hand-edited file can put out of order, and everything downstream — the
+        // compile most of all — assumes it is sorted.
+        volumeAutomation: parseAutomation(ph.volumeAutomation),
+        parameterAutomation: readParameterAutomation(ph.parameterAutomation),
+        bars: Array.isArray(ph.bars)
+          ? (ph.bars as Record<string, unknown>[]).map((b, j) => ({
+              id: (b.id as string) ?? `phrase-${i}-bar-${j}`,
+              barIndex: j,
+              content: readContent(b.content, j, undefined),
+            }))
+          : [],
+      }));
+      const clips = Array.isArray(p.clips) ? (p.clips as PhraseClip[]) : [];
+      return { phrases, clips };
+    }
+
+    // Pre-1.17: lift each instrument's part off the song bars into a phrase of its own.
+    const phrases: Phrase[] = [];
+    const clips: PhraseClip[] = [];
+    for (const track of tracks) {
+      if (!bars.some(bar => barChords(bar, track.id).length > 0)) continue;
+      const phrase: Phrase = {
+        id: generateId(),
+        name: track.name,
+        color: track.color,
+        bars: bars.map((bar, i) => ({
+          id: generateId(),
+          barIndex: i,
+          content: { [PHRASE_TRACK_KEY]: barContent(bar, track.id) },
+        })),
+      };
+      phrases.push(phrase);
+      clips.push({ id: generateId(), phraseId: phrase.id, trackId: track.id, startBar: 0 });
+    }
+    return { phrases, clips };
+  };
+
+  const { phrases: readPhraseList, clips } = readPhrases();
+  const normalizedClips = normalizeClips(clips, readPhraseList, tracks);
+  // The curves a pre-1.18 file stated on its tracks, cut up among the placements that
+  // cover them. A no-op for a 1.18 file, which states them on the phrases already.
+  const phrases = sliceCurvesIntoPhrases(
+    readPhraseList,
+    normalizedClips,
+    legacyCurves,
+    bars,
+    timeSignature
+  );
+  // `Bar.content` is not in the file from 1.17 on: it is played into the grid here, so
+  // that what comes back is a project ready to sound rather than a bar grid full of
+  // silence with the music alongside it.
+  const compiled = compileBars(
+    bars.map(b => ({ ...b, content: {} })),
+    phrases,
+    normalizedClips
+  );
+  // The curves are derived from the placements exactly as the bars' content is, so
+  // they are played into the instruments here rather than read off the file.
+  const automated = compileAutomation(tracks, compiled, phrases, normalizedClips, timeSignature);
+
   // A range needs both bounds to mean anything; a half-written one is discarded
   // rather than half-applied.
   const hasRange =
@@ -784,11 +1038,13 @@ export function deserializeProject(json: string): Project {
     timeSignature,
     key,
     keyMode,
-    tracks,
+    tracks: automated,
     // Kept undefined rather than empty when nothing is grouped, so a re-save of a
     // pre-1.16 file writes no `trackGroups` key at all.
     trackGroups: trackGroups.length > 0 ? trackGroups : undefined,
-    bars,
+    phrases,
+    clips: normalizedClips,
+    bars: compiled,
     loopStart: hasRange ? (p.loopStart as number) : undefined,
     loopEnd: hasRange ? (p.loopEnd as number) : undefined,
     loopEnabled: p.loopEnabled === true,
@@ -804,6 +1060,93 @@ export function deserializeProject(json: string): Project {
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
+
+/**
+ * Report anything unusable in one curve-holder's lanes, named by `label`.
+ *
+ * Written once and called for each phrase, which from 1.18 is the only thing that
+ * states a curve: a track's are derived, and the only thing checking those could
+ * report is a bug in this app rather than a problem with the file.
+ */
+function validateCurves(
+  label: string,
+  volume: AutomationPoint[] | undefined,
+  lanes: ParameterAutomation[] | undefined,
+  errors: string[]
+): void {
+  if (volume !== undefined) {
+    if (!Array.isArray(volume)) {
+      errors.push(`${label}: volume automation must be a list of points.`);
+    } else {
+      for (const point of volume) {
+        if (typeof point?.beat !== 'number' || !Number.isFinite(point.beat) || point.beat < 0) {
+          errors.push(`${label}: volume automation beat must be a number >= 0.`);
+          break;
+        }
+        if (
+          typeof point.value !== 'number' ||
+          !Number.isFinite(point.value) ||
+          point.value < 0 ||
+          point.value > 1
+        ) {
+          errors.push(`${label}: volume automation value must be between 0 and 1.`);
+          break;
+        }
+      }
+    }
+  }
+
+  if (lanes === undefined) return;
+  if (!Array.isArray(lanes)) {
+    errors.push(`${label}: parameter automation must be a list of lanes.`);
+    return;
+  }
+
+  for (const lane of lanes) {
+    // A 1.14 lane named its parameter directly, so it is read the same way
+    // `readParameterAutomation` reads one — validating a file must not reject what
+    // opening it accepts. The cast is what says this arrives untrusted, whatever the
+    // declared type claims.
+    const legacy = lane as { target?: AutomationTarget; paramId?: number };
+    const target: AutomationTarget | { kind: 'param'; paramId?: number } =
+      legacy?.target ?? { kind: 'param', paramId: legacy?.paramId };
+    const named = describeTarget(target);
+
+    // A VST3 ParamID is an unsigned 32-bit integer and a MIDI controller is 0-127;
+    // anything else names nothing the plugin could be sent.
+    const usable =
+      target.kind === 'param'
+        ? Number.isInteger(target.paramId) && (target.paramId ?? -1) >= 0
+        : target.kind === 'cc' &&
+          Number.isInteger(target.controller) &&
+          target.controller >= 0 &&
+          target.controller <= MAX_CC;
+    if (!usable) {
+      errors.push(
+        `${label}: automation needs a whole parameter id >= 0 or a controller 0-${MAX_CC}.`
+      );
+      break;
+    }
+    if (!Array.isArray(lane.points)) {
+      errors.push(`${label}: ${named} needs a list of points.`);
+      break;
+    }
+    const bad = lane.points.find(
+      p =>
+        typeof p?.beat !== 'number' ||
+        !Number.isFinite(p.beat) ||
+        p.beat < 0 ||
+        typeof p?.value !== 'number' ||
+        !Number.isFinite(p.value) ||
+        p.value < 0 ||
+        p.value > 1
+    );
+    if (bad) {
+      errors.push(`${label}: ${named} needs a beat >= 0 and a value between 0 and 1.`);
+      break;
+    }
+  }
+}
 
 /**
  * Validate a Project and return a ValidationResult.
@@ -898,80 +1241,6 @@ export function validateProject(project: Project): ValidationResult {
     if (typeof t.pan !== 'number' || t.pan < -1 || t.pan > 1) {
       errors.push(`Track ${i}: pan must be between -1 and 1.`);
     }
-    if (t.volumeAutomation !== undefined) {
-      if (!Array.isArray(t.volumeAutomation)) {
-        errors.push(`Track ${i}: volume automation must be a list of points.`);
-      } else {
-        for (const point of t.volumeAutomation) {
-          if (typeof point?.beat !== 'number' || !Number.isFinite(point.beat) || point.beat < 0) {
-            errors.push(`Track ${i}: volume automation beat must be a number >= 0.`);
-            break;
-          }
-          if (
-            typeof point.value !== 'number' ||
-            !Number.isFinite(point.value) ||
-            point.value < 0 ||
-            point.value > 1
-          ) {
-            errors.push(`Track ${i}: volume automation value must be between 0 and 1.`);
-            break;
-          }
-        }
-      }
-    }
-
-    if (t.parameterAutomation !== undefined) {
-      if (!Array.isArray(t.parameterAutomation)) {
-        errors.push(`Track ${i}: parameter automation must be a list of lanes.`);
-      } else {
-        for (const lane of t.parameterAutomation) {
-          // A 1.14 lane named its parameter directly, so it is read the same way
-          // `readParameterAutomation` reads one — validating a file must not
-          // reject what opening it accepts. The cast is what says this arrives
-          // untrusted, whatever the declared type claims.
-          const legacy = lane as { target?: AutomationTarget; paramId?: number };
-          const target: AutomationTarget | { kind: 'param'; paramId?: number } =
-            legacy?.target ?? { kind: 'param', paramId: legacy?.paramId };
-          const named = describeTarget(target);
-
-          // A VST3 ParamID is an unsigned 32-bit integer and a MIDI controller is
-          // 0-127; anything else names nothing the plugin could be sent.
-          const usable =
-            target.kind === 'param'
-              ? Number.isInteger(target.paramId) && (target.paramId ?? -1) >= 0
-              : target.kind === 'cc' &&
-                Number.isInteger(target.controller) &&
-                target.controller >= 0 &&
-                target.controller <= MAX_CC;
-          if (!usable) {
-            errors.push(
-              `Track ${i}: automation needs a whole parameter id >= 0 or a controller 0-${MAX_CC}.`
-            );
-            break;
-          }
-          if (!Array.isArray(lane.points)) {
-            errors.push(`Track ${i}: ${named} needs a list of points.`);
-            break;
-          }
-          const bad = lane.points.find(
-            p =>
-              typeof p?.beat !== 'number' ||
-              !Number.isFinite(p.beat) ||
-              p.beat < 0 ||
-              typeof p?.value !== 'number' ||
-              !Number.isFinite(p.value) ||
-              p.value < 0 ||
-              p.value > 1
-          );
-          if (bad) {
-            errors.push(
-              `Track ${i}: ${named} needs a beat >= 0 and a value between 0 and 1.`
-            );
-            break;
-          }
-        }
-      }
-    }
   }
 
   // Validate bars
@@ -995,28 +1264,73 @@ export function validateProject(project: Project): ValidationResult {
       const { beatsPerMeasure, beatUnit } = b.timeSignature;
       errors.push(`Bar ${i}: invalid time signature ${beatsPerMeasure}/${beatUnit}.`);
     }
-    // Content keyed by an instrument that does not exist would be silently
-    // unplayable and invisible, so it is worth catching at the door.
-    const trackIds = new Set(project.tracks.map(t => t.id));
-    for (const trackId of Object.keys(b.content)) {
-      if (!trackIds.has(trackId)) {
-        errors.push(`Bar ${i}: content for unknown instrument "${trackId}".`);
-        continue;
-      }
-      const chords = barChords(b, trackId);
+  }
+
+  // `Bar.content` is no longer checked here: from 1.17 it is derived by `compileBars`
+  // and never authored, so the only thing it could report is a bug in this app rather
+  // than a problem with the file. What the file does state is the phrases below.
+  const trackIds = new Set((project.tracks ?? []).map(t => t.id));
+  const phraseIds = new Set<string>();
+  for (const phrase of project.phrases ?? []) {
+    if (!phrase.id) errors.push('Phrase: missing id.');
+    if (phraseIds.has(phrase.id)) {
+      errors.push(`Phrase "${phrase.name}": duplicate id "${phrase.id}".`);
+    }
+    phraseIds.add(phrase.id);
+    // A phrase with no bars covers nothing, so no placement of it could ever be
+    // clicked, dragged or heard — it is a block that is not there.
+    if (phrase.bars.length === 0) {
+      errors.push(`Phrase "${phrase.name}": has no bars.`);
+    }
+    validateCurves(
+      `Phrase "${phrase.name}"`,
+      phrase.volumeAutomation,
+      phrase.parameterAutomation,
+      errors
+    );
+    for (let i = 0; i < phrase.bars.length; i++) {
+      const chords = barChords(phrase.bars[i], PHRASE_TRACK_KEY);
       for (let j = 0; j < chords.length; j++) {
         const c = chords[j];
         if (c.quality && !VALID_QUALITIES.includes(c.quality)) {
-          errors.push(`Bar ${i}, chord ${j}: invalid quality "${c.quality}".`);
+          errors.push(`Phrase "${phrase.name}" bar ${i}, chord ${j}: invalid quality "${c.quality}".`);
         }
         // A lane names a row, so a fraction or a negative names none. Absent is
         // the first lane and always fine.
-        if (
-          c.lane !== undefined &&
-          (!Number.isInteger(c.lane) || c.lane < 0)
-        ) {
-          errors.push(`Bar ${i}, chord ${j}: invalid lane "${c.lane}".`);
+        if (c.lane !== undefined && (!Number.isInteger(c.lane) || c.lane < 0)) {
+          errors.push(`Phrase "${phrase.name}" bar ${i}, chord ${j}: invalid lane "${c.lane}".`);
         }
+      }
+    }
+  }
+
+  // Placements: each must name something that exists, sit on a real bar, and have the
+  // row to itself for as long as it runs.
+  const byRow = new Map<string, PhraseClip[]>();
+  for (const clip of project.clips ?? []) {
+    if (!phraseIds.has(clip.phraseId)) {
+      errors.push(`Clip ${clip.id}: unknown phrase "${clip.phraseId}".`);
+      continue;
+    }
+    if (!trackIds.has(clip.trackId)) {
+      errors.push(`Clip ${clip.id}: unknown instrument "${clip.trackId}".`);
+      continue;
+    }
+    if (!Number.isInteger(clip.startBar) || clip.startBar < 0) {
+      errors.push(`Clip ${clip.id}: invalid start bar "${clip.startBar}".`);
+      continue;
+    }
+    const row = byRow.get(clip.trackId);
+    if (row) row.push(clip);
+    else byRow.set(clip.trackId, [clip]);
+  }
+  for (const [trackId, row] of byRow) {
+    const sorted = [...row].sort((a, b) => a.startBar - b.startBar);
+    for (let i = 1; i < sorted.length; i++) {
+      if (clipEndBar(sorted[i - 1], project.phrases ?? []) > sorted[i].startBar) {
+        errors.push(
+          `Instrument "${trackId}": clips ${sorted[i - 1].id} and ${sorted[i].id} overlap.`
+        );
       }
     }
   }

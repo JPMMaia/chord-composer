@@ -14,6 +14,18 @@ import { MAX_SEGMENT_OCTAVE, MIN_SEGMENT_OCTAVE, PIXELS_PER_BEAT } from '@/utils
 export const ZOOM_LEVELS = [40, PIXELS_PER_BEAT, 160, 320];
 
 interface EditorState {
+  /**
+   * Which editing surface the centre column shows.
+   *
+   * A pure view switch, which is why it is here and not beside `editingPhraseId` in
+   * `projectStore`: that field says *which sub-tree the segment actions address*, and
+   * has to survive a render that is showing the arrangement — going back to the
+   * arrangement and returning to the phrase editor should land on the same phrase.
+   * The two are kept in step by `openClip`/`closePhrase`, which set both.
+   */
+  view: 'arrangement' | 'phrase';
+  setView: (view: 'arrangement' | 'phrase') => void;
+
   /** Grid resolution every timeline edit lands on, in beats. */
   snapBeats: number;
   setSnapBeats: (beats: number) => void;
@@ -31,13 +43,24 @@ interface EditorState {
   zoomOut: () => void;
 
   /**
-   * Whether the volume automation lane is shown under the chord lanes.
+   * Whether the automation stack is shown under the phrase's chord lanes.
    *
-   * A view setting rather than part of the piece — the curve itself lives on the
-   * instrument and is saved with it — so this is not written to the project file.
+   * A view setting rather than part of the piece — the curves themselves live on the
+   * phrase and are saved with it — so this is not written to the project file.
    */
   showAutomation: boolean;
   setShowAutomation: (shown: boolean) => void;
+
+  /**
+   * The stretch of the open phrase that Play repeats, in the phrase's own beats.
+   *
+   * Null means the whole phrase, which is what every phrase opens at. A way of
+   * listening rather than part of the music: it is never written to the project file
+   * and never reaches the undo stack, so narrowing it while working on a bar cannot
+   * be undone out from under the user along with the edit they actually made.
+   */
+  phraseLoop: { start: number; end: number } | null;
+  setPhraseLoop: (start: number | null, end: number | null) => void;
 
   /**
    * The key being composed in: what the palette offers, what a dropped block is
@@ -89,6 +112,8 @@ interface EditorState {
    * Whether the number keys write to the timeline. Recording only actually happens
    * while armed *and* playing; armed on its own is a readiness, which is what makes
    * arming before pressing Play the natural order.
+   *
+   * Can only be armed from the phrase editor — see `setRecordArmed`.
    */
   recordArmed: boolean;
   setRecordArmed: (armed: boolean) => void;
@@ -120,6 +145,21 @@ interface EditorState {
  * views of one beat axis, and a single number is what keeps them aligned.
  */
 export const editorStore = create<EditorState>((set, get) => ({
+  view: 'arrangement',
+
+  setView: (view: 'arrangement' | 'phrase') => {
+    // Leaving the phrase editor disarms recording: a take needs a phrase to land in,
+    // and the arrangement has none open. Done here rather than at the two places that
+    // arm, so no future caller can leave the transport pulsing at nothing.
+    // The audition loop goes with it. It names beats in one phrase, so carrying it to
+    // the next surface would repeat a stretch of something else entirely.
+    set(
+      view === 'arrangement'
+        ? { view, recordArmed: false, phraseLoop: null }
+        : { view, phraseLoop: null }
+    );
+  },
+
   snapBeats: DEFAULT_SNAP_BEATS,
 
   setSnapBeats: (beats: number) => {
@@ -163,6 +203,27 @@ export const editorStore = create<EditorState>((set, get) => ({
 
   setShowAutomation: (shown: boolean) => {
     set({ showAutomation: shown });
+  },
+
+  phraseLoop: null,
+
+  setPhraseLoop: (start: number | null, end: number | null) => {
+    // Either bound missing means "the whole phrase" — that is what a click on open
+    // ruler sends.
+    if (start === null || end === null) {
+      set({ phraseLoop: null });
+      return;
+    }
+
+    // Taken as a span rather than as a direction: the ruler already hands over its
+    // edges in order, but a caller that drew one backwards still means the stretch
+    // between them.
+    const lo = Math.max(0, Math.min(start, end));
+    const hi = Math.max(start, end);
+
+    // A range with nothing in it — both edges snapped onto one beat — would repeat
+    // silence for as long as it was left to, so it reads as no range at all.
+    set({ phraseLoop: hi - lo <= 0 ? null : { start: lo, end: hi } });
   },
 
   paletteScale: { root: 'C', type: 'major' },
@@ -210,6 +271,9 @@ export const editorStore = create<EditorState>((set, get) => ({
   recordArmed: false,
 
   setRecordArmed: (armed: boolean) => {
+    // Only the phrase editor has somewhere for a take to go. Refusing here rather
+    // than in the button and the R key separately keeps the two from disagreeing.
+    if (armed && get().view !== 'phrase') return;
     set({ recordArmed: armed });
   },
 

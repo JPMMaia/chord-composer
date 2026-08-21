@@ -8,6 +8,8 @@ import { editorStore } from '@/store/editorStore';
 import { createUndoRedoMiddleware } from '@/engine/undoRedo';
 import type { Project } from '@/types/music';
 import type { ChordSegment } from '@/types/music';
+import { editableBars, openTestPhrase } from '../helpers/phrases';
+import { PHRASE_TRACK_KEY } from '@/engine/phrases';
 
 const state = () => projectStore.getState();
 
@@ -16,6 +18,8 @@ function mountProject() {
   state().createProject();
   for (let i = 0; i < 4; i++) state().addBar();
   selectionStore.getState().selectTrack(state().project!.tracks[0].id);
+  // Copy and paste act on the phrase being edited, so there has to be one open.
+  openTestPhrase(state().project!.tracks[0].id, 4);
 }
 
 /** A chord in the first bar, ready to be copied. */
@@ -31,7 +35,7 @@ function placeAndCopyChord(overrides: Partial<ChordSegment> = {}): ChordSegment 
     duration: 1,
     ...overrides,
   };
-  state().insertSegment(state().project!.bars[0].id, 0, segment, trackId());
+  state().insertSegment(editableBars()[0].id, 0, segment, trackId());
   selectionStore.getState().selectSegment(segment.id);
 
   // Simulate Ctrl+C by calling copySegments directly (full UI key handling is
@@ -68,7 +72,7 @@ describe('useSegmentCopyPaste', () => {
     const chord = placeAndCopyChord();
     renderHook(() => useSegmentCopyPaste());
 
-    const chordCountBefore = ur.current()!.bars[0].content[trackId()]!.chords.length;
+    const chordCountBefore = ur.current()!.phrases[0].bars[0].content[PHRASE_TRACK_KEY]!.chords.length;
 
     // Simulate the paste key-down (pasteSegments is the store method)
     const pasteResult = state().pasteSegments(
@@ -82,7 +86,7 @@ describe('useSegmentCopyPaste', () => {
     expect(pasteResult).toBeDefined();
     expect(pasteResult!.length).toBeGreaterThan(0);
 
-    const chordCountAfter = state().project!.bars[0].content[trackId()]!.chords.length;
+    const chordCountAfter = editableBars()[0].content[PHRASE_TRACK_KEY]!.chords.length;
     expect(chordCountAfter).toBeGreaterThan(chordCountBefore);
 
     // Undo restores the pre-paste state via middleware pointer
@@ -136,6 +140,7 @@ describe('useSegmentCopyPaste', () => {
     state().createProject();
     for (let i = 0; i < 2; i++) state().addBar();
     selectionStore.getState().selectTrack(trackId());
+    openTestPhrase(trackId(), 2);
 
     // Insert a chord and copy it
     const chord: ChordSegment = {
@@ -148,11 +153,11 @@ describe('useSegmentCopyPaste', () => {
       octave: 4,
       duration: 1,
     };
-    state().insertSegment(state().project!.bars[0].id, 0, chord, trackId());
+    state().insertSegment(editableBars()[0].id, 0, chord, trackId());
     selectionStore.getState().selectSegment(chord.id);
     clipboardStore.getState().copySegments();
 
-    const chordCountBefore = ur.current()!.bars[0].content[trackId()]!.chords.length;
+    const chordCountBefore = ur.current()!.phrases[0].bars[0].content[PHRASE_TRACK_KEY]!.chords.length;
 
     renderHook(() => useSegmentCopyPaste());
 
@@ -163,7 +168,7 @@ describe('useSegmentCopyPaste', () => {
       1
     );
 
-    expect(state().project!.bars[0].content[trackId()]!.chords.length).toBeGreaterThan(chordCountBefore);
+    expect(editableBars()[0].content[PHRASE_TRACK_KEY]!.chords.length).toBeGreaterThan(chordCountBefore);
 
     // Undo reverts to the state before paste
     ur.undo();
@@ -188,7 +193,7 @@ describe('useSegmentCopyPaste', () => {
     fireEvent.mouseMove(window, { clientX: 2.4 * pixelsPerBeat });
     fireEvent.keyDown(window, { key: 'v', ctrlKey: true });
 
-    const chords = state().project!.bars[0].content[trackId()]!.chords;
+    const chords = editableBars()[0].content[PHRASE_TRACK_KEY]!.chords;
     expect(chords.length).toBe(2);
     const pasted = chords.find(c => c.id !== 'seg-src')!;
     expect(pasted.startBeat).toBe(2);

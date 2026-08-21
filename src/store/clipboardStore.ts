@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { ChordSegment } from '@/types/music';
-import { projectStore } from './projectStore';
+import { editSurface, projectStore } from './projectStore';
 import { selectionStore } from './selectionStore';
 import { findSegment } from '@/engine/timeline';
 
@@ -52,16 +52,18 @@ export const clipboardStore = create<ClipboardState>((set) => ({
 
     const project = projectStore.getState().project;
     if (!project) return;
+    // A selection is made in the phrase editor, so these ids name blocks in the open
+    // phrase rather than in the compiled song. There is no instrument left to filter
+    // by: a phrase holds one part, and it is the one being copied.
+    const surface = editSurface();
+    if (!surface) return;
 
     const copied: CopiedSegment[] = [];
     let maxBarIndex = 0;
 
     for (const segmentId of selectedSegmentIds) {
-      const loc = findSegment(project.bars, segmentId);
+      const loc = findSegment(surface.bars, segmentId);
       if (!loc) continue;
-
-      // Only copy segments belonging to the currently selected instrument.
-      if (loc.trackId !== selectedTrackId) continue;
 
       // Strip `id` so paste always produces fresh segments, and strip `startBeat`
       // so the dedicated `CopiedSegment.startBeat` field is the sole source of

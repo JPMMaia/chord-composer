@@ -40,6 +40,15 @@ interface SelectionState {
   selectedAutomationPoint: AutomationPointSelection | null;
   /** The section picked in the band above the ruler, or null. */
   selectedSectionId: string | null;
+  /**
+   * The phrase placement picked in the arrangement, or null.
+   *
+   * The fourth answer to "what does Delete act on", and so mutually exclusive with
+   * the other three. It is a clip id rather than a phrase id because the two are not
+   * the same thing to delete: removing a block takes away one placement, and the
+   * phrase itself outlives it in the library.
+   */
+  selectedClipId: string | null;
   selectBar: (barId: string | null) => void;
   selectTrack: (trackId: string | null) => void;
   /** Replace the selection with one block, or clear it. */
@@ -54,6 +63,8 @@ interface SelectionState {
   selectAutomationPoint: (point: AutomationPointSelection | null) => void;
   /** Pick a section in the band, or clear the pick with null. */
   selectSection: (sectionId: string | null) => void;
+  /** Pick a phrase placement in the arrangement, or clear the pick with null. */
+  selectClip: (clipId: string | null) => void;
   clearSelection: () => void;
 }
 
@@ -78,6 +89,7 @@ export const selectionStore = create<SelectionState>((set, get) => ({
   anchorSegmentId: null,
   selectedAutomationPoint: null,
   selectedSectionId: null,
+  selectedClipId: null,
 
   selectBar: (barId: string | null) => {
     set({ selectedBarId: barId });
@@ -106,6 +118,7 @@ export const selectionStore = create<SelectionState>((set, get) => ({
       anchorSegmentId: segmentId,
       selectedAutomationPoint: null,
       selectedSectionId: null,
+      selectedClipId: null,
     });
   },
 
@@ -114,6 +127,7 @@ export const selectionStore = create<SelectionState>((set, get) => ({
       selectedSegmentIds: [...new Set(segmentIds)],
       selectedAutomationPoint: null,
       selectedSectionId: null,
+      selectedClipId: null,
     });
   },
 
@@ -132,6 +146,7 @@ export const selectionStore = create<SelectionState>((set, get) => ({
       anchorSegmentId: isSelected ? get().anchorSegmentId : segmentId,
       selectedAutomationPoint: null,
       selectedSectionId: null,
+      selectedClipId: null,
     });
   },
 
@@ -149,6 +164,7 @@ export const selectionStore = create<SelectionState>((set, get) => ({
       selectedSegmentIds: point === null ? get().selectedSegmentIds : [],
       anchorSegmentId: point === null ? get().anchorSegmentId : null,
       selectedSectionId: point === null ? get().selectedSectionId : null,
+      selectedClipId: point === null ? get().selectedClipId : null,
     });
   },
 
@@ -161,6 +177,21 @@ export const selectionStore = create<SelectionState>((set, get) => ({
       anchorSegmentId: sectionId === null ? get().anchorSegmentId : null,
       selectedAutomationPoint:
         sectionId === null ? get().selectedAutomationPoint : null,
+      selectedClipId: sectionId === null ? get().selectedClipId : null,
+    });
+  },
+
+  /**
+   * The same rule once more, from the arrangement's side: a picked block is what
+   * Delete removes, so the segments, the section and the curve point let go.
+   */
+  selectClip: (clipId: string | null) => {
+    set({
+      selectedClipId: clipId,
+      selectedSegmentIds: clipId === null ? get().selectedSegmentIds : [],
+      anchorSegmentId: clipId === null ? get().anchorSegmentId : null,
+      selectedSectionId: clipId === null ? get().selectedSectionId : null,
+      selectedAutomationPoint: clipId === null ? get().selectedAutomationPoint : null,
     });
   },
 
@@ -172,6 +203,7 @@ export const selectionStore = create<SelectionState>((set, get) => ({
       anchorSegmentId: null,
       selectedAutomationPoint: null,
       selectedSectionId: null,
+      selectedClipId: null,
     });
   },
 }));

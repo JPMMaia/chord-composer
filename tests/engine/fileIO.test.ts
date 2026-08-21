@@ -13,6 +13,9 @@ import {
 import { Project, Bar, Track, Note, ChordSegment, TimeSignature } from '@/types/music';
 import { generateId } from '@/utils/id';
 import { laneKey } from '@/engine/parameterAutomation';
+import { PHRASE_TRACK_KEY, compileBars, sourceSegmentId } from '@/engine/phrases';
+import { barChords } from '@/engine/timeline';
+import { phraseContent } from '../helpers/phrases';
 
 // Helper to create a minimal valid project for testing
 /**
@@ -20,6 +23,10 @@ import { laneKey } from '@/engine/parameterAutomation';
  * that a bar's `content` key and its track's id are the same literal on the page.
  */
 const FIXTURE_TRACK_ID = 'track-fixture';
+
+/** The phrase the fixture's music lives in, and the placement that plays it. */
+const FIXTURE_PHRASE_ID = 'phrase-fixture';
+const FIXTURE_CLIP_ID = 'clip-fixture';
 
 /** Bar content for the fixture instrument. */
 function fixtureContent(
@@ -41,9 +48,38 @@ function soleContent(bar: Bar) {
   return entries[0];
 }
 
+/**
+ * The same music as a pre-1.17 file: written onto the song's bars per instrument, with
+ * no `phrases` key at all.
+ *
+ * What the legacy tests below need. Built from the project's placements rather than
+ * from its compiled bars, so the blocks carry the ids their author gave them instead of
+ * the per-placement ids `compileBars` hands out.
+ */
+function legacyJson(project: Project): Record<string, any> {
+  const json = JSON.parse(serializeProject(project));
+  const bars = json.bars.map((b: any) => ({ ...b, content: {} }));
+
+  for (const clip of json.clips) {
+    const phrase = json.phrases.find((p: any) => p.id === clip.phraseId);
+    for (let i = 0; i < phrase.bars.length; i++) {
+      const target = bars[clip.startBar + i];
+      if (!target) break;
+      target.content[clip.trackId] = phrase.bars[i].content[PHRASE_TRACK_KEY] ?? {
+        chords: [],
+        notes: [],
+      };
+    }
+  }
+
+  delete json.phrases;
+  delete json.clips;
+  return { ...json, bars };
+}
+
 function createTestProject(overrides?: Partial<Project>): Project {
   const now = new Date('2024-01-01T00:00:00.000Z');
-  return {
+  const base: Project = {
     id: generateId(),
     name: 'Test Project',
     bpm: 120,
@@ -62,27 +98,79 @@ function createTestProject(overrides?: Partial<Project>): Project {
         visible: true,
       },
     ],
-    bars: [
+    phrases: [
       {
-        id: generateId(),
-        barIndex: 0,
-        content: {
-          [FIXTURE_TRACK_ID]: {
-            chords: [
-              { id: generateId(), romanNumeral: 'I', chordSymbol: 'C', duration: 4, root: 'C', quality: 'major' },
-            ],
-            notes: [
-              { id: generateId(), pitch: 60, startBeat: 0, duration: 1, velocity: 100 },
-              { id: generateId(), pitch: 64, startBeat: 1, duration: 1, velocity: 90 },
-              { id: generateId(), pitch: 67, startBeat: 2, duration: 2, velocity: 85 },
-            ],
+        id: FIXTURE_PHRASE_ID,
+        name: 'Piano',
+        bars: [
+          {
+            id: 'phrase-bar-0',
+            barIndex: 0,
+            content: phraseContent(
+              [
+                { id: 'seg-fixture', romanNumeral: 'I', chordSymbol: 'C', duration: 4, root: 'C', quality: 'major' },
+              ],
+              [
+                { id: 'note-1', pitch: 60, startBeat: 0, duration: 1, velocity: 100 },
+                { id: 'note-2', pitch: 64, startBeat: 1, duration: 1, velocity: 90 },
+                { id: 'note-3', pitch: 67, startBeat: 2, duration: 2, velocity: 85 },
+              ]
+            ),
           },
-        },
+        ],
       },
     ],
+    clips: [
+      { id: FIXTURE_CLIP_ID, phraseId: FIXTURE_PHRASE_ID, trackId: FIXTURE_TRACK_ID, startBar: 0 },
+    ],
+    bars: [{ id: generateId(), barIndex: 0, content: {} }],
     createdAt: now,
     updatedAt: new Date('2024-01-01T00:01:00.000Z'),
     ...overrides,
+  };
+
+  // A fixture that hands us bars carrying content is describing the *music*, in the
+  // shape files used before 1.17. Lift it into a phrase per instrument, exactly as the
+  // loader's migration does, so those fixtures go on saying what they always said.
+  const authored = base.bars.some(b => Object.keys(b.content).length > 0);
+  const lifted =
+    authored && !overrides?.phrases
+      ? {
+          phrases: base.tracks
+            .filter(t => base.bars.some(b => (b.content[t.id]?.chords.length ?? 0) > 0))
+            .map(t => ({
+              id: `phrase-${t.id}`,
+              name: t.name,
+              bars: base.bars.map((b, i) => ({
+                id: `phrase-${t.id}-bar-${i}`,
+                barIndex: i,
+                content: phraseContent(
+                  b.content[t.id]?.chords ?? [],
+                  b.content[t.id]?.notes ?? []
+                ),
+              })),
+            })),
+          clips: base.tracks
+            .filter(t => base.bars.some(b => (b.content[t.id]?.chords.length ?? 0) > 0))
+            .map(t => ({
+              id: `clip-${t.id}`,
+              phraseId: `phrase-${t.id}`,
+              trackId: t.id,
+              startBar: 0,
+            })),
+        }
+      : { phrases: base.phrases, clips: base.clips };
+
+  // `Bar.content` is derived, so a fixture that wants to be read like a real project
+  // has to be compiled the way a real one is on load.
+  return {
+    ...base,
+    ...lifted,
+    bars: compileBars(
+      base.bars.map(b => ({ ...b, content: {} })),
+      lifted.phrases,
+      lifted.clips
+    ),
   };
 }
 
@@ -143,12 +231,12 @@ describe('fileIO', () => {
       const json = serializeProject(project);
       const parsed = JSON.parse(json);
       expect(parsed.bars[0].barIndex).toBe(0);
-      expect(parsed.bars[0].content[FIXTURE_TRACK_ID].notes).toHaveLength(3);
-      expect(parsed.bars[0].content[FIXTURE_TRACK_ID].chords).toHaveLength(1);
+      expect(parsed.phrases[0].bars[0].content[PHRASE_TRACK_KEY].notes).toHaveLength(3);
+      expect(parsed.phrases[0].bars[0].content[PHRASE_TRACK_KEY].chords).toHaveLength(1);
     });
 
     it('handles empty project (no tracks, no bars)', () => {
-      const project = createTestProject({ tracks: [], bars: [] });
+      const project = createTestProject({ tracks: [], bars: [], phrases: [], clips: [] });
       const json = serializeProject(project);
       const parsed = JSON.parse(json);
       expect(parsed.tracks).toEqual([]);
@@ -283,7 +371,7 @@ describe('fileIO', () => {
     });
 
     it('allows project with no tracks', () => {
-      const project = createTestProject({ tracks: [], bars: [] });
+      const project = createTestProject({ tracks: [], bars: [], phrases: [], clips: [] });
       const result = validateProject(project);
       expect(result.valid).toBe(true);
     });
@@ -485,7 +573,7 @@ describe('fileIO', () => {
 
       it('reads a pre-1.6 chord as having no voicing at all', () => {
         const json = JSON.parse(serializeProject(createTestProject()));
-        for (const content of Object.values(json.bars[0].content) as { chords: unknown[] }[]) {
+        for (const content of Object.values(json.phrases[0].bars[0].content) as { chords: unknown[] }[]) {
           for (const chord of content.chords as Record<string, unknown>[]) {
             delete chord.voicing;
           }
@@ -587,7 +675,7 @@ describe('fileIO', () => {
         });
 
       it('states the current schema version', () => {
-        expect(SCHEMA_VERSION).toBe('1.16');
+        expect(SCHEMA_VERSION).toBe('1.18');
       });
 
       it('round-trips names, ranges and colours', () => {
@@ -680,7 +768,7 @@ describe('fileIO', () => {
       /** The fixture with one automated parameter on its first instrument. */
       const withParams = () => {
         const project = createTestProject();
-        project.tracks[0].parameterAutomation = [
+        project.phrases[0].parameterAutomation = [
           {
             target: { kind: 'param', paramId: 7 },
             name: 'Cutoff',
@@ -696,7 +784,7 @@ describe('fileIO', () => {
       it('round-trips a lane, its name and its points', () => {
         const restored = deserializeProject(serializeProject(withParams()));
 
-        expect(restored.tracks[0].parameterAutomation).toEqual([
+        expect(restored.phrases[0].parameterAutomation).toEqual([
           {
             target: { kind: 'param', paramId: 7 },
             name: 'Cutoff',
@@ -710,36 +798,45 @@ describe('fileIO', () => {
 
       it('omits the key entirely when nothing is automated', () => {
         const json = JSON.parse(serializeProject(createTestProject()));
+        expect('parameterAutomation' in json.phrases[0]).toBe(false);
+      });
+
+      // The instrument's lanes are compiled from the phrases placed on it, so
+      // writing them would save the same curve twice and let the two disagree.
+      it('never writes a lane onto an instrument, however automated it is', () => {
+        const json = JSON.parse(serializeProject(withParams()));
+
         expect('parameterAutomation' in json.tracks[0]).toBe(false);
+        expect('volumeAutomation' in json.tracks[0]).toBe(false);
       });
 
       // A lane with no points survives an edit — it is one just added — but saving
       // it would preserve a gesture rather than a curve.
       it('does not write a lane that has no points', () => {
         const project = createTestProject();
-        project.tracks[0].parameterAutomation = [{ target: { kind: 'param', paramId: 7 }, name: 'Cutoff', points: [] }];
+        project.phrases[0].parameterAutomation = [{ target: { kind: 'param', paramId: 7 }, name: 'Cutoff', points: [] }];
 
         const json = JSON.parse(serializeProject(project));
-        expect('parameterAutomation' in json.tracks[0]).toBe(false);
+        expect('parameterAutomation' in json.phrases[0]).toBe(false);
       });
 
       it('reads a file written before parameter automation as having none', () => {
         const json = JSON.parse(serializeProject(createTestProject()));
         const restored = deserializeProject(JSON.stringify({ ...json, version: '1.13' }));
 
-        expect(restored.tracks[0].parameterAutomation).toBeUndefined();
+        expect(restored.phrases[0].parameterAutomation).toBeUndefined();
         // And the volume curve it did carry is untouched by the new field.
         expect(restored.tracks[0].volume).toBe(json.tracks[0].volume);
       });
 
       it('drops a lane naming no parameter rather than failing the load', () => {
         const json = JSON.parse(serializeProject(withParams()));
-        json.tracks[0].parameterAutomation.push({ name: 'Broken', points: [] });
-        json.tracks[0].parameterAutomation.push({ target: { kind: 'param', paramId: -1 }, name: 'Bad', points: [] });
-        json.tracks[0].parameterAutomation.push({ target: { kind: 'cc', controller: 200 }, name: 'Bad CC', points: [] });
+        json.phrases[0].parameterAutomation.push({ name: 'Broken', points: [] });
+        json.phrases[0].parameterAutomation.push({ target: { kind: 'param', paramId: -1 }, name: 'Bad', points: [] });
+        json.phrases[0].parameterAutomation.push({ target: { kind: 'cc', controller: 200 }, name: 'Bad CC', points: [] });
 
         expect(
-          deserializeProject(JSON.stringify(json)).tracks[0].parameterAutomation?.map(
+          deserializeProject(JSON.stringify(json)).phrases[0].parameterAutomation?.map(
             l => laneKey(l.target)
           )
         ).toEqual(['param:7']);
@@ -749,13 +846,15 @@ describe('fileIO', () => {
       // too. Read as the parameter target it always meant, so a project automated
       // under 1.14 does not silently lose its curves.
       it('reads a 1.14 lane’s bare parameter id as a parameter target', () => {
-        const json = JSON.parse(serializeProject(withParams()));
+        // A 1.14 file states its lanes on the track and nowhere else; they are
+        // lifted onto the phrase placed over them as it is read.
+        const json = JSON.parse(serializeProject(createTestProject()));
         json.version = '1.14';
         json.tracks[0].parameterAutomation = [
           { paramId: 7, name: 'Cutoff', points: [{ beat: 0, value: 0.2 }] },
         ];
 
-        expect(deserializeProject(JSON.stringify(json)).tracks[0].parameterAutomation).toEqual([
+        expect(deserializeProject(JSON.stringify(json)).phrases[0].parameterAutomation).toEqual([
           {
             target: { kind: 'param', paramId: 7 },
             name: 'Cutoff',
@@ -766,8 +865,8 @@ describe('fileIO', () => {
 
       it('round-trips a controller lane beside a parameter one', () => {
         const project = withParams();
-        project.tracks[0].parameterAutomation = [
-          ...project.tracks[0].parameterAutomation!,
+        project.phrases[0].parameterAutomation = [
+          ...project.phrases[0].parameterAutomation!,
           {
             target: { kind: 'cc', controller: 20 },
             name: 'Filter Cutoff',
@@ -777,7 +876,7 @@ describe('fileIO', () => {
 
         const restored = deserializeProject(serializeProject(project));
 
-        expect(restored.tracks[0].parameterAutomation).toEqual([
+        expect(restored.phrases[0].parameterAutomation).toEqual([
           {
             target: { kind: 'cc', controller: 20 },
             name: 'Filter Cutoff',
@@ -796,12 +895,12 @@ describe('fileIO', () => {
 
       it('sorts and dedupes what a hand-edited file states', () => {
         const json = JSON.parse(serializeProject(withParams()));
-        json.tracks[0].parameterAutomation = [
+        json.phrases[0].parameterAutomation = [
           { target: { kind: 'param', paramId: 9 }, name: 'Resonance', points: [{ beat: 4, value: 0.5 }] },
           { target: { kind: 'param', paramId: 2 }, name: 'Drive', points: [{ beat: 4, value: 0.1 }, { beat: 0, value: 0.2 }] },
         ];
 
-        const lanes = deserializeProject(JSON.stringify(json)).tracks[0].parameterAutomation!;
+        const lanes = deserializeProject(JSON.stringify(json)).phrases[0].parameterAutomation!;
 
         expect(lanes.map(l => laneKey(l.target))).toEqual(['param:2', 'param:9']);
         expect(lanes[0].points.map(p => p.beat)).toEqual([0, 4]);
@@ -809,13 +908,13 @@ describe('fileIO', () => {
 
       it('rejects a lane with no parameter id, or a value out of range', () => {
         const noId = createTestProject();
-        noId.tracks[0].parameterAutomation = [
+        noId.phrases[0].parameterAutomation = [
           { target: { kind: 'param', paramId: 1.5 }, name: 'Cutoff', points: [] },
         ];
         expect(validateProject(noId).errors.join(' ')).toContain('whole parameter id');
 
         const badValue = createTestProject();
-        badValue.tracks[0].parameterAutomation = [
+        badValue.phrases[0].parameterAutomation = [
           { target: { kind: 'param', paramId: 7 }, name: 'Cutoff', points: [{ beat: 0, value: 2 }] },
         ];
         expect(validateProject(badValue).errors.join(' ')).toContain('between 0 and 1');
@@ -828,7 +927,7 @@ describe('fileIO', () => {
 
     it('round-trips a segment octave', () => {
       const project = revampProject();
-      project.bars[0].content[FIXTURE_TRACK_ID].chords[0].octave = 2;
+      project.phrases[0].bars[0].content[PHRASE_TRACK_KEY].chords[0].octave = 2;
       const restored = deserializeProject(serializeProject(project));
 
       expect(restored.bars[0].content[FIXTURE_TRACK_ID].chords[0].octave).toBe(2);
@@ -836,7 +935,7 @@ describe('fileIO', () => {
 
     it('leaves a pre-1.3 segment without an octave, so it reads as 4', () => {
       const json = JSON.parse(serializeProject(revampProject()));
-      for (const chord of json.bars[0].content[FIXTURE_TRACK_ID].chords) delete chord.octave;
+      for (const chord of json.phrases[0].bars[0].content[PHRASE_TRACK_KEY].chords) delete chord.octave;
 
       const restored = deserializeProject(JSON.stringify({ ...json, version: '1.2' }));
       expect(restored.bars[0].content[FIXTURE_TRACK_ID].chords[0].octave).toBeUndefined();
@@ -844,7 +943,7 @@ describe('fileIO', () => {
 
     it('round-trips a segment key', () => {
       const project = revampProject();
-      project.bars[0].content[FIXTURE_TRACK_ID].chords[0].scale = {
+      project.phrases[0].bars[0].content[PHRASE_TRACK_KEY].chords[0].scale = {
         root: 'F',
         type: 'lydian',
       };
@@ -857,7 +956,7 @@ describe('fileIO', () => {
     });
 
     it('pushes a pre-1.8 bar key down onto its segments', () => {
-      const json = JSON.parse(serializeProject(revampProject()));
+      const json = legacyJson(revampProject());
       // What a 1.7 file looked like: one key per bar, none on any segment.
       json.bars[0].scale = { root: 'A', type: 'naturalMinor' };
       json.bars[1].scale = { root: 'E', type: 'phrygian' };
@@ -867,22 +966,25 @@ describe('fileIO', () => {
 
       const restored = deserializeProject(JSON.stringify({ ...json, version: '1.7' }));
 
-      for (const chord of restored.bars[0].content[FIXTURE_TRACK_ID].chords) {
+      // Bar 1 is empty, and an empty bar gains no content key at all — `barChords`
+      // states that once so the loop below does not have to.
+      expect(barChords(restored.bars[0], FIXTURE_TRACK_ID)).not.toHaveLength(0);
+      for (const chord of barChords(restored.bars[0], FIXTURE_TRACK_ID)) {
         expect(chord.scale).toEqual({ root: 'A', type: 'naturalMinor' });
       }
-      for (const chord of restored.bars[1].content[FIXTURE_TRACK_ID].chords) {
+      for (const chord of barChords(restored.bars[1], FIXTURE_TRACK_ID)) {
         expect(chord.scale).toEqual({ root: 'E', type: 'phrygian' });
       }
     });
 
     it('leaves a segment keyless when the pre-1.8 bar key is unreadable', () => {
-      const json = JSON.parse(serializeProject(revampProject()));
+      const json = legacyJson(revampProject());
       json.bars[0].scale = { root: 'H', type: 'major' };
       for (const chord of json.bars[0].content[FIXTURE_TRACK_ID].chords) delete chord.scale;
 
       const restored = deserializeProject(JSON.stringify({ ...json, version: '1.7' }));
       // Keyless reads as the project key rather than inventing something.
-      expect(restored.bars[0].content[FIXTURE_TRACK_ID].chords[0].scale).toBeUndefined();
+      expect(barChords(restored.bars[0], FIXTURE_TRACK_ID)[0].scale).toBeUndefined();
     });
 
     it('round-trips per-bar time signatures', () => {
@@ -994,7 +1096,10 @@ describe('fileIO', () => {
       const content = soleContent(restored.bars[0]);
 
       expect(content.chords).toHaveLength(1);
-      expect(content.chords[0]).toMatchObject({ id: 'c1', root: 'C', quality: 'major', duration: 2 });
+      // The compiled block carries a per-placement id; the block that authored it is
+      // still the one the file named.
+      expect(sourceSegmentId(content.chords[0].id)).toBe('c1');
+      expect(content.chords[0]).toMatchObject({ root: 'C', quality: 'major', duration: 2 });
       expect(content.notes.map(n => n.pitch)).toEqual([60, 64]);
     });
 
@@ -1048,8 +1153,8 @@ describe('fileIO', () => {
       expect(restored.tracks[1].instrument).toBe('string_ensemble_1');
       expect(restored.tracks[1].muted).toBe(true);
       expect(restored.tracks[1].visible).toBe(false);
-      expect(restored.bars[0].content.a.chords.map(c => c.id)).toEqual(['ca']);
-      expect(restored.bars[0].content.b.chords.map(c => c.id)).toEqual(['cb']);
+      expect(restored.bars[0].content.a.chords.map(c => sourceSegmentId(c.id))).toEqual(['ca']);
+      expect(restored.bars[0].content.b.chords.map(c => sourceSegmentId(c.id))).toEqual(['cb']);
     });
   });
 
@@ -1077,7 +1182,7 @@ describe('fileIO', () => {
 
     it('keeps a segment on beat 0 rather than losing it as a falsy value', () => {
       const parsed = JSON.parse(serializeProject(spacedProject()));
-      expect(parsed.bars[0].content[FIXTURE_TRACK_ID].chords[0].startBeat).toBe(0);
+      expect(parsed.phrases[0].bars[0].content[PHRASE_TRACK_KEY].chords[0].startBeat).toBe(0);
     });
 
     it('leaves a position-less segment unpositioned, for the store to pack', () => {
@@ -1140,7 +1245,7 @@ describe('fileIO', () => {
 
     it('writes nothing for a piece with no accidentals in it', () => {
       const parsed = JSON.parse(serializeProject(withNote()));
-      expect('alter' in parsed.bars[0].content[FIXTURE_TRACK_ID].chords[0]).toBe(false);
+      expect('alter' in parsed.phrases[0].bars[0].content[PHRASE_TRACK_KEY].chords[0]).toBe(false);
     });
 
     it('reads a pre-1.12 note as the diatonic one it was', () => {
@@ -1178,7 +1283,7 @@ describe('fileIO', () => {
       // A project nobody has recorded into must serialise exactly as it did under
       // 1.8 — an absent key, not an explicit null.
       const parsed = JSON.parse(serializeProject(createTestProject()));
-      const chord = parsed.bars[0].content[FIXTURE_TRACK_ID].chords[0];
+      const chord = parsed.phrases[0].bars[0].content[PHRASE_TRACK_KEY].chords[0];
       expect('velocity' in chord).toBe(false);
     });
 
@@ -1244,7 +1349,7 @@ describe('fileIO', () => {
       // A one-lane project must serialise exactly as it did under 1.10 — an
       // absent key, not an explicit 0 or 1.
       const parsed = JSON.parse(serializeProject(createTestProject()));
-      expect('lane' in parsed.bars[0].content[FIXTURE_TRACK_ID].chords[0]).toBe(false);
+      expect('lane' in parsed.phrases[0].bars[0].content[PHRASE_TRACK_KEY].chords[0]).toBe(false);
       expect('laneCount' in parsed.tracks[0]).toBe(false);
     });
 
@@ -1307,18 +1412,26 @@ describe('fileIO', () => {
     });
   });
 
-  describe('schema 1.10 — volume automation', () => {
-    /** A project whose one instrument fades away across its first two bars. */
+  /**
+   * Volume automation, on the phrase that owns it.
+   *
+   * 1.10 wrote the curve on the instrument, in the song's beats. Since 1.18 it is
+   * the *phrase* that carries one, on its own beats — so what a file states is the
+   * shape, and what an instrument plays is that shape compiled at each placement of
+   * the phrase and scaled by the fader.
+   */
+  describe('volume automation', () => {
+    /** A project whose one phrase fades away across its length. */
     function automatedProject(): Project {
       const project = createTestProject();
       return {
         ...project,
-        tracks: [
+        phrases: [
           {
-            ...project.tracks[0],
+            ...project.phrases[0],
             volumeAutomation: [
               { beat: 0, value: 1 },
-              { beat: 8, value: 0.2 },
+              { beat: 3, value: 0.2 },
             ],
           },
         ],
@@ -1328,15 +1441,30 @@ describe('fileIO', () => {
     it('round-trips a curve', () => {
       const restored = deserializeProject(serializeProject(automatedProject()));
 
-      expect(restored.tracks[0].volumeAutomation).toEqual([
+      expect(restored.phrases[0].volumeAutomation).toEqual([
         { beat: 0, value: 1 },
-        { beat: 8, value: 0.2 },
+        { beat: 3, value: 0.2 },
       ]);
     });
 
-    it('writes nothing at all for an instrument with no curve', () => {
+    // Nothing states the instrument's own curve: it is compiled from the phrases
+    // placed on it as the file is read, exactly as its bars' content is.
+    it('gives the instrument the curve back through its placement', () => {
+      const restored = deserializeProject(serializeProject(automatedProject()));
+
+      // The phrase sits at bar 0 and the fader is at 0.8, so the shape is heard
+      // scaled by it.
+      expect(restored.tracks[0].volumeAutomation).toContainEqual({ beat: 0, value: 0.8 });
+      expect(restored.tracks[0].volumeAutomation).toContainEqual({
+        beat: 3,
+        value: 0.2 * 0.8,
+      });
+    });
+
+    it('writes nothing at all for a phrase with no curve', () => {
       const json = JSON.parse(serializeProject(createTestProject()));
 
+      expect(json.phrases[0]).not.toHaveProperty('volumeAutomation');
       expect(json.tracks[0]).not.toHaveProperty('volumeAutomation');
     });
 
@@ -1345,52 +1473,51 @@ describe('fileIO', () => {
       const json = JSON.parse(
         serializeProject({
           ...project,
-          tracks: [{ ...project.tracks[0], volumeAutomation: [] }],
+          phrases: [{ ...project.phrases[0], volumeAutomation: [] }],
         })
       );
 
-      expect(json.tracks[0].volumeAutomation).toBeUndefined();
+      expect(json.phrases[0].volumeAutomation).toBeUndefined();
     });
 
     it('opens a pre-1.10 file with no curve, so it plays at its flat volume', () => {
       const json = serializeProject(createTestProject());
       const restored = deserializeProject(JSON.stringify({ ...JSON.parse(json), version: '1.9' }));
 
-      expect(restored.tracks[0].volumeAutomation).toBeUndefined();
+      expect(restored.phrases[0].volumeAutomation).toBeUndefined();
       expect(restored.tracks[0].volume).toBe(0.8);
     });
 
     it('sorts a hand-edited file rather than trusting its order', () => {
-      const project = automatedProject();
-      const json = JSON.parse(serializeProject(project));
-      json.tracks[0].volumeAutomation = [
-        { beat: 8, value: 0.2 },
+      const json = JSON.parse(serializeProject(automatedProject()));
+      json.phrases[0].volumeAutomation = [
+        { beat: 3, value: 0.2 },
         { beat: 0, value: 1 },
       ];
 
-      expect(deserializeProject(JSON.stringify(json)).tracks[0].volumeAutomation).toEqual([
+      expect(deserializeProject(JSON.stringify(json)).phrases[0].volumeAutomation).toEqual([
         { beat: 0, value: 1 },
-        { beat: 8, value: 0.2 },
+        { beat: 3, value: 0.2 },
       ]);
     });
 
     it('drops malformed points rather than failing the load', () => {
       const json = JSON.parse(serializeProject(automatedProject()));
-      json.tracks[0].volumeAutomation = [
+      json.phrases[0].volumeAutomation = [
         { beat: 'nonsense', value: 1 },
-        { beat: 4, value: 5 },
-        { beat: 8, value: 0.2 },
+        { beat: 2, value: 5 },
+        { beat: 3, value: 0.2 },
       ];
 
       const restored = deserializeProject(JSON.stringify(json));
-      expect(restored.tracks[0].volumeAutomation).toEqual([{ beat: 8, value: 0.2 }]);
+      expect(restored.phrases[0].volumeAutomation).toEqual([{ beat: 3, value: 0.2 }]);
     });
 
     it('reads a curve that is not a list at all as no curve', () => {
       const json = JSON.parse(serializeProject(automatedProject()));
-      json.tracks[0].volumeAutomation = 'loud';
+      json.phrases[0].volumeAutomation = 'loud';
 
-      expect(deserializeProject(JSON.stringify(json)).tracks[0].volumeAutomation).toBeUndefined();
+      expect(deserializeProject(JSON.stringify(json)).phrases[0].volumeAutomation).toBeUndefined();
     });
 
     describe('validateProject', () => {
@@ -1402,23 +1529,130 @@ describe('fileIO', () => {
         const project = automatedProject();
         const result = validateProject({
           ...project,
-          tracks: [{ ...project.tracks[0], volumeAutomation: [{ beat: 0, value: 2 }] }],
+          phrases: [{ ...project.phrases[0], volumeAutomation: [{ beat: 0, value: 2 }] }],
         });
 
         expect(result.valid).toBe(false);
         expect(result.errors.join(' ')).toContain('volume automation value');
       });
 
-      it('rejects a point before the start of the project', () => {
+      it('rejects a point before the start of the phrase', () => {
         const project = automatedProject();
         const result = validateProject({
           ...project,
-          tracks: [{ ...project.tracks[0], volumeAutomation: [{ beat: -1, value: 1 }] }],
+          phrases: [{ ...project.phrases[0], volumeAutomation: [{ beat: -1, value: 1 }] }],
         });
 
         expect(result.valid).toBe(false);
         expect(result.errors.join(' ')).toContain('volume automation beat');
       });
+    });
+  });
+
+  /**
+   * Schema 1.18: a curve written before it moved onto the phrase.
+   *
+   * A pre-1.18 file states one curve per instrument, in the song's beats, and it
+   * *overrode* the fader rather than scaling it. Each placement takes the slice of
+   * that curve lying over it, re-based to its own bar 0, and the fader is forced to
+   * 1 so the values go on meaning the levels they always meant.
+   */
+  describe('schema 1.18 — lifting a track curve into its phrases', () => {
+    /** A 1.17 file: the curve on the track, the music in a phrase placed at bar 0. */
+    function legacyFile(points: { beat: number; value: number }[]): string {
+      const project = createTestProject();
+      const json = JSON.parse(serializeProject(project));
+      json.version = '1.17';
+      json.tracks[0].volumeAutomation = points;
+      return JSON.stringify(json);
+    }
+
+    it('slices the curve into the phrase placed over it', () => {
+      const restored = deserializeProject(
+        legacyFile([
+          { beat: 0, value: 1 },
+          { beat: 2, value: 0.5 },
+        ])
+      );
+
+      expect(restored.phrases[0].volumeAutomation).toEqual([
+        { beat: 0, value: 1 },
+        { beat: 2, value: 0.5 },
+      ]);
+    });
+
+    // The curve used to be the level itself, so a fader left where it was would
+    // scale it a second time and the project would open quieter than it was saved.
+    it('forces the fader to 1, because the old curve was the level', () => {
+      const restored = deserializeProject(legacyFile([{ beat: 0, value: 0.5 }]));
+
+      expect(restored.tracks[0].volume).toBe(1);
+      expect(restored.tracks[0].volumeAutomation).toContainEqual({ beat: 0, value: 0.5 });
+    });
+
+    it('leaves the fader alone for an instrument that had no curve', () => {
+      const json = JSON.parse(serializeProject(createTestProject()));
+      json.version = '1.17';
+
+      expect(deserializeProject(JSON.stringify(json)).tracks[0].volume).toBe(0.8);
+    });
+
+    // A placement starting mid-curve is at whatever level the ramp had reached,
+    // which no stated point says: it is pinned so the phrase opens where the song did.
+    it('pins the level a placement starts at', () => {
+      const project = createTestProject();
+      // Two bars, with the phrase placed on the second one.
+      const json = JSON.parse(
+        serializeProject({
+          ...project,
+          bars: [...project.bars, { id: 'bar-1', barIndex: 1, content: {} }],
+          clips: [{ ...project.clips[0], startBar: 1 }],
+        })
+      );
+      json.version = '1.17';
+      json.tracks[0].volumeAutomation = [
+        { beat: 0, value: 1 },
+        { beat: 8, value: 0 },
+      ];
+
+      const restored = deserializeProject(JSON.stringify(json));
+
+      // Bar 1 starts at song beat 4, half way down the ramp.
+      expect(restored.phrases[0].volumeAutomation![0]).toEqual({ beat: 0, value: 0.5 });
+    });
+
+    it('lifts the plugin lanes the same way', () => {
+      const json = JSON.parse(serializeProject(createTestProject()));
+      json.version = '1.17';
+      json.tracks[0].parameterAutomation = [
+        {
+          target: { kind: 'param', paramId: 7 },
+          name: 'Cutoff',
+          points: [{ beat: 0, value: 0.2 }],
+        },
+      ];
+
+      expect(deserializeProject(JSON.stringify(json)).phrases[0].parameterAutomation).toEqual([
+        {
+          target: { kind: 'param', paramId: 7 },
+          name: 'Cutoff',
+          points: [{ beat: 0, value: 0.2 }],
+        },
+      ]);
+    });
+
+    // A 1.18 file already says where its curves belong, so nothing is lifted into
+    // a phrase that has one of its own.
+    it('leaves a 1.18 file\'s phrases exactly as written', () => {
+      const project = createTestProject();
+      const written = serializeProject({
+        ...project,
+        phrases: [{ ...project.phrases[0], volumeAutomation: [{ beat: 1, value: 0.3 }] }],
+      });
+
+      expect(deserializeProject(written).phrases[0].volumeAutomation).toEqual([
+        { beat: 1, value: 0.3 },
+      ]);
     });
   });
 
@@ -1557,6 +1791,196 @@ describe('fileIO', () => {
 
         expect(result.valid).toBe(false);
         expect(result.errors.join(' ')).toContain('group "g1" does not exist');
+      });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Schema 1.17 — phrases and their placements
+  // ---------------------------------------------------------------------------
+
+  describe('schema 1.17 — phrases', () => {
+    /** Two placements of one four-bar phrase, on two instruments. */
+    function arranged(): Project {
+      return createTestProject({
+        tracks: [
+          { id: 'a', name: 'Piano', instrument: 'acoustic_grand_piano', volume: 1, pan: 0, muted: false, solo: false, visible: true },
+          { id: 'b', name: 'Bass', instrument: 'acoustic_bass', volume: 1, pan: 0, muted: false, solo: false, visible: true },
+        ],
+        phrases: [
+          {
+            id: 'p1',
+            name: 'Verse',
+            color: '#3b82f6',
+            bars: [
+              {
+                id: 'p1-b0',
+                barIndex: 0,
+                content: phraseContent(
+                  [{ id: 's1', kind: 'chord', startBeat: 0, duration: 2, root: 'C', quality: 'major', romanNumeral: 'I' }],
+                  []
+                ),
+              },
+              { id: 'p1-b1', barIndex: 1, content: phraseContent([], []) },
+            ],
+          },
+        ],
+        clips: [
+          { id: 'c1', phraseId: 'p1', trackId: 'a', startBar: 0 },
+          { id: 'c2', phraseId: 'p1', trackId: 'b', startBar: 4 },
+        ],
+        bars: Array.from({ length: 8 }, (_, i) => ({ id: `bar-${i}`, barIndex: i, content: {} })),
+      });
+    }
+
+    it('round-trips phrases and their placements', () => {
+      const restored = deserializeProject(serializeProject(arranged()));
+
+      expect(restored.phrases).toHaveLength(1);
+      expect(restored.phrases[0]).toMatchObject({ id: 'p1', name: 'Verse', color: '#3b82f6' });
+      expect(restored.phrases[0].bars).toHaveLength(2);
+      expect(barChords(restored.phrases[0].bars[0], PHRASE_TRACK_KEY)).toHaveLength(1);
+      expect(restored.clips).toEqual([
+        { id: 'c1', phraseId: 'p1', trackId: 'a', startBar: 0 },
+        { id: 'c2', phraseId: 'p1', trackId: 'b', startBar: 4 },
+      ]);
+    });
+
+    it('writes no bar content at all — it is derived', () => {
+      const parsed = JSON.parse(serializeProject(arranged()));
+
+      expect(parsed.bars).toHaveLength(8);
+      for (const bar of parsed.bars) {
+        expect(bar).not.toHaveProperty('content');
+      }
+      // …and the music is in the phrase instead.
+      expect(parsed.phrases[0].bars[0].content[PHRASE_TRACK_KEY].chords).toHaveLength(1);
+    });
+
+    it('plays the phrase back into the bars each placement names', () => {
+      const restored = deserializeProject(serializeProject(arranged()));
+
+      expect(barChords(restored.bars[0], 'a')).toHaveLength(1);
+      expect(barChords(restored.bars[4], 'b')).toHaveLength(1);
+      // …and nowhere else.
+      expect(barChords(restored.bars[0], 'b')).toHaveLength(0);
+      expect(barChords(restored.bars[4], 'a')).toHaveLength(0);
+      expect(barChords(restored.bars[2], 'a')).toHaveLength(0);
+    });
+
+    it('drops a placement whose phrase or instrument has gone', () => {
+      const json = JSON.parse(serializeProject(arranged()));
+      json.clips.push({ id: 'c3', phraseId: 'nope', trackId: 'a', startBar: 6 });
+      json.clips.push({ id: 'c4', phraseId: 'p1', trackId: 'nope', startBar: 6 });
+
+      const restored = deserializeProject(JSON.stringify(json));
+      expect(restored.clips.map(c => c.id)).toEqual(['c1', 'c2']);
+    });
+
+    it('drops the later of two overlapping placements', () => {
+      const json = JSON.parse(serializeProject(arranged()));
+      json.clips.push({ id: 'c3', phraseId: 'p1', trackId: 'a', startBar: 1 });
+
+      const restored = deserializeProject(JSON.stringify(json));
+      expect(restored.clips.filter(c => c.trackId === 'a').map(c => c.id)).toEqual(['c1']);
+    });
+
+    describe('migrating a pre-1.17 file', () => {
+      /** The same music as `arranged()`, written the way files were before 1.17. */
+      function legacy(): string {
+        return JSON.stringify({ ...legacyJson(arranged()), version: '1.16' });
+      }
+
+      it('lifts each instrument’s part into a phrase placed at bar 0', () => {
+        const restored = deserializeProject(legacy());
+
+        expect(restored.phrases).toHaveLength(2);
+        expect(restored.phrases.map(p => p.name)).toEqual(['Piano', 'Bass']);
+        expect(restored.clips).toHaveLength(2);
+        expect(restored.clips.every(c => c.startBar === 0)).toBe(true);
+        expect(restored.clips.map(c => c.trackId).sort()).toEqual(['a', 'b']);
+      });
+
+      it('reproduces the arrangement the file had, bar for bar', () => {
+        const before = deserializeProject(JSON.stringify({ ...legacyJson(arranged()), version: '1.16' }));
+
+        // Every block is back where the pre-1.17 file put it, under the same
+        // instrument, on the same beat, with the same length.
+        expect(barChords(before.bars[0], 'a').map(c => ({
+          id: sourceSegmentId(c.id),
+          startBeat: c.startBeat,
+          duration: c.duration,
+        }))).toEqual([{ id: 's1', startBeat: 0, duration: 2 }]);
+        expect(barChords(before.bars[4], 'b').map(c => sourceSegmentId(c.id))).toEqual(['s1']);
+      });
+
+      it('gives an instrument with nothing anywhere no phrase at all', () => {
+        const json = legacyJson(arranged()) as Record<string, any>;
+        json.tracks.push({
+          id: 'c',
+          name: 'Silent',
+          instrument: 'flute',
+          volume: 1,
+          pan: 0,
+          muted: false,
+          solo: false,
+          visible: true,
+        });
+
+        const restored = deserializeProject(JSON.stringify({ ...json, version: '1.16' }));
+        expect(restored.phrases.map(p => p.name)).toEqual(['Piano', 'Bass']);
+      });
+
+      it('survives a re-save: the migrated project round-trips as 1.17', () => {
+        const migrated = deserializeProject(legacy());
+        const again = deserializeProject(serializeProject(migrated));
+
+        expect(again.phrases).toHaveLength(2);
+        expect(again.clips).toHaveLength(2);
+        expect(barChords(again.bars[0], 'a')).toHaveLength(1);
+        expect(barChords(again.bars[4], 'b')).toHaveLength(1);
+      });
+    });
+
+    describe('validation', () => {
+      it('rejects a placement naming a phrase that does not exist', () => {
+        const project = arranged();
+        project.clips = [...project.clips, { id: 'x', phraseId: 'nope', trackId: 'a', startBar: 6 }];
+        expect(validateProject(project).errors.join(' ')).toContain('unknown phrase');
+      });
+
+      it('rejects a placement naming an instrument that does not exist', () => {
+        const project = arranged();
+        project.clips = [...project.clips, { id: 'x', phraseId: 'p1', trackId: 'nope', startBar: 6 }];
+        expect(validateProject(project).errors.join(' ')).toContain('unknown instrument');
+      });
+
+      it('rejects a negative or fractional start bar', () => {
+        const project = arranged();
+        project.clips = [...project.clips, { id: 'x', phraseId: 'p1', trackId: 'a', startBar: -1 }];
+        expect(validateProject(project).errors.join(' ')).toContain('invalid start bar');
+      });
+
+      it('rejects two placements overlapping on one row', () => {
+        const project = arranged();
+        project.clips = [...project.clips, { id: 'x', phraseId: 'p1', trackId: 'a', startBar: 1 }];
+        expect(validateProject(project).errors.join(' ')).toContain('overlap');
+      });
+
+      it('rejects a duplicate phrase id', () => {
+        const project = arranged();
+        project.phrases = [...project.phrases, { ...project.phrases[0], name: 'Copy' }];
+        expect(validateProject(project).errors.join(' ')).toContain('duplicate id');
+      });
+
+      it('rejects a phrase with no bars', () => {
+        const project = arranged();
+        project.phrases = [{ ...project.phrases[0], bars: [] }];
+        expect(validateProject(project).errors.join(' ')).toContain('has no bars');
+      });
+
+      it('accepts the well-formed arrangement', () => {
+        expect(validateProject(arranged()).valid).toBe(true);
       });
     });
   });

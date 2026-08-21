@@ -108,8 +108,32 @@ const RESERVED = new Set([
 export function nextFreeCc(supported: Vst3CcInfo[], taken: Iterable<number>): number | null {
   const used = new Set(taken);
   const mapped = new Set(supported.map(cc => cc.controller));
-  const free = (cc: number) => mapped.has(cc) && !used.has(cc);
+  return pickController(cc => mapped.has(cc) && !used.has(cc));
+}
 
+/**
+ * The controller to offer when nothing says which ones the instrument accepts.
+ *
+ * `nextFreeCc` without the plugin's say: a General MIDI sound, a plugin that
+ * publishes no `IMidiMapping`, and a browser build all take a lane just the same,
+ * because the lane is the phrase's and reaches the MIDI export whatever is playing
+ * it. Anything already automated is still skipped, so pressing Add repeatedly walks
+ * down the quiet blocks rather than offering the same number twice.
+ *
+ * @param taken - Controllers the phrase already has a lane for.
+ */
+export function freeController(taken: Iterable<number>): number | null {
+  const used = new Set(taken);
+  return pickController(cc => !used.has(cc));
+}
+
+/**
+ * The first controller `free` accepts, quiet blocks first.
+ *
+ * Shared by both callers above so the order of preference — the two undefined
+ * blocks, then anything the spec has not already spoken for — is stated once.
+ */
+function pickController(free: (cc: number) => boolean): number | null {
   for (const [from, to] of PREFERRED_BLOCKS) {
     for (let cc = from; cc <= to; cc++) {
       if (free(cc)) return cc;

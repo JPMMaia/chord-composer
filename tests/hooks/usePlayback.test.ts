@@ -571,6 +571,75 @@ describe('usePlayback', () => {
     });
   });
 
+  /**
+   * The phrase editor auditioning one placement.
+   *
+   * There is no second engine for it: the song is still what is scheduled, and the
+   * audition only says which instruments are heard while it plays. It *replaces*
+   * mute and solo rather than narrowing them — the user opened the phrase to hear
+   * it, so an instrument muted while working on the arrangement still sounds.
+   */
+  describe('an audition set', () => {
+    const OTHER = 'track-other';
+
+    /** Two instruments playing at once, so "only one of them" can be told apart. */
+    const duet: PlaybackConfig = {
+      ...config,
+      bars: [
+        {
+          ...makeBar(0, [makeNote(60, 0)]),
+          content: {
+            [TEST_TRACK_ID]: { chords: [], notes: [makeNote(60, 0)] },
+            [OTHER]: { chords: [], notes: [makeNote(72, 0)] },
+          },
+        },
+      ],
+      tracks: [testTrack, { ...testTrack, id: OTHER, name: 'Lead' }],
+    };
+
+    it('sounds both instruments with no audition on', async () => {
+      const { result } = renderHook(() => usePlayback(duet));
+      await startPlayback(result);
+
+      expect(scheduled.map(n => n.midiNote).sort()).toEqual([60, 72]);
+    });
+
+    it('sounds only the instruments it names', async () => {
+      const { result } = renderHook(() =>
+        usePlayback({ ...duet, audibleTrackIds: [TEST_TRACK_ID] })
+      );
+      await startPlayback(result);
+
+      expect(scheduled.map(n => n.midiNote)).toEqual([60]);
+    });
+
+    it('sounds a muted instrument it names', async () => {
+      const { result } = renderHook(() =>
+        usePlayback({
+          ...duet,
+          tracks: [{ ...testTrack, muted: true }, { ...testTrack, id: OTHER, name: 'Lead' }],
+          audibleTrackIds: [TEST_TRACK_ID],
+        })
+      );
+      await startPlayback(result);
+
+      expect(scheduled.map(n => n.midiNote)).toEqual([60]);
+    });
+
+    it('silences an instrument soloed elsewhere in the song', async () => {
+      const { result } = renderHook(() =>
+        usePlayback({
+          ...duet,
+          tracks: [testTrack, { ...testTrack, id: OTHER, name: 'Lead', solo: true }],
+          audibleTrackIds: [TEST_TRACK_ID],
+        })
+      );
+      await startPlayback(result);
+
+      expect(scheduled.map(n => n.midiNote)).toEqual([60]);
+    });
+  });
+
   describe('volume automation', () => {
     /** A fade from full to silence across beats 1–3, i.e. seconds 1–3 at 60 BPM. */
     const fading: PlaybackConfig = {

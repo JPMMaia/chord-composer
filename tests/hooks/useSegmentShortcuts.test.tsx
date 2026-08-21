@@ -7,6 +7,8 @@ import { editorStore, ZOOM_LEVELS } from '@/store/editorStore';
 import { PIXELS_PER_BEAT } from '@/utils/constants';
 import type { ChordSegment } from '@/types/music';
 import { barChords } from '@/engine/timeline';
+import { PHRASE_TRACK_KEY } from '@/engine/phrases';
+import { editableBars, openTestPhrase } from '../helpers/phrases';
 
 /** The instrument being edited — the Piano every project starts with. */
 const trackId = (): string => projectStore.getState().project!.tracks[0].id;
@@ -26,13 +28,13 @@ function placeChord(overrides: Partial<ChordSegment> = {}): ChordSegment {
     duration: 1,
     ...overrides,
   };
-  state().insertSegment(state().project!.bars[0].id, 0, segment, trackId());
+  state().insertSegment(editableBars()[0].id, 0, segment, trackId());
   return segment;
 }
 
 /** The live copy of a segment, after the store has rebuilt the project around it. */
 const segmentOf = (id: string): ChordSegment =>
-  state().project!.bars.flatMap(b => barChords(b, trackId())).find(c => c.id === id)!;
+  editableBars().flatMap(b => barChords(b, PHRASE_TRACK_KEY)).find(c => c.id === id)!;
 
 describe('useSegmentShortcuts', () => {
   beforeEach(() => {
@@ -40,8 +42,10 @@ describe('useSegmentShortcuts', () => {
     state().createProject();
     state().addBar();
     selectionStore.getState().clearSelection();
-    // Select-all acts on the instrument the timeline is showing, so it needs one.
+    // Select-all acts on the instrument the timeline is showing, so it needs one —
+    // and on the phrase it is showing *of* that instrument, so it needs one open.
     selectionStore.getState().selectTrack(trackId());
+    openTestPhrase(trackId(), 2);
   });
 
   it('steps the selected chord up a scale degree on ArrowUp', () => {
@@ -229,7 +233,7 @@ describe('useSegmentShortcuts', () => {
         duration: 1,
         scale: { root: 'G', type: 'major' },
       };
-      state().insertSegment(state().project!.bars[1].id, 0, second, trackId());
+      state().insertSegment(editableBars()[1].id, 0, second, trackId());
       selectionStore.getState().setSelectedSegments([first.id, second.id]);
       return [first, second];
     }
@@ -369,6 +373,6 @@ function chordsInBothBars(): void {
     octave: 4,
     duration: 1,
   };
-  state().insertSegment(state().project!.bars[0].id, 0, { ...base, id: 'seg-1' }, trackId());
-  state().insertSegment(state().project!.bars[1].id, 0, { ...base, id: 'seg-2' }, trackId());
+  state().insertSegment(editableBars()[0].id, 0, { ...base, id: 'seg-1' }, trackId());
+  state().insertSegment(editableBars()[1].id, 0, { ...base, id: 'seg-2' }, trackId());
 }

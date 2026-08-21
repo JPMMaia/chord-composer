@@ -10,6 +10,8 @@ import {
 } from '@testing-library/react';
 import { ChordTimeline } from '@/components/ChordTimeline';
 import { projectStore } from '@/store/projectStore';
+import { PHRASE_TRACK_KEY } from '@/engine/phrases';
+import { addEditableBar, editableBars, openTestPhrase } from '../helpers/phrases';
 import { selectionStore } from '@/store/selectionStore';
 import { editorStore } from '@/store/editorStore';
 import { getPaletteItems } from '@/engine/palette';
@@ -54,7 +56,24 @@ function makeDataTransfer(item: PaletteItem) {
 
 const cMajorChords = () => getPaletteItems({ root: 'C', type: 'major' }, 'chords');
 
+/**
+ * The bars the timeline is showing — the open phrase's.
+ *
+ * Not the song's: the timeline edits one phrase at a time, and a block dropped on it
+ * lands in that phrase rather than on the bar grid underneath.
+ */
 function bars() {
+  return editableBars();
+}
+
+/**
+ * The song's bars — where the metre lives.
+ *
+ * A phrase carries no metre of its own; it borrows the metre of the song bars its
+ * first placement covers. So a test that wants a 3/4 bar sets it on the song and
+ * reads the effect on the phrase.
+ */
+function songBars() {
   return projectStore.getState().project!.bars;
 }
 
@@ -68,12 +87,12 @@ function trackId(): string {
 }
 
 function segments(): ChordSegment[] {
-  return bars().flatMap(b => barChords(b, trackId()));
+  return bars().flatMap(b => barChords(b, PHRASE_TRACK_KEY));
 }
 
 /** `id@start` for a bar's blocks, so placement assertions read at a glance. */
 function layout(barIndex: number): string[] {
-  return barChords(bars()[barIndex], trackId()).map(c => `${c.id}@${c.startBeat}`);
+  return barChords(bars()[barIndex], PHRASE_TRACK_KEY).map(c => `${c.id}@${c.startBeat}`);
 }
 
 /**
@@ -189,6 +208,8 @@ describe('ChordTimeline', () => {
     projectStore.getState().addBar();
     // The timeline edits one instrument, so it needs one selected to show lanes.
     selectionStore.getState().selectTrack(trackId());
+    // …and a phrase open on it, since that is the surface the timeline edits.
+    openTestPhrase(trackId(), 2);
   });
 
   afterEach(() => {
@@ -231,17 +252,16 @@ describe('ChordTimeline', () => {
   });
 
   it('narrows a bar and drops its gridlines when its time signature changes', () => {
+    // Set on the song, where metre lives; the phrase over it follows.
+    act(() => {
+      projectStore
+        .getState()
+        .setBarTimeSignature(songBars()[0].id, { beatsPerMeasure: 3, beatUnit: 4 });
+    });
     render(<ChordTimeline />);
     const bar = bars()[0];
 
-    fireEvent.change(screen.getByLabelText('Time signature for bar 1'), {
-      target: { value: '3/4' },
-    });
-
-    expect(projectStore.getState().project!.bars[0].timeSignature).toEqual({
-      beatsPerMeasure: 3,
-      beatUnit: 4,
-    });
+    expect(screen.getByTestId('bar-time-signature-1')).toHaveTextContent('3/4');
     const el = screen.getByTestId(`timeline-bar-${bar.id}`);
     expect(within(el).getAllByTestId('beat-line')).toHaveLength(3);
     expect(el).toHaveStyle({ width: `${3 * PIXELS_PER_BEAT}px` });
@@ -260,7 +280,7 @@ describe('ChordTimeline', () => {
     dropAt(bars()[0].id, cMajorChords()[0], 0);
 
     // C major triad in the middle-C octave.
-    expect(barNotes(bars()[0], trackId()).map(n => n.pitch)).toEqual([60, 64, 67]);
+    expect(barNotes(bars()[0], PHRASE_TRACK_KEY).map(n => n.pitch)).toEqual([60, 64, 67]);
   });
 
   describe('grid snapping', () => {
@@ -360,7 +380,9 @@ describe('ChordTimeline', () => {
     /** Give the first bar its own time signature and render. */
     function renderWithMeter(beatsPerMeasure: number, beatUnit: number) {
       act(() => {
-        projectStore.getState().setBarTimeSignature(bars()[0].id, { beatsPerMeasure, beatUnit });
+        projectStore
+          .getState()
+          .setBarTimeSignature(songBars()[0].id, { beatsPerMeasure, beatUnit });
       });
       render(<ChordTimeline />);
       return screen.getByTestId(`timeline-bar-${bars()[0].id}`);
@@ -419,7 +441,7 @@ describe('ChordTimeline', () => {
       dropAt(bars()[0].id, cMajorChords()[0], 2);
 
       expect(segments()[0].startBeat).toBe(2);
-      expect(barNotes(bars()[0], trackId()).every(n => n.startBeat === 2)).toBe(true);
+      expect(barNotes(bars()[0], PHRASE_TRACK_KEY).every(n => n.startBeat === 2)).toBe(true);
     });
 
     it('pushes the block it is dropped on to the right', () => {
@@ -445,7 +467,7 @@ describe('ChordTimeline', () => {
     /** `pitch@bar:start` per block, in project order. */
     function phrase(): string[] {
       return bars().flatMap((bar, index) =>
-        barChords(bar, trackId()).map(c => `${c.pitch}@${index}:${c.startBeat}`)
+        barChords(bar, PHRASE_TRACK_KEY).map(c => `${c.pitch}@${index}:${c.startBeat}`)
       );
     }
 
@@ -604,7 +626,7 @@ describe('ChordTimeline', () => {
 
       dragBlock(id, bars()[1].id, 0, 1);
 
-      expect(barChords(bars()[0], trackId())).toHaveLength(0);
+      expect(barChords(bars()[0], PHRASE_TRACK_KEY)).toHaveLength(0);
       expect(layout(1)).toEqual([`${id}@1`]);
     });
 
@@ -667,7 +689,7 @@ describe('ChordTimeline', () => {
 
       dragBlock(first, bars()[1].id, 1, 0);
 
-      expect(barChords(bars()[0], trackId())).toHaveLength(0);
+      expect(barChords(bars()[0], PHRASE_TRACK_KEY)).toHaveLength(0);
       expect(layout(1)).toEqual([`${first}@0`, `${second}@1`]);
     });
 
@@ -862,7 +884,7 @@ describe('ChordTimeline', () => {
 
     const block = screen.getByTestId(`chord-block-${segments()[0].id}`);
     expect(within(block).getByText('E4')).toBeInTheDocument();
-    expect(barNotes(bars()[0], trackId()).map(n => n.pitch)).toEqual([64]);
+    expect(barNotes(bars()[0], PHRASE_TRACK_KEY).map(n => n.pitch)).toEqual([64]);
   });
 
   it('badges a chord segment with its octave, but not a note segment', () => {
@@ -885,7 +907,7 @@ describe('ChordTimeline', () => {
     expect(screen.getByTestId(`octave-badge-${low.id}`)).toHaveTextContent('oct 3');
     expect(screen.getByTestId(`octave-badge-${high.id}`)).toHaveTextContent('oct 6');
     // And the generated notes really are three octaves apart.
-    const pitches = barNotes(bars()[0], trackId()).map(n => n.pitch);
+    const pitches = barNotes(bars()[0], PHRASE_TRACK_KEY).map(n => n.pitch);
     expect(pitches.slice(3)).toEqual(pitches.slice(0, 3).map(p => p + 36));
   });
 
@@ -934,7 +956,7 @@ describe('ChordTimeline', () => {
     fireEvent.click(screen.getByLabelText('Remove segment'));
 
     expect(segments()).toHaveLength(0);
-    expect(barNotes(bars()[0], trackId())).toHaveLength(0);
+    expect(barNotes(bars()[0], PHRASE_TRACK_KEY)).toHaveLength(0);
   });
 
   it('sizes each block to its duration and places it at its start beat', () => {
@@ -1016,7 +1038,7 @@ describe('ChordTimeline', () => {
     fireEvent.pointerUp(window, { clientX: PIXELS_PER_BEAT, pointerId: 1 });
 
     expect(segments()[0].duration).toBe(2);
-    expect(barNotes(bars()[0], trackId())[0].duration).toBe(2);
+    expect(barNotes(bars()[0], PHRASE_TRACK_KEY)[0].duration).toBe(2);
     // The block must widen with it, or the timeline stops matching the piano roll.
     expect(screen.getByTestId(`chord-block-${id}`)).toHaveStyle({
       width: `${2 * PIXELS_PER_BEAT}px`,
@@ -1054,7 +1076,7 @@ describe('ChordTimeline', () => {
 
     fireEvent.keyDown(screen.getByTestId(`chord-block-${id}`), { key: 'ArrowRight' });
 
-    expect(barChords(bars()[0], trackId())).toHaveLength(0);
+    expect(barChords(bars()[0], PHRASE_TRACK_KEY)).toHaveLength(0);
     expect(layout(1)).toEqual([`${id}@0`]);
   });
 
@@ -1113,76 +1135,6 @@ describe('ChordTimeline', () => {
       // Still scrollable, so wheel and trackpad keep working over the lanes.
       expect(scroller.className).toContain('overflow-x-auto');
       expect(scroller.className).toContain('scrollbar-hidden');
-    });
-  });
-
-  describe('play range', () => {
-    const loop = () => {
-      const { loopStart, loopEnd } = projectStore.getState().project!;
-      return [loopStart, loopEnd];
-    };
-
-    /** Drag across the ruler. jsdom zeroes the rect, so clientX reads as beats. */
-    function dragRuler(fromBeat: number, toBeat: number) {
-      const ruler = screen.getByTestId('timeline-ruler');
-      fireEvent.pointerDown(ruler, { clientX: fromBeat * PIXELS_PER_BEAT, pointerId: 1 });
-      fireEvent.pointerMove(window, { clientX: toBeat * PIXELS_PER_BEAT, pointerId: 1 });
-      fireEvent.pointerUp(window, { clientX: toBeat * PIXELS_PER_BEAT, pointerId: 1 });
-    }
-
-    it('sets the range from a drag across the ruler', () => {
-      render(<ChordTimeline />);
-      dragRuler(1, 5);
-
-      expect(loop()).toEqual([1, 5]);
-      expect(screen.getByTestId('loop-range')).toHaveStyle({
-        left: `${1 * PIXELS_PER_BEAT}px`,
-        width: `${4 * PIXELS_PER_BEAT}px`,
-      });
-    });
-
-    it('reads a backwards drag as the same range', () => {
-      render(<ChordTimeline />);
-      dragRuler(6, 2);
-
-      expect(loop()).toEqual([2, 6]);
-    });
-
-    it('snaps the range to the grid', () => {
-      editorStore.getState().setSnapBeats(0.5);
-      render(<ChordTimeline />);
-      dragRuler(0.9, 3.4);
-
-      expect(loop()).toEqual([1, 3.5]);
-    });
-
-    it('clears the range on a click that never moved', () => {
-      render(<ChordTimeline />);
-      dragRuler(1, 5);
-
-      const ruler = screen.getByTestId('timeline-ruler');
-      fireEvent.pointerDown(ruler, { clientX: 3 * PIXELS_PER_BEAT, pointerId: 1 });
-      fireEvent.pointerUp(window, { clientX: 3 * PIXELS_PER_BEAT, pointerId: 1 });
-
-      expect(loop()).toEqual([undefined, undefined]);
-      expect(screen.queryByTestId('loop-range')).not.toBeInTheDocument();
-    });
-
-    it('resizes the range by its end handle, leaving the start put', () => {
-      render(<ChordTimeline />);
-      dragRuler(1, 5);
-
-      const handle = screen.getByRole('button', { name: 'Loop end' });
-      fireEvent.pointerDown(handle, { clientX: 5 * PIXELS_PER_BEAT, pointerId: 1 });
-      fireEvent.pointerMove(window, { clientX: 7 * PIXELS_PER_BEAT, pointerId: 1 });
-      fireEvent.pointerUp(window, { clientX: 7 * PIXELS_PER_BEAT, pointerId: 1 });
-
-      expect(loop()).toEqual([1, 7]);
-    });
-
-    it('renders no range until one is drawn', () => {
-      render(<ChordTimeline />);
-      expect(screen.queryByTestId('loop-range')).not.toBeInTheDocument();
     });
   });
 
@@ -1282,7 +1234,7 @@ describe('ChordTimeline', () => {
       record('hi', 64, 1);
       render(<ChordTimeline />);
 
-      expect(barNotes(bars()[0], trackId()).map(n => n.pitch).sort()).toEqual([60, 64]);
+      expect(barNotes(bars()[0], PHRASE_TRACK_KEY).map(n => n.pitch).sort()).toEqual([60, 64]);
     });
   });
 
@@ -1290,160 +1242,293 @@ describe('ChordTimeline', () => {
     render(<ChordTimeline />);
     expect(screen.queryByText(/add chord/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/auto-fill/i)).not.toBeInTheDocument();
-    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    // The one text field is the phrase's name in the header; blocks are still made by
+    // dropping them, never by typing a chord symbol.
+    expect(screen.getAllByRole('textbox').map(el => el.getAttribute('data-testid'))).toEqual([
+      'phrase-name',
+    ]);
   });
 
-  describe('volume automation lane', () => {
-    it('shows the lane under the bars by default', () => {
-      render(<ChordTimeline />);
+  /**
+   * Sections are drawn in absolute song beats and a phrase has no position in the
+   * song — it may have three, or none — so the band stays in the arrangement view.
+   * The curves are the opposite case: they belong to the phrase, so they are here.
+   */
+  it('leaves the section band to the arrangement view, and keeps the curves', () => {
+    render(<ChordTimeline />);
 
-      expect(screen.getByTestId('automation-lane')).toBeInTheDocument();
-      // Labelled in the gutter, which is outside the scroll container so the label
-      // stays put while the lane beside it scrolls.
-      expect(within(screen.getByTestId('timeline-gutter')).getByText('Volume')).toBeInTheDocument();
+    expect(screen.queryByTestId('section-band')).not.toBeInTheDocument();
+    expect(screen.getByTestId('automation-lane')).toBeInTheDocument();
+    expect(screen.getByLabelText('Automation lanes')).toBeInTheDocument();
+  });
+  /**
+   * A phrase's bars are its own, so the song's "add bar" cannot reach them. Without a
+   * control here the length a phrase was drawn at in the arrangement would be the
+   * length it is stuck with for as long as it is being written.
+   */
+  describe('phrase length', () => {
+    it('says how many bars the phrase is', () => {
+      render(<ChordTimeline />);
+      expect(screen.getByTestId('phrase-bar-count')).toHaveTextContent('2 bars');
     });
 
-    it('hides the lane, and its gutter label, when toggled off', () => {
+    it('appends an empty bar, which the timeline then draws', () => {
       render(<ChordTimeline />);
+      act(() => {
+        fireEvent.click(screen.getByLabelText('Add bar'));
+      });
 
-      fireEvent.click(screen.getByLabelText('Automation lanes'));
-
-      expect(screen.queryByTestId('automation-lane')).not.toBeInTheDocument();
-      expect(within(screen.getByTestId('timeline-gutter')).queryByText('Volume')).toBeNull();
+      expect(bars()).toHaveLength(3);
+      expect(screen.getByText('Bar 3')).toBeInTheDocument();
+      expect(screen.getByTestId(`timeline-bar-${bars()[2].id}`)).toBeInTheDocument();
     });
 
-    it('reports its state on the toggle, so it reads as pressed', () => {
+    it('lengthens every placement of the phrase at once', () => {
+      const phraseId = projectStore.getState().editingPhraseId!;
+      act(() => {
+        projectStore.getState().placePhrase(phraseId, trackId(), 4);
+      });
       render(<ChordTimeline />);
-      const toggle = screen.getByLabelText('Automation lanes');
+      act(() => {
+        fireEvent.click(screen.getByLabelText('Add bar'));
+      });
 
-      expect(toggle).toHaveAttribute('aria-pressed', 'true');
-      fireEvent.click(toggle);
-      expect(toggle).toHaveAttribute('aria-pressed', 'false');
+      const clips = projectStore.getState().project!.clips;
+      expect(clips).toHaveLength(2);
+      // Three bars each, from bar 0 and from bar 4 — the compiled grid grew with them.
+      expect(projectStore.getState().project!.bars.length).toBeGreaterThanOrEqual(7);
     });
 
-    it('spans the whole project, on the same axis as the ruler', () => {
+    it('drops the last bar again', () => {
       render(<ChordTimeline />);
+      act(() => {
+        fireEvent.click(screen.getByLabelText('Remove bar'));
+      });
 
-      const width = `${8 * PIXELS_PER_BEAT}px`;
-      expect(screen.getByTestId('timeline-ruler')).toHaveStyle({ width });
-      expect(screen.getByTestId('automation-lane')).toHaveStyle({ width });
+      expect(bars()).toHaveLength(1);
+      expect(screen.queryByText('Bar 2')).not.toBeInTheDocument();
     });
 
-    describe('clearing the curve', () => {
-      const clearLabel = () => `Clear volume curve for ${tracks()[0].name}`;
-
-      it('offers nothing to clear until there is a curve', () => {
-        render(<ChordTimeline />);
-
-        expect(screen.queryByLabelText(clearLabel())).not.toBeInTheDocument();
-      });
-
-      it('offers a Clear once a point exists', () => {
-        projectStore.getState().addVolumePoint(trackId(), 2, 0.5);
-        render(<ChordTimeline />);
-
-        expect(screen.getByLabelText(clearLabel())).toBeInTheDocument();
-      });
-
-      it('removes every point, handing the instrument back to its fader', () => {
-        projectStore.getState().addVolumePoint(trackId(), 2, 0.5);
-        projectStore.getState().addVolumePoint(trackId(), 6, 0.2);
-        render(<ChordTimeline />);
-
-        fireEvent.click(screen.getByLabelText(clearLabel()));
-
-        expect(tracks()[0].volumeAutomation).toBeUndefined();
-        expect(screen.getByTestId('automation-flat-line')).toBeInTheDocument();
-        expect(screen.queryByTestId('automation-curve')).not.toBeInTheDocument();
-      });
-
-      it('takes itself away once there is nothing left to clear', () => {
-        projectStore.getState().addVolumePoint(trackId(), 2, 0.5);
-        render(<ChordTimeline />);
-
-        fireEvent.click(screen.getByLabelText(clearLabel()));
-
-        expect(screen.queryByLabelText(clearLabel())).not.toBeInTheDocument();
-      });
-
-      it('clears only the selected instrument', () => {
-        const other = projectStore.getState().addTrack('Strings')!;
-        projectStore.getState().addVolumePoint(other, 2, 0.5);
-        projectStore.getState().addVolumePoint(trackId(), 4, 0.25);
-        render(<ChordTimeline />);
-
-        fireEvent.click(screen.getByLabelText(clearLabel()));
-
-        expect(tracks()[0].volumeAutomation).toBeUndefined();
-        expect(tracks().find(t => t.id === other)!.volumeAutomation).toEqual([
-          { beat: 2, value: 0.5 },
-        ]);
-      });
-
-    });
-
-    // The timeline edits one instrument at a time, and the curve belongs to that one.
-    it('follows the selected instrument', () => {
-      const first = trackId();
-      projectStore.getState().addVolumePoint(first, 2, 0.5);
-      const second = projectStore.getState().addTrack('Strings')!;
-
+    it('refuses to drop a bar that still holds blocks, and the only bar', () => {
       render(<ChordTimeline />);
-      expect(screen.getByTestId('automation-point-0')).toBeInTheDocument();
+      dropAt(bars()[1].id, cMajorChords()[0], 0);
 
-      act(() => selectionStore.getState().selectTrack(second));
-      expect(screen.queryByTestId('automation-point-0')).not.toBeInTheDocument();
-      expect(screen.getByTestId('automation-flat-line')).toBeInTheDocument();
+      expect(screen.getByLabelText('Remove bar')).toBeDisabled();
+
+      // Emptying it hands the control back.
+      act(() => {
+        projectStore.getState().removeSegment(segments()[0].id);
+      });
+      expect(screen.getByLabelText('Remove bar')).toBeEnabled();
+
+      act(() => {
+        fireEvent.click(screen.getByLabelText('Remove bar'));
+      });
+      expect(bars()).toHaveLength(1);
+      expect(screen.getByLabelText('Remove bar')).toBeDisabled();
     });
   });
 
-  describe('insert bars (ruler context menu)', () => {
-    /** Right-click the ruler at an absolute beat; jsdom zeroes the rect, so
-        clientX reads as beats. */
+  /**
+   * Opening bars up inside the phrase, from the same ruler menu the arrangement has.
+   *
+   * The gesture is the arrangement's, one level down: what it inserts here are the
+   * *phrase's* bars, so the blocks after the clicked bar slide along and the song
+   * recompiles behind them. Every placement of the phrase grows, which is what the
+   * header's bar count already warns about.
+   */
+  describe('insert bars', () => {
+    /** Right-click the ruler at a phrase beat; jsdom zeroes the rect, so x is beats. */
     function rightClickRuler(beat: number) {
-      const ruler = screen.getByTestId('timeline-ruler');
-      fireEvent.contextMenu(ruler, { clientX: beat * PIXELS_PER_BEAT });
+      fireEvent.contextMenu(screen.getByTestId('timeline-ruler'), {
+        clientX: beat * PIXELS_PER_BEAT,
+      });
     }
 
-    it('opens the insert menu with a default count of 1 on right-click', () => {
+    it('opens the menu on a right-click, offering one bar', () => {
       render(<ChordTimeline />);
-      expect(screen.queryByTestId('insert-menu')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('bar-menu')).not.toBeInTheDocument();
 
-      rightClickRuler(1);
-
-      expect(screen.getByTestId('insert-menu')).toBeInTheDocument();
-      expect(screen.getByTestId('insert-count')).toHaveValue(1);
-    });
-
-    it('inserts the chosen number of empty bars before the right-clicked bar', () => {
-      render(<ChordTimeline />);
       rightClickRuler(4);
 
-      fireEvent.change(screen.getByTestId('insert-count'), { target: { value: '2' } });
-      fireEvent.click(screen.getByTestId('insert-bars'));
-
-      expect(bars()).toHaveLength(4);
-      expect(bars()[1].content).toEqual({});
-      expect(bars()[2].content).toEqual({});
-      expect(segments()).toHaveLength(0);
+      expect(screen.getByTestId('bar-menu')).toBeInTheDocument();
+      expect(screen.getByTestId('bar-menu-count')).toHaveValue(1);
     });
 
-    it('right-clicking bar 1 inserts at the start', () => {
+    it('inserts into the phrase, pushing the blocks after it along', () => {
       render(<ChordTimeline />);
-      rightClickRuler(0);
+      dropAt(bars()[1].id, cMajorChords()[0], 0);
+      const moved = segments()[0].id;
+
+      rightClickRuler(4);
       fireEvent.click(screen.getByTestId('insert-bars'));
 
       expect(bars()).toHaveLength(3);
-      expect(bars()[0].content).toEqual({});
+      expect(layout(1)).toEqual([]);
+      expect(layout(2)).toEqual([`${moved}@0`]);
     });
 
-    it('closes the menu on cancel without inserting', () => {
+    it('inserts the chosen number of bars', () => {
       render(<ChordTimeline />);
       rightClickRuler(0);
-      fireEvent.click(screen.getByTestId('insert-cancel'));
+      fireEvent.change(screen.getByTestId('bar-menu-count'), { target: { value: '2' } });
+      fireEvent.click(screen.getByTestId('insert-bars'));
 
-      expect(screen.queryByTestId('insert-menu')).not.toBeInTheDocument();
+      expect(bars()).toHaveLength(4);
+      expect(barChords(bars()[0], PHRASE_TRACK_KEY)).toHaveLength(0);
+    });
+
+    // The song grid is derived from the placements rather than authored here, so it
+    // follows the longer phrase instead of being inserted into: the bars the placement
+    // has grown over are added at the end, and the song's own play range is untouched.
+    it('lets the song grid follow the phrase, and leaves its range alone', () => {
+      const before = songBars().length;
+      render(<ChordTimeline />);
+
+      rightClickRuler(4);
+      fireEvent.click(screen.getByTestId('insert-bars'));
+
+      expect(songBars().length).toBe(before + 1);
+      expect(projectStore.getState().project!.loopStart).toBeUndefined();
+      expect(projectStore.getState().project!.loopEnd).toBeUndefined();
+    });
+
+    it('cancels without touching the phrase', () => {
+      render(<ChordTimeline />);
+      rightClickRuler(4);
+      fireEvent.click(screen.getByTestId('bar-menu-cancel'));
+
+      expect(screen.queryByTestId('bar-menu')).not.toBeInTheDocument();
       expect(bars()).toHaveLength(2);
+    });
+
+    /**
+     * Remove, on the same menu, taking the clicked bar rather than the last one.
+     *
+     * The header's − can only shorten from the end, and only while the end is empty.
+     * This is how a bar is taken out of the middle — the counterpart of Insert, and
+     * the reason the two share a count.
+     */
+    describe('remove', () => {
+      it('takes the clicked bar out of the phrase, closing the rest up behind it', () => {
+        render(<ChordTimeline />);
+        dropAt(bars()[1].id, cMajorChords()[0], 0);
+        const moved = segments()[0].id;
+        const kept = bars()[0].id;
+
+        rightClickRuler(0);
+        fireEvent.click(screen.getByTestId('remove-bars'));
+
+        expect(bars()).toHaveLength(1);
+        expect(bars()[0].id).not.toBe(kept);
+        expect(layout(0)).toEqual([`${moved}@0`]);
+      });
+
+      it('takes the chosen number of bars', () => {
+        act(() => {
+          projectStore.getState().insertPhraseBarsAt(
+            projectStore.getState().editingPhraseId!,
+            2,
+            2
+          );
+        });
+        render(<ChordTimeline />);
+        expect(bars()).toHaveLength(4);
+
+        rightClickRuler(4);
+        fireEvent.change(screen.getByTestId('bar-menu-count'), { target: { value: '2' } });
+        fireEvent.click(screen.getByTestId('remove-bars'));
+
+        expect(bars()).toHaveLength(2);
+      });
+
+      // A phrase with no bars covers nothing, so every placement of it would be
+      // dropped as zero-length — the same rule the header's − follows.
+      it('refuses a run that would take every bar, and says why', () => {
+        render(<ChordTimeline />);
+        rightClickRuler(0);
+        fireEvent.change(screen.getByTestId('bar-menu-count'), { target: { value: '2' } });
+
+        const remove = screen.getByTestId('remove-bars');
+        expect(remove).toBeDisabled();
+        expect(remove).toHaveAttribute('title', 'A phrase is at least one bar');
+        expect(bars()).toHaveLength(2);
+      });
+
+      // The block being removed is the phrase's; the song's grid is derived, so it
+      // simply follows the shorter placement.
+      it('leaves the song grid to follow the phrase', () => {
+        const before = songBars().length;
+        render(<ChordTimeline />);
+
+        rightClickRuler(4);
+        fireEvent.click(screen.getByTestId('remove-bars'));
+
+        expect(bars()).toHaveLength(1);
+        expect(songBars().length).toBe(before);
+      });
+    });
+  });
+
+  /**
+   * The stretch of the phrase Play repeats, drawn on the timeline's own ruler.
+   *
+   * The same ruler the arrangement uses, handed this surface's beats — so the range
+   * it sets is in the *phrase's* beats, not the song's, and never touches the play
+   * range the arrangement is set to.
+   */
+  describe('audition loop', () => {
+    const loop = () => editorStore.getState().phraseLoop;
+
+    /** Drag across the ruler. jsdom zeroes the rect, so clientX reads as beats. */
+    function dragRuler(fromBeat: number, toBeat: number) {
+      const ruler = screen.getByTestId('timeline-ruler');
+      fireEvent.pointerDown(ruler, { clientX: fromBeat * PIXELS_PER_BEAT, pointerId: 1 });
+      fireEvent.pointerMove(window, { clientX: toBeat * PIXELS_PER_BEAT, pointerId: 1 });
+      fireEvent.pointerUp(window, { clientX: toBeat * PIXELS_PER_BEAT, pointerId: 1 });
+    }
+
+    it('sets the loop from a drag across the ruler', () => {
+      render(<ChordTimeline />);
+      dragRuler(1, 5);
+
+      expect(loop()).toEqual({ start: 1, end: 5 });
+      expect(screen.getByTestId('loop-range')).toBeInTheDocument();
+    });
+
+    // The song's range belongs to the arrangement, where a beat is a beat in the
+    // song; a range drawn here names beats in one piece of music.
+    it('leaves the play range of the song alone', () => {
+      render(<ChordTimeline />);
+      dragRuler(1, 5);
+
+      expect(projectStore.getState().project!.loopStart).toBeUndefined();
+      expect(projectStore.getState().project!.loopEnd).toBeUndefined();
+    });
+
+    it('clears back to the whole phrase on a click', () => {
+      render(<ChordTimeline />);
+      dragRuler(1, 5);
+
+      const ruler = screen.getByTestId('timeline-ruler');
+      fireEvent.pointerDown(ruler, { clientX: 3 * PIXELS_PER_BEAT, pointerId: 1 });
+      fireEvent.pointerUp(window, { clientX: 3 * PIXELS_PER_BEAT, pointerId: 1 });
+
+      expect(loop()).toBeNull();
+    });
+
+    // A range names beats in one phrase; carrying it to the next would repeat a
+    // stretch of something else entirely.
+    it('is dropped when another phrase is opened', () => {
+      render(<ChordTimeline />);
+      dragRuler(1, 5);
+
+      act(() => {
+        const clipId = projectStore.getState().addPhraseClip(trackId(), 6, 2)!;
+        projectStore.getState().openClip(clipId);
+      });
+
+      expect(loop()).toBeNull();
     });
   });
 });

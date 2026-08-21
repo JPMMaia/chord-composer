@@ -152,7 +152,7 @@ describe('linked placements', () => {
     const phraseId = projectStore.getState().editingPhraseId!;
     const bar = phraseById(projectStore.getState().project!.phrases, phraseId)!.bars[0];
 
-    projectStore.getState().duplicateClip(first, track, 8);
+    projectStore.getState().linkClip(first, track, 8);
     expect(projectStore.getState().project!.clips.map(c => c.phraseId)).toEqual([
       phraseId,
       phraseId,
@@ -174,7 +174,7 @@ describe('linked placements', () => {
     const bar = phraseById(projectStore.getState().project!.phrases, original)!.bars[0];
     projectStore.getState().insertSegment(bar.id, 0, segment('s1'), track);
 
-    const second = projectStore.getState().duplicateClip(first, track, 8)!;
+    const second = projectStore.getState().linkClip(first, track, 8)!;
     projectStore.getState().openClip(second);
     projectStore.getState().makeClipUnique(second);
 
@@ -193,6 +193,16 @@ describe('linked placements', () => {
     projectStore.getState().insertSegment(copyBar.id, 0, segment('s2'), track);
     expect(songChords(9, track)).toHaveLength(1);
     expect(songChords(1, track)).toHaveLength(0);
+  });
+
+  it('a linked duplicate adds a placement and no phrase', () => {
+    const [track] = trackIds();
+    const first = projectStore.getState().addPhraseClip(track, 0, 2)!;
+
+    projectStore.getState().linkClip(first, track, 8);
+
+    expect(projectStore.getState().project!.phrases).toHaveLength(1);
+    expect(projectStore.getState().project!.clips).toHaveLength(2);
   });
 
   it('leaves a phrase with a single placement alone', () => {
@@ -282,12 +292,77 @@ describe('the library', () => {
   });
 });
 
+describe('independent duplicates', () => {
+  it('gives the copy music of its own, so editing it leaves the original alone', () => {
+    const [track] = trackIds();
+    const first = projectStore.getState().addPhraseClip(track, 0, 2)!;
+    projectStore.getState().openClip(first);
+    const original = projectStore.getState().editingPhraseId!;
+    const bar = phraseById(projectStore.getState().project!.phrases, original)!.bars[0];
+    projectStore.getState().insertSegment(bar.id, 0, segment('s1'), track);
+
+    const copyId = projectStore.getState().duplicateClip(first, track, 8)!;
+
+    const project = projectStore.getState().project!;
+    expect(project.phrases).toHaveLength(2);
+    const copyPhrase = project.clips.find(c => c.id === copyId)!.phraseId;
+    expect(copyPhrase).not.toBe(original);
+    // It starts life identical, under ids of its own.
+    expect(phraseChords(copyPhrase, 0)).toHaveLength(1);
+    expect(phraseChords(copyPhrase, 0)[0].id).not.toBe('s1');
+    expect(songChords(8, track)).toHaveLength(1);
+
+    projectStore.getState().openClip(copyId);
+    const copyBar = phraseById(projectStore.getState().project!.phrases, copyPhrase)!.bars[1];
+    projectStore.getState().insertSegment(copyBar.id, 0, segment('s2'), track);
+
+    expect(songChords(9, track)).toHaveLength(1);
+    expect(songChords(1, track)).toHaveLength(0);
+  });
+
+  it('names the copy after the phrase it came from', () => {
+    const [track] = trackIds();
+    const first = projectStore.getState().addPhraseClip(track, 0, 2)!;
+    const original = projectStore.getState().project!.phrases[0].id;
+    projectStore.getState().renamePhrase(original, 'Verse');
+
+    projectStore.getState().duplicateClip(first, track, 8);
+
+    expect(projectStore.getState().project!.phrases.map(p => p.name)).toEqual([
+      'Verse',
+      'Verse 2',
+    ]);
+  });
+
+  // A refused duplicate that had already cloned the phrase would leave an identical
+  // orphan behind in the library for nothing.
+  it('refuses an occupied span and leaves no phrase behind', () => {
+    const [track] = trackIds();
+    const first = projectStore.getState().addPhraseClip(track, 0, 2)!;
+    projectStore.getState().addPhraseClip(track, 8, 2);
+    const before = projectStore.getState().project!;
+
+    expect(projectStore.getState().duplicateClip(first, track, 8)).toBeNull();
+    expect(projectStore.getState().project).toBe(before);
+    expect(projectStore.getState().project!.phrases).toHaveLength(2);
+  });
+
+  it('refuses a clip or a track it does not know', () => {
+    const [track] = trackIds();
+    const first = projectStore.getState().addPhraseClip(track, 0, 2)!;
+
+    expect(projectStore.getState().duplicateClip('nope', track, 8)).toBeNull();
+    expect(projectStore.getState().duplicateClip(first, 'nope', 8)).toBeNull();
+    expect(projectStore.getState().project!.phrases).toHaveLength(1);
+  });
+});
+
 describe('phrase length', () => {
   it('grows every placement at once', () => {
     const [track] = trackIds();
     const clipId = projectStore.getState().addPhraseClip(track, 0, 2)!;
     const phraseId = projectStore.getState().project!.phrases[0].id;
-    projectStore.getState().duplicateClip(clipId, track, 8);
+    projectStore.getState().linkClip(clipId, track, 8);
 
     projectStore.getState().setPhraseLength(phraseId, 4);
 

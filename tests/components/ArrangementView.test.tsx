@@ -208,16 +208,35 @@ describe('ArrangementView', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Duplicating — linked, always
+  // Duplicating — with music of its own, or linked
   // ---------------------------------------------------------------------------
 
-  it('duplicates linked with Ctrl+D, right after the block it copied', () => {
+  /** Pick a block the way a press does, so the clip shortcuts are listening. */
+  function select(clipId: string) {
+    fireEvent.pointerDown(screen.getByTestId(`clip-${clipId}`), { clientX: 0, pointerId: 1 });
+    fireEvent.pointerUp(window, { clientX: 0, pointerId: 1 });
+  }
+
+  it('duplicates with Ctrl+D, right after the block it copied, music and all', () => {
     const clipId = state().addPhraseClip(trackId(0), 0, 2)!;
     render(<ArrangementView />);
 
-    fireEvent.pointerDown(screen.getByTestId(`clip-${clipId}`), { clientX: 0, pointerId: 1 });
-    fireEvent.pointerUp(window, { clientX: 0, pointerId: 1 });
+    select(clipId);
     fireEvent.keyDown(window, { key: 'd', ctrlKey: true });
+
+    expect(clips()).toHaveLength(2);
+    // A phrase of its own is the whole difference from the linked copy below.
+    expect(phrases()).toHaveLength(2);
+    expect(clips()[1].startBar).toBe(2);
+    expect(clips()[1].phraseId).not.toBe(clips()[0].phraseId);
+  });
+
+  it('duplicates linked with Ctrl+Shift+D, sharing the one phrase', () => {
+    const clipId = state().addPhraseClip(trackId(0), 0, 2)!;
+    render(<ArrangementView />);
+
+    select(clipId);
+    fireEvent.keyDown(window, { key: 'd', ctrlKey: true, shiftKey: true });
 
     expect(clips()).toHaveLength(2);
     expect(phrases()).toHaveLength(1);
@@ -229,22 +248,21 @@ describe('ArrangementView', () => {
     state().addPhraseClip(trackId(0), 2, 2);
     render(<ArrangementView />);
 
-    fireEvent.pointerDown(screen.getByTestId(`clip-${clipId}`), { clientX: 0, pointerId: 1 });
-    fireEvent.pointerUp(window, { clientX: 0, pointerId: 1 });
-    fireEvent.keyDown(window, { key: 'd', ctrlKey: true });
+    select(clipId);
+    fireEvent.keyDown(window, { key: 'd', ctrlKey: true, shiftKey: true });
 
     expect(clips()).toHaveLength(3);
     expect(clips().find(c => c.startBar === 4)!.phraseId).toBe(clips()[0].phraseId);
   });
 
-  it('leaves the original behind when a drag is released with Ctrl held', () => {
+  it('leaves an independent copy behind when a drag is released with Ctrl held', () => {
     const clipId = state().addPhraseClip(trackId(0), 0, 2)!;
     render(<ArrangementView />);
 
     dragClip(clipId, 0, 4, trackId(1), { ctrlKey: true });
 
     expect(clips()).toHaveLength(2);
-    expect(phrases()).toHaveLength(1);
+    expect(phrases()).toHaveLength(2);
     expect(clips().find(c => c.id === clipId)).toMatchObject({
       trackId: trackId(0),
       startBar: 0,
@@ -253,6 +271,87 @@ describe('ArrangementView', () => {
       trackId: trackId(1),
       startBar: 4,
     });
+  });
+
+  it('leaves a linked copy behind when a drag is released with Alt held', () => {
+    const clipId = state().addPhraseClip(trackId(0), 0, 2)!;
+    render(<ArrangementView />);
+
+    dragClip(clipId, 0, 4, trackId(1), { altKey: true });
+
+    expect(clips()).toHaveLength(2);
+    expect(phrases()).toHaveLength(1);
+    expect(clips()[1].phraseId).toBe(clips()[0].phraseId);
+  });
+
+  // ---------------------------------------------------------------------------
+  // The clip menu
+  // ---------------------------------------------------------------------------
+
+  it('right-clicking a block picks it and offers both ways to copy it', () => {
+    const clipId = state().addPhraseClip(trackId(1), 0, 2)!;
+    render(<ArrangementView />);
+
+    fireEvent.contextMenu(screen.getByTestId(`clip-${clipId}`));
+
+    expect(selectionStore.getState().selectedClipId).toBe(clipId);
+    fireEvent.click(screen.getByTestId('clip-menu-duplicate'));
+
+    expect(clips()).toHaveLength(2);
+    expect(phrases()).toHaveLength(2);
+    // The menu closes behind the command it ran.
+    expect(screen.queryByTestId('clip-menu')).toBeNull();
+  });
+
+  it('duplicates linked from the menu', () => {
+    const clipId = state().addPhraseClip(trackId(0), 0, 2)!;
+    render(<ArrangementView />);
+
+    fireEvent.contextMenu(screen.getByTestId(`clip-${clipId}`));
+    fireEvent.click(screen.getByTestId('clip-menu-link'));
+
+    expect(clips()).toHaveLength(2);
+    expect(phrases()).toHaveLength(1);
+  });
+
+  it('offers Make unique only on a block that shares its phrase', () => {
+    const first = state().addPhraseClip(trackId(0), 0, 2)!;
+    render(<ArrangementView />);
+
+    fireEvent.contextMenu(screen.getByTestId(`clip-${first}`));
+    expect(screen.queryByTestId('clip-menu-unique')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('clip-menu-link'));
+    fireEvent.contextMenu(screen.getByTestId(`clip-${first}`));
+    expect(screen.getByTestId('clip-menu-unique')).toBeInTheDocument();
+  });
+
+  it('closes the menu on Escape and on a press elsewhere', () => {
+    const clipId = state().addPhraseClip(trackId(0), 0, 2)!;
+    render(<ArrangementView />);
+
+    fireEvent.contextMenu(screen.getByTestId(`clip-${clipId}`));
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByTestId('clip-menu')).toBeNull();
+
+    fireEvent.contextMenu(screen.getByTestId(`clip-${clipId}`));
+    fireEvent.pointerDown(row(trackId(1)), { clientX: 0, pointerId: 1 });
+    fireEvent.pointerUp(window, { clientX: 0, pointerId: 1 });
+    expect(screen.queryByTestId('clip-menu')).toBeNull();
+  });
+
+  // The press that grabs a block stops the event so the row does not also start
+  // drawing on it, which is why the menu listens in the capture phase.
+  it('closes the menu on a press on another block', () => {
+    const first = state().addPhraseClip(trackId(0), 0, 2)!;
+    const second = state().addPhraseClip(trackId(0), 4, 2)!;
+    render(<ArrangementView />);
+
+    fireEvent.contextMenu(screen.getByTestId(`clip-${first}`));
+    fireEvent.pointerDown(screen.getByTestId(`clip-${second}`), { clientX: 0, pointerId: 1 });
+    fireEvent.pointerUp(window, { clientX: 0, pointerId: 1 });
+
+    expect(screen.queryByTestId('clip-menu')).toBeNull();
   });
 
   // ---------------------------------------------------------------------------

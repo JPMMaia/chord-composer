@@ -230,6 +230,32 @@ export function canPlaceClip(
   );
 }
 
+/**
+ * The first bar at or after a clip's end where a copy of it would fit on its row.
+ *
+ * What "duplicate" means without a drag to say where: "again, right after this one".
+ * Walking forward rather than refusing when the next span is taken keeps the command
+ * usable on a row that is already densely packed, which is exactly the row a repeat is
+ * most wanted on.
+ */
+export function freeBarAfter(clips: PhraseClip[], phrases: Phrase[], clip: PhraseClip): number {
+  const length = clipEndBar(clip, phrases) - clip.startBar;
+  let at = clipEndBar(clip, phrases);
+
+  // Bounded by the row's own clips: past the last of them nothing can be in the way.
+  for (let guard = 0; guard <= clips.length; guard++) {
+    const free = canPlaceClip(clips, phrases, {
+      phraseId: clip.phraseId,
+      trackId: clip.trackId,
+      startBar: at,
+    });
+    if (free) return at;
+    at += length;
+  }
+
+  return at;
+}
+
 /** The clip covering a bar on a row, or null when that bar is silent there. */
 export function clipAt(
   clips: PhraseClip[],

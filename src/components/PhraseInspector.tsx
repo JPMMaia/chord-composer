@@ -1,6 +1,12 @@
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
-import { phraseById, phraseColorAt, phraseLengthBars, placementCount } from '@/engine/phrases';
+import {
+  freeBarAfter,
+  phraseById,
+  phraseColorAt,
+  phraseLengthBars,
+  placementCount,
+} from '@/engine/phrases';
 import { TRACK_COLORS } from '@/utils/constants';
 
 /**
@@ -12,7 +18,9 @@ import { TRACK_COLORS } from '@/utils/constants';
  * in the library. The placement count is what makes that difference visible — without
  * it, renaming a phrase would silently rename three blocks the user cannot see.
  *
- * Make Unique is the escape hatch from that sharing: it deep-copies the phrase for
+ * Duplicate and Duplicate Linked are the two ways out of one block: the first copies
+ * the music too, the second places the same phrase again. Make Unique is the escape
+ * hatch from that sharing: it deep-copies the phrase for
  * this block alone, which is what turns "the third chorus, but different" from a
  * reason not to duplicate into an ordinary edit.
  */
@@ -21,6 +29,8 @@ export const PhraseInspector: React.FC = () => {
   const renamePhrase = projectStore(s => s.renamePhrase);
   const setPhraseColor = projectStore(s => s.setPhraseColor);
   const setPhraseLength = projectStore(s => s.setPhraseLength);
+  const duplicateClip = projectStore(s => s.duplicateClip);
+  const linkClip = projectStore(s => s.linkClip);
   const makeClipUnique = projectStore(s => s.makeClipUnique);
   const removeClip = projectStore(s => s.removeClip);
   const openClip = projectStore(s => s.openClip);
@@ -107,6 +117,42 @@ export const PhraseInspector: React.FC = () => {
           className="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-xs text-gray-100 transition-colors"
         >
           Edit
+        </button>
+
+        {/* The two ways to repeat a block, named for what they leave behind rather
+            than for the gesture. Both land on the first free bar after this one. */}
+        <button
+          type="button"
+          data-testid="duplicate-clip"
+          title="Copy this block and its music, so editing the copy leaves this one alone"
+          onClick={() => {
+            const id = duplicateClip(
+              clip.id,
+              clip.trackId,
+              freeBarAfter(project.clips, project.phrases, clip)
+            );
+            if (id) selectClip(id);
+          }}
+          className="px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-xs text-gray-200 transition-colors"
+        >
+          Duplicate
+        </button>
+
+        <button
+          type="button"
+          data-testid="link-clip"
+          title="Play the same phrase again — editing either changes both"
+          onClick={() => {
+            const id = linkClip(
+              clip.id,
+              clip.trackId,
+              freeBarAfter(project.clips, project.phrases, clip)
+            );
+            if (id) selectClip(id);
+          }}
+          className="px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-xs text-gray-200 transition-colors"
+        >
+          Duplicate linked
         </button>
 
         {/* Only where there is sharing to break. On a phrase played once it would

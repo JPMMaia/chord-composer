@@ -36,6 +36,7 @@ export interface PhraseClipBlockProps {
   onPointerDown?: (e: React.PointerEvent) => void;
   onResizePointerDown?: (e: React.PointerEvent) => void;
   onDoubleClick?: (e: React.MouseEvent) => void;
+  onContextMenu?: (e: React.MouseEvent) => void;
 }
 
 export const PhraseClipBlock: React.FC<PhraseClipBlockProps> = ({
@@ -51,6 +52,7 @@ export const PhraseClipBlock: React.FC<PhraseClipBlockProps> = ({
   onPointerDown,
   onResizePointerDown,
   onDoubleClick,
+  onContextMenu,
 }) => (
   <div
     data-testid={ghost ? 'clip-ghost' : `clip-${clipId}`}
@@ -67,6 +69,7 @@ export const PhraseClipBlock: React.FC<PhraseClipBlockProps> = ({
     }
     onPointerDown={onPointerDown}
     onDoubleClick={onDoubleClick}
+    onContextMenu={onContextMenu}
     style={{
       left: `${left}px`,
       width: `${Math.max(2, width)}px`,

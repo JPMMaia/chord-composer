@@ -6,6 +6,7 @@ import { panelLayout, type PanelRow } from '@/engine/trackGroups';
 import {
   canPlaceClip,
   clipEndBar,
+  freeBarAfter,
   phraseById,
   phraseColorAt,
   phraseLengthBars,
@@ -53,6 +54,19 @@ const BAR_HEADER_HEIGHT = 28;
  * `resize` drags a block's right edge, which changes the *phrase's* length and so
  * every other placement of it; `place` drags a phrase out of the library onto a row.
  */
+/**
+ * What a modified drop leaves behind: a block with music of its own, or a second
+ * placement of the one music.
+ */
+type CopyMode = 'unique' | 'linked';
+
+/** Ctrl/Cmd asks for a copy of its own; Alt asks for another placement of the same phrase. */
+const copyModeOf = (e: {
+  ctrlKey: boolean;
+  metaKey: boolean;
+  altKey: boolean;
+}): CopyMode | null => (e.ctrlKey || e.metaKey ? 'unique' : e.altKey ? 'linked' : null);
+
 type ClipDrag =
   | { kind: 'create'; trackId: string; anchorBar: number; bar: number; moved: boolean }
   | {
@@ -63,8 +77,8 @@ type ClipDrag =
       startBar: number;
       /** Bars between the block's left edge and the bar it was grabbed by. */
       grabOffset: number;
-      /** True when the drop should leave the original behind — a linked duplicate. */
-      copy: boolean;
+      /** Which kind of copy the drop should leave behind, or null for a plain move. */
+      copy: CopyMode | null;
       moved: boolean;
     }
   | { kind: 'resize'; clipId: string; lengthBars: number; moved: boolean }
@@ -75,6 +89,8 @@ export const ArrangementView: React.FC = () => {
   const addPhraseClip = projectStore(s => s.addPhraseClip);
   const placePhrase = projectStore(s => s.placePhrase);
   const duplicateClip = projectStore(s => s.duplicateClip);
+  const linkClip = projectStore(s => s.linkClip);
+  const makeClipUnique = projectStore(s => s.makeClipUnique);
   const moveClip = projectStore(s => s.moveClip);
   const removeClip = projectStore(s => s.removeClip);
   const setPhraseLength = projectStore(s => s.setPhraseLength);
@@ -95,6 +111,9 @@ export const ArrangementView: React.FC = () => {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const rowsRef = useRef<HTMLDivElement>(null);
+
+  /** The clip a right-click opened a menu on, and where on screen to draw it. */
+  const [clipMenu, setClipMenu] = useState<{ clipId: string; x: number; y: number } | null>(null);
 
   const [drag, setDrag] = useState<ClipDrag | null>(null);
   /**
@@ -206,11 +225,15 @@ export const ArrangementView: React.FC = () => {
 
       if (!state.moved) return;
 
-      // Ctrl, Cmd or Alt at the *release* is what decides, not at the press: the
+      // The modifier at the *release* is what decides, not the one at the press: the
       // decision to leave a copy behind is usually made while looking at where the
       // block has landed.
-      if (state.copy || e.ctrlKey || e.metaKey || e.altKey) {
-        const id = duplicateClip(state.clipId, state.trackId, state.startBar);
+      const mode = copyModeOf(e) ?? state.copy;
+      if (mode) {
+        const id =
+          mode === 'unique'
+            ? duplicateClip(state.clipId, state.trackId, state.startBar)
+            : linkClip(state.clipId, state.trackId, state.startBar);
         if (id) selectClip(id);
         return;
       }
@@ -230,13 +253,43 @@ export const ArrangementView: React.FC = () => {
     addPhraseClip,
     placePhrase,
     duplicateClip,
+    linkClip,
     moveClip,
     setPhraseLength,
     selectClip,
   ]);
 
   /**
-   * Delete removes the selected placement; Ctrl+D duplicates it, linked.
+   * A clip menu closes on Escape or on the next press outside it.
+   *
+   * The ruler's menu leans on an explicit Cancel button because it is a little form
+   * with a number in it; this one is a list of commands, and a list of commands that
+   * needed dismissing by hand would be in the way of the next gesture.
+   */
+  useEffect(() => {
+    if (!clipMenu) return;
+
+    const close = (e: Event) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('[data-testid="clip-menu"]')) return;
+      setClipMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setClipMenu(null);
+    };
+
+    // In the capture phase, or a press on another block would never arrive: `startMove`
+    // stops the event so the row underneath does not also start drawing a phrase.
+    window.addEventListener('pointerdown', close, true);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', close, true);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [clipMenu]);
+
+  /**
+   * Delete removes the selected placement; Ctrl+D duplicates it, Ctrl+Shift+D links it.
    *
    * Handled here rather than in `useSegmentShortcuts` for the reason the section band
    * handles its own key: picking a block clears the block selection, so those
@@ -258,11 +311,11 @@ export const ArrangementView: React.FC = () => {
         const current = projectStore.getState().project;
         const clip = current?.clips.find(c => c.id === selectedClipId);
         if (!current || !clip) return;
-        const id = duplicateClip(
-          clip.id,
-          clip.trackId,
-          freeBarAfter(current.clips, current.phrases, clip)
-        );
+        const at = freeBarAfter(current.clips, current.phrases, clip);
+        // Shift is what asks for the sharing; the bare shortcut copies the music too.
+        const id = e.shiftKey
+          ? linkClip(clip.id, clip.trackId, at)
+          : duplicateClip(clip.id, clip.trackId, at);
         if (id) selectClip(id);
         e.preventDefault();
         return;
@@ -285,7 +338,7 @@ export const ArrangementView: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedClipId, removeClip, duplicateClip, selectClip]);
+  }, [selectedClipId, removeClip, duplicateClip, linkClip, selectClip]);
 
   if (!project) return null;
 
@@ -382,7 +435,7 @@ export const ArrangementView: React.FC = () => {
   const ghostOnRow = (state: ClipDrag, trackId: string): boolean => {
     if (state.kind === 'create') return state.trackId === trackId;
     if (state.kind === 'place') return state.trackId === trackId;
-    if (state.kind === 'move') return state.copy && state.trackId === trackId;
+    if (state.kind === 'move') return state.copy !== null && state.trackId === trackId;
     return false;
   };
 
@@ -431,7 +484,7 @@ export const ArrangementView: React.FC = () => {
       trackId: clip.trackId,
       startBar: clip.startBar,
       grabOffset: barAt(e.clientX) - clip.startBar,
-      copy: e.ctrlKey || e.metaKey || e.altKey,
+      copy: copyModeOf(e),
       moved: false,
     });
   };
@@ -492,6 +545,15 @@ export const ArrangementView: React.FC = () => {
               onPointerDown={e => startMove(e, clip)}
               onResizePointerDown={e => startResize(e, clip)}
               onDoubleClick={() => openClip(clip.id)}
+              onContextMenu={e => {
+                e.preventDefault();
+                e.stopPropagation();
+                // Pick it first, so the menu and the inspector are talking about the
+                // same block.
+                selectTrack(clip.trackId);
+                selectClip(clip.id);
+                setClipMenu({ clipId: clip.id, x: e.clientX, y: e.clientY });
+              }}
             />
           );
         })}
@@ -673,6 +735,89 @@ export const ArrangementView: React.FC = () => {
         </div>
       </div>
 
+      {/* Right-clicking a block: the two ways to copy it, side by side, because which
+          one is wanted is a decision about the music rather than about the gesture. */}
+      {clipMenu &&
+        (() => {
+          const clip = project.clips.find(c => c.id === clipMenu.clipId);
+          if (!clip) return null;
+          const shared = placementCount(project.clips, clip.phraseId) > 1;
+          const item =
+            'text-left px-2 py-0.5 rounded text-gray-200 hover:bg-gray-700 transition-colors';
+
+          const run = (act: () => void) => () => {
+            act();
+            setClipMenu(null);
+          };
+          const placeCopy = (make: (at: number) => string | null) =>
+            run(() => {
+              const current = projectStore.getState().project;
+              if (!current) return;
+              const id = make(freeBarAfter(current.clips, current.phrases, clip));
+              if (id) selectClip(id);
+            });
+
+          return (
+            <div
+              data-testid="clip-menu"
+              style={{ position: 'fixed', left: clipMenu.x, top: clipMenu.y, zIndex: 50 }}
+              className="flex flex-col bg-gray-800 border border-gray-600 rounded p-1 shadow-lg text-xs"
+            >
+              <button
+                type="button"
+                data-testid="clip-menu-edit"
+                title="Open this phrase in the editor"
+                onClick={run(() => openClip(clip.id))}
+                className={item}
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                data-testid="clip-menu-duplicate"
+                title="Copy this block and its music, so editing the copy leaves this one alone"
+                onClick={placeCopy(at => duplicateClip(clip.id, clip.trackId, at))}
+                className={item}
+              >
+                Duplicate
+              </button>
+              <button
+                type="button"
+                data-testid="clip-menu-link"
+                title="Play the same phrase again — editing either changes both"
+                onClick={placeCopy(at => linkClip(clip.id, clip.trackId, at))}
+                className={item}
+              >
+                Duplicate linked
+              </button>
+              {/* Only where there is sharing to break, as the inspector does. */}
+              {shared && (
+                <button
+                  type="button"
+                  data-testid="clip-menu-unique"
+                  title="Give this block its own copy, so editing it leaves the others alone"
+                  onClick={run(() => makeClipUnique(clip.id))}
+                  className={item}
+                >
+                  Make unique
+                </button>
+              )}
+              <button
+                type="button"
+                data-testid="clip-menu-remove"
+                title="Take this placement away. The phrase stays, unplaced."
+                onClick={run(() => {
+                  removeClip(clip.id);
+                  selectClip(null);
+                })}
+                className={`${item} hover:bg-red-600`}
+              >
+                Remove
+              </button>
+            </div>
+          );
+        })()}
+
       {/* Phrases nothing plays. Deleting a block takes away a placement, not the
           music, so this is where the music it left behind waits to be used again. */}
       <div
@@ -710,28 +855,3 @@ export const ArrangementView: React.FC = () => {
     </div>
   );
 };
-
-/**
- * The first bar at or after a clip's end where a copy of it would fit on its row.
- *
- * What Ctrl+D means: "again, right after this one". Walking forward rather than
- * refusing when the next span is taken keeps the shortcut usable on a row that is
- * already densely packed, which is exactly the row a repeat is most wanted on.
- */
-function freeBarAfter(clips: PhraseClip[], phrases: Phrase[], clip: PhraseClip): number {
-  const length = clipEndBar(clip, phrases) - clip.startBar;
-  let at = clipEndBar(clip, phrases);
-
-  // Bounded by the row's own clips: past the last of them nothing can be in the way.
-  for (let guard = 0; guard <= clips.length; guard++) {
-    const free = canPlaceClip(clips, phrases, {
-      phraseId: clip.phraseId,
-      trackId: clip.trackId,
-      startBar: at,
-    });
-    if (free) return at;
-    at += length;
-  }
-
-  return at;
-}

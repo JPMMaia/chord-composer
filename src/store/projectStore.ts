@@ -358,7 +358,9 @@ interface ProjectState {
   addPhraseClip: (trackId: string, startBar: number, lengthBars: number) => string | null;
   /** Place an existing phrase again — a *linked* placement, sharing its content. */
   placePhrase: (phraseId: string, trackId: string, startBar: number) => string | null;
-  /** Duplicate a placement, linked to the same phrase. */
+  /** Place a second block playing the same phrase — an edit to either reaches both. */
+  linkClip: (clipId: string, trackId: string, startBar: number) => string | null;
+  /** Copy a placement *and* its phrase, so the copy can be edited alone. */
   duplicateClip: (clipId: string, trackId: string, startBar: number) => string | null;
   /** Give a placement a private copy of its phrase, so editing it moves nothing else. */
   makeClipUnique: (clipId: string) => void;
@@ -2126,12 +2128,40 @@ export const projectStore = create<ProjectState>((set, get) => ({
     return clip.id;
   },
 
-  duplicateClip: (clipId: string, trackId: string, startBar: number) => {
+  linkClip: (clipId: string, trackId: string, startBar: number) => {
     const project = get().project;
     if (!project) return null;
     const source = project.clips.find(c => c.id === clipId);
     if (!source) return null;
     return get().placePhrase(source.phraseId, trackId, startBar);
+  },
+
+  /**
+   * Copy a placement *and* its phrase, so the copy can be edited alone.
+   *
+   * The opposite of `linkClip`, and `makeClipUnique` taken up front: the split happens
+   * at the moment the copy is made, rather than after the user discovers they changed
+   * the chorus they were trying to leave alone.
+   *
+   * The phrase is only added once the clip is known to fit, so a duplicate that lands
+   * on an occupied span leaves no orphan copy behind in the library.
+   */
+  duplicateClip: (clipId: string, trackId: string, startBar: number) => {
+    const project = get().project;
+    if (!project) return null;
+    if (!project.tracks.some(t => t.id === trackId)) return null;
+    const source = project.clips.find(c => c.id === clipId);
+    if (!source) return null;
+    const phrase = phraseById(project.phrases, source.phraseId);
+    if (!phrase) return null;
+
+    const copy = clonePhrase(phrase, uniquePhraseName(project.phrases, phrase.name));
+    const phrases = [...project.phrases, copy];
+    const clip: PhraseClip = { id: generateId(), phraseId: copy.id, trackId, startBar };
+    if (!canPlaceClip(project.clips, phrases, clip)) return null;
+
+    set({ project: recompiled({ ...project, phrases, clips: [...project.clips, clip] }) });
+    return clip.id;
   },
 
   /**

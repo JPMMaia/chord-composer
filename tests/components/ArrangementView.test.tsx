@@ -393,4 +393,50 @@ describe('ArrangementView', () => {
       expect.objectContaining({ phraseId, trackId: trackId(1), startBar: 4 }),
     ]);
   });
+
+  // ---------------------------------------------------------------------------
+  // Playhead
+  // ---------------------------------------------------------------------------
+
+  it('draws the playhead at the beat playback has reached', () => {
+    render(<ArrangementView playheadBeat={6} />);
+
+    expect(screen.getByTestId('arrangement-playhead')).toHaveStyle({
+      left: `${6 * PIXELS_PER_BEAT}px`,
+    });
+  });
+
+  it('parks the playhead at the top of the song when nothing is playing', () => {
+    render(<ArrangementView />);
+
+    expect(screen.getByTestId('arrangement-playhead')).toHaveStyle({ left: '0px' });
+  });
+
+  it('scales the playhead with the zoom, like everything else on the beat axis', () => {
+    const { rerender } = render(<ArrangementView playheadBeat={6} />);
+
+    editorStore.getState().setPixelsPerBeat(PIXELS_PER_BEAT * 2);
+    rerender(<ArrangementView playheadBeat={6} />);
+
+    expect(screen.getByTestId('arrangement-playhead')).toHaveStyle({
+      left: `${6 * PIXELS_PER_BEAT * 2}px`,
+    });
+  });
+
+  it('clamps the playhead to the end of the song', () => {
+    const totalBeats = state().project!.bars.length * BAR_BEATS;
+    render(<ArrangementView playheadBeat={totalBeats + 20} />);
+
+    expect(screen.getByTestId('arrangement-playhead')).toHaveStyle({
+      left: `${totalBeats * PIXELS_PER_BEAT}px`,
+    });
+  });
+
+  // Drags hit-test with `document.elementFromPoint`, so a playhead that answered the
+  // pointer would swallow every gesture that passed under it.
+  it('keeps the playhead out of the way of the pointer', () => {
+    render(<ArrangementView playheadBeat={6} />);
+
+    expect(screen.getByTestId('arrangement-playhead')).toHaveClass('pointer-events-none');
+  });
 });

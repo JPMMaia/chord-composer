@@ -476,7 +476,7 @@ function App() {
             // song has more instruments than fit — the arrangement grows downwards
             // with the band, which the timeline never did.
             <div className="flex-1 overflow-y-auto">
-              <ArrangementView />
+              <ArrangementView playheadBeat={playheadBeat} />
             </div>
           ) : (
             <>

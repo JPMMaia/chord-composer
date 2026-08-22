@@ -47,6 +47,13 @@ const ROW_ATTRIBUTE = 'data-arrangement-row';
 const BAR_HEADER_HEIGHT = 28;
 
 /**
+ * The playback position line. The same red the piano roll draws its playhead in, so
+ * the two surfaces read as one marker seen from two distances rather than as two
+ * unrelated lines.
+ */
+const PLAYHEAD_COLOR = '#ef4444';
+
+/**
  * A gesture in flight, in whole bars.
  *
  * `create` draws a new phrase across empty row; `move` slides an existing block,
@@ -84,7 +91,19 @@ type ClipDrag =
   | { kind: 'resize'; clipId: string; lengthBars: number; moved: boolean }
   | { kind: 'place'; phraseId: string; trackId: string | null; startBar: number; moved: boolean };
 
-export const ArrangementView: React.FC = () => {
+interface ArrangementViewProps {
+  /**
+   * Absolute song beat playback has reached.
+   *
+   * Absolute, not phrase-relative: this surface *is* the song. `App` measures its
+   * playhead from the open phrase's bar 0 while one is being auditioned, but an
+   * audition only exists while the phrase editor is up, so what arrives here is
+   * always the song's own beat.
+   */
+  playheadBeat?: number;
+}
+
+export const ArrangementView: React.FC<ArrangementViewProps> = ({ playheadBeat = 0 }) => {
   const project = projectStore(s => s.project);
   const addPhraseClip = projectStore(s => s.addPhraseClip);
   const placePhrase = projectStore(s => s.placePhrase);
@@ -673,7 +692,7 @@ export const ArrangementView: React.FC = () => {
           onScroll={e => setScrollX(e.currentTarget.scrollLeft)}
           className="flex-1 overflow-x-auto scrollbar-hidden"
         >
-          <div className="min-w-max">
+          <div className="min-w-max relative">
             {/* The arrangement's named spans, on the same beat axis as everything
                 below. It overhangs the gutter as the ruler does — that column is
                 bottom-aligned, so neither needs a row of its own over there. */}
@@ -731,6 +750,31 @@ export const ArrangementView: React.FC = () => {
             </div>
 
             <div ref={rowsRef}>{rows.map(laneRows)}</div>
+
+            {/* Where playback is, on the beat axis everything above is drawn on, and
+                across the whole stack — band, ruler, bar strip and rows — because the
+                point of it is to line the position up against the blocks it is
+                sounding. Last child, so it paints over the blocks without the rest of
+                the view needing to take a position in a z-order.
+
+                Drawn while stopped too: that is where the next Play begins.
+
+                No transition on `left`. A repeat carries the position backwards in one
+                step, and a transition would answer that by sliding the line back across
+                the screen — reading as a rewind that never happened. */}
+            <div
+              data-testid="arrangement-playhead"
+              style={{
+                // Clamped, or a playhead run past the last bar would stretch the
+                // scrollable content out past the end of the song.
+                left: `${Math.min(Math.max(playheadBeat, 0), totalBeats) * pixelsPerBeat}px`,
+                backgroundColor: PLAYHEAD_COLOR,
+              }}
+              // `pointer-events-none` is load-bearing: drags hit-test through
+              // `document.elementFromPoint`, and a line that answered it would swallow
+              // every gesture that passed underneath.
+              className="absolute top-0 bottom-0 w-0.5 pointer-events-none"
+            />
           </div>
         </div>
       </div>

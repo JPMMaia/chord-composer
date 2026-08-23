@@ -34,8 +34,15 @@ export function laneKey(target: AutomationTarget): string {
 /** The highest MIDI controller number. Controllers are a 7-bit value. */
 export const MAX_CC = 127;
 
-/** Whether a value off a file or the UI names something a plugin could be sent. */
-function isTarget(target: unknown): target is AutomationTarget {
+/**
+ * Whether a value off a file or the UI names something a plugin could be sent.
+ *
+ * Exported because a target is no longer only ever a lane's: an instrument's
+ * touchpad assignment is one too, and both arrive from the same untrusted places —
+ * a project file and a number field — so both are gated on the same predicate rather
+ * than on two that could drift apart.
+ */
+export function isAutomationTarget(target: unknown): target is AutomationTarget {
   if (typeof target !== 'object' || target === null) return false;
 
   const candidate = target as AutomationTarget;
@@ -56,7 +63,7 @@ function isTarget(target: unknown): target is AutomationTarget {
 /** Whether a value off a file or the UI can be read as a lane. */
 function isLane(lane: unknown): lane is ParameterAutomation {
   if (typeof lane !== 'object' || lane === null) return false;
-  return isTarget((lane as ParameterAutomation).target);
+  return isAutomationTarget((lane as ParameterAutomation).target);
 }
 
 export interface NormalizeOptions {

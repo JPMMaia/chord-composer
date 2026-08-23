@@ -28,6 +28,7 @@ import {
   withoutPoint,
 } from '@/engine/volumeAutomation';
 import {
+  laneKey,
   normalizeParameterAutomation,
   sameLanes,
   withLane,
@@ -194,6 +195,13 @@ interface ProjectState {
   renameTrack: (trackId: string, name: string) => void;
   setTrackInstrument: (trackId: string, instrument: string) => void;
   setTrackVolume: (trackId: string, volume: number) => void;
+  /**
+   * Point the touchpad at one of an instrument's targets, or at nothing.
+   *
+   * Null rather than an absent argument for clearing it, so unassigning is something
+   * the caller states rather than something it omits.
+   */
+  setTrackTouchpadTarget: (trackId: string, target: AutomationTarget | null) => void;
   // Volume over a *phrase*, which is what owns its curves: positions are beats from
   // the phrase's own bar 0, and levels are 0-1 relative to the instrument's fader.
   // Both are clamped rather than rejected, because these come from a drag in the lane
@@ -219,6 +227,21 @@ interface ProjectState {
     value: number
   ) => void;
   removeLanePoint: (phraseId: string, key: string, index: number) => void;
+  /**
+   * Append a performed run of breakpoints to one lane, creating the lane if the
+   * target has none yet.
+   *
+   * Batched rather than one call per point because a gesture on the touchpad produces
+   * samples at pointer rate, and every write here recompiles the arrangement — a
+   * point at a time would put `compileAutomation` over the whole project in the path
+   * of every pointer event. The recorder buffers and flushes; this is what it flushes
+   * into.
+   *
+   * Creating the lane is part of the action rather than the caller's job so that a
+   * take cannot half-happen: there is no moment at which a lane exists holding none
+   * of the gesture that made it.
+   */
+  recordLanePoints: (phraseId: string, target: AutomationTarget, name: string, points: AutomationPoint[]) => void;
   setTrackPan: (trackId: string, pan: number) => void;
   toggleTrackMute: (trackId: string) => void;
   toggleTrackSolo: (trackId: string) => void;
@@ -1824,6 +1847,32 @@ export const projectStore = create<ProjectState>((set, get) => ({
     updateParameterAutomation(get, set, phraseId, lanes =>
       withLanePoints(lanes, key, points => withoutPoint(points, index))
     );
+  },
+
+  recordLanePoints: (
+    phraseId: string,
+    target: AutomationTarget,
+    name: string,
+    points: AutomationPoint[]
+  ) => {
+    if (points.length === 0) return;
+
+    const key = laneKey(target);
+    updateParameterAutomation(get, set, phraseId, lanes => {
+      // `withLane` keeps an existing lane's curve untouched, so a second pass over a
+      // controller adds to what is there rather than replacing it — which is what
+      // punching in over one stretch of a phrase has to mean.
+      const opened = withLane(lanes, { target, name, points: [] });
+      return withLanePoints(opened, key, existing =>
+        points.reduce((acc, point) => withPoint(acc, point), existing)
+      );
+    });
+  },
+
+  setTrackTouchpadTarget: (trackId: string, target: AutomationTarget | null) => {
+    updateTrack(get, set, trackId, () => ({
+      touchpadTarget: target ?? undefined,
+    }));
   },
 
   toggleTrackMute: (trackId: string) => {

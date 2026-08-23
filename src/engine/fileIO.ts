@@ -35,7 +35,11 @@ import {
 } from '@/engine/phrases';
 import { generateId } from '@/utils/id';
 import { normalizePoints, valueAtBeat } from '@/engine/volumeAutomation';
-import { MAX_CC, normalizeParameterAutomation } from '@/engine/parameterAutomation';
+import {
+  MAX_CC,
+  isAutomationTarget,
+  normalizeParameterAutomation,
+} from '@/engine/parameterAutomation';
 import { normalizeSections } from '@/engine/sections';
 import { normalizeTrackOrder } from '@/engine/trackGroups';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
@@ -195,8 +199,20 @@ const LEGACY_TRACK_ID = 'track-legacy';
  * absolute-beat curve that covers it, re-based to bar 0 of the phrase it plays, with
  * the level the curve had reached pinned at the join. A phrase placed twice takes the
  * shape over its first placement, since a phrase can only hold one.
+ *
+ * 1.19 let the touchpad perform a controller live: each instrument gained an optional
+ * `touchpadTarget` naming the parameter or MIDI controller a finger on the touchpad
+ * drives, in the same `{kind, ...}` shape a lane's target already uses. It is
+ * *authored* rather than derived — a setting on the instrument, not something
+ * compiled out of the phrases — which is why it is written on the track where the
+ * curves no longer are. What a performed gesture records is an ordinary phrase lane
+ * named by that same target, so nothing about how a curve is stored changed.
+ *
+ * An instrument with none serialises byte for byte as it did under 1.18, and a
+ * pre-1.19 file reads back with nothing assigned, which is what every project was
+ * before the touchpad could be performed on.
  */
-export const SCHEMA_VERSION = '1.18';
+export const SCHEMA_VERSION = '1.19';
 
 /**
  * Validation error returned by validateProject.
@@ -354,6 +370,9 @@ export function serializeProject(project: Project): string {
       color: t.color,
       // Only plugins have one, and only once the plugin has been asked for it.
       vst3State: t.vst3State,
+      // Absent on every instrument nobody has pointed the touchpad at, which is what
+      // every instrument was before 1.19.
+      touchpadTarget: t.touchpadTarget,
     })),
     // Phrases are where all music lives from 1.17 on. Their bars are local, numbered
     // from zero, and carry no metre of their own — the song's bars own that.
@@ -582,6 +601,23 @@ function readParameterAutomation(raw: unknown): ParameterAutomation[] | undefine
 }
 
 /**
+ * Read an instrument's touchpad assignment off a file.
+ *
+ * Absent when it names nothing sendable, which is also what an instrument nobody has
+ * assigned one on says. Gated on the same `isAutomationTarget` a lane's target passes
+ * through, so a file cannot express a touchpad target the lane it records into would
+ * refuse — and rebuilt rather than passed along, so a hand-edited file carries no key
+ * the rest of the app has never heard of.
+ */
+function readTouchpadTarget(raw: unknown): AutomationTarget | undefined {
+  if (!isAutomationTarget(raw)) return undefined;
+
+  return raw.kind === 'param'
+    ? { kind: 'param', paramId: raw.paramId }
+    : { kind: 'cc', controller: raw.controller };
+}
+
+/**
  * Read the project's sections off a file.
  *
  * Absent when there is nothing usable, rather than an empty array: absent is what a
@@ -772,6 +808,11 @@ export function deserializeProject(json: string): Project {
         // Base64 plugin state, opaque here. Anything that is not a string is
         // dropped rather than passed to the plugin, which would reject it.
         vst3State: typeof t.vst3State === 'string' ? t.vst3State : undefined,
+        // Dropped rather than repaired when it names nothing sendable: an instrument
+        // with no touchpad assignment is an ordinary state, so there is nothing to
+        // fail the load over — and no target the app could invent that would not be
+        // driving something the author never chose.
+        touchpadTarget: readTouchpadTarget(t.touchpadTarget),
       }))
     : [];
 
@@ -1240,6 +1281,14 @@ export function validateProject(project: Project): ValidationResult {
     }
     if (typeof t.pan !== 'number' || t.pan < -1 || t.pan > 1) {
       errors.push(`Track ${i}: pan must be between -1 and 1.`);
+    }
+    // Having none is the ordinary state; naming something unsendable is not. Same
+    // predicate the lanes are checked against below, so a touchpad assignment can
+    // never be a target the lane it records into would refuse.
+    if (t.touchpadTarget !== undefined && !isAutomationTarget(t.touchpadTarget)) {
+      errors.push(
+        `Track ${i}: touchpad needs a whole parameter id >= 0 or a controller 0-${MAX_CC}.`
+      );
     }
   }
 

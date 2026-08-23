@@ -675,7 +675,7 @@ describe('fileIO', () => {
         });
 
       it('states the current schema version', () => {
-        expect(SCHEMA_VERSION).toBe('1.18');
+        expect(SCHEMA_VERSION).toBe('1.19');
       });
 
       it('round-trips names, ranges and colours', () => {

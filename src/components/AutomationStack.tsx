@@ -5,6 +5,7 @@ import { phraseById } from '@/engine/phrases';
 import { AutomationLane, AUTOMATION_LANE_HEIGHT } from '@/components/AutomationLane';
 import { LaneLabel } from '@/components/LaneLabel';
 import { LearnCcPanel } from '@/components/LearnCcPanel';
+import { TouchpadPanel } from '@/components/TouchpadPanel';
 import { laneFor, laneKey, MAX_CC, VOLUME_LANE_KEY } from '@/engine/parameterAutomation';
 import { freeController, nextFreeCc } from '@/engine/vst3Cc';
 import { useVst3Cc } from '@/hooks/useVst3Cc';
@@ -274,6 +275,12 @@ export const CcLaneStrip: React.FC<CcLaneStripProps> = ({ phrase, track }) => {
           }
         />
       )}
+
+      {/* Beside the two ways of *drawing* a curve, because it is the third way of
+          getting one: played rather than drawn. It sits here rather than in the
+          transport because what it needs saying about it — which controller — is
+          the same question the rest of this strip is asking. */}
+      <TouchpadPanel track={track} supported={supported} suggested={suggested} />
     </div>
   );
 };

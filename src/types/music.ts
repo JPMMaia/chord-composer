@@ -352,6 +352,20 @@ export interface Track {
    * value the app could put there that would not be an invention.
    */
   parameterAutomation?: ParameterAutomation[];
+  /**
+   * The target the touchpad performs on this instrument, live.
+   *
+   * Absent means the touchpad does nothing here, which is every instrument nobody has
+   * assigned one on. Stored per instrument rather than once for the app because it is
+   * a property of the *sound*: a harp's glissando is CC 11, a string library's
+   * dynamics are CC 1, and switching instrument should switch what the finger drives
+   * without anything being reassigned.
+   *
+   * Authored, unlike the two curves above: this is a setting, not something compiled
+   * out of the placed phrases. What the gesture *writes* is an ordinary lane on the
+   * phrase, named by `laneKey` from this same target.
+   */
+  touchpadTarget?: AutomationTarget;
   pan: number;
   /**
    * Temporarily silenced. Its notes still draw in the piano roll — muting is

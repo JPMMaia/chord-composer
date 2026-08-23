@@ -28,6 +28,7 @@ import { useSegmentCopyPaste } from '@/hooks/useSegmentCopyPaste';
 import { usePlaybackShortcuts } from '@/hooks/usePlaybackShortcuts';
 import { useRecordShortcuts } from '@/hooks/useRecordShortcuts';
 import { useMidiInput } from '@/hooks/useMidiInput';
+import { useTouchpadExpression } from '@/hooks/useTouchpadExpression';
 import { useRecordSession } from '@/hooks/useRecordSession';
 import { useFollowPlayhead } from '@/hooks/useFollowPlayhead';
 import { useFileIO } from '@/hooks/useFileIO';
@@ -35,6 +36,7 @@ import { useFileShortcuts } from '@/hooks/useFileShortcuts';
 import { FileIOContext } from '@/context/fileIOContext';
 import { useFormulaLibraries } from '@/hooks/useFormulaLibraries';
 import { FormulaLibraryContext } from '@/context/formulaLibraryContext';
+import { TouchpadContext } from '@/context/touchpadContext';
 import { editorStore } from '@/store/editorStore';
 import { songTimeToBeat } from '@/engine/scheduler';
 import {
@@ -340,6 +342,12 @@ function App() {
     record: recordGated,
   });
 
+  // The touchpad performs the selected instrument's assigned controller, and records
+  // the gesture into that controller's lane while armed. Mounted here rather than in
+  // the strip that shows it because it listens on the document and owns a flush timer:
+  // two of it would sample one gesture twice.
+  const touchpad = useTouchpadExpression({ isPlaying, getSongTime, getPool, ensureAudio });
+
   // Armed and rolling is one take, and one undo step: Ctrl+Z during it scraps the
   // whole take rather than the last block of it.
   useRecordSession(recordArmed && isPlaying, urRef.current);
@@ -421,6 +429,7 @@ function App() {
     <UndoRedoContext.Provider value={undoRedoValue}>
     <FileIOContext.Provider value={fileIO}>
     <FormulaLibraryContext.Provider value={formulaLibraries}>
+    <TouchpadContext.Provider value={touchpad}>
     <div className="flex flex-col h-screen bg-gray-900 text-gray-100">
       {/* File Menu */}
       <div className="px-4 py-2 bg-gray-800 border-b border-gray-700 flex items-center gap-3">
@@ -585,6 +594,7 @@ function App() {
         </div>
       </div>
     </div>
+    </TouchpadContext.Provider>
     </FormulaLibraryContext.Provider>
     </FileIOContext.Provider>
     </UndoRedoContext.Provider>

@@ -417,6 +417,47 @@ describe('usePlayback', () => {
     expect(scheduled.filter(n => n.midiNote === 60).length).toBeGreaterThan(1);
   });
 
+  describe('the loop seam', () => {
+    const looped: PlaybackConfig = { ...config, loopStart: 0, loopEnd: 4, loopEnabled: true };
+
+    // The regression these exist for: the window used to be clamped at the loop
+    // end, so a repeat's notes were only handed over once the wrap had been
+    // noticed — a tick or more after their moment had already passed. Web Audio
+    // clamps a stale note to "now"; a plugin reached over IPC clamps it somewhere
+    // else. Same downbeat, two different "immediately", once per repetition.
+    it('hands a repeat its notes before the seam arrives', async () => {
+      const { result } = renderHook(() => usePlayback(looped));
+      await startPlayback(result);
+      await advance(3.9);
+
+      // Still short of the seam at 4s, and the repeat's downbeat is already out —
+      // placed at 4s, in the future, rather than at whatever the clock reads once
+      // the wrap is spotted.
+      expect(result.current.getSongTime()).toBeLessThan(4);
+      expect(scheduled.filter(n => n.when === 4)).toEqual([
+        { midiNote: 60, velocity: 100, when: 4, duration: 1 },
+      ]);
+    });
+
+    it('places every repetition on the same grid as the first', async () => {
+      const { result } = renderHook(() => usePlayback(looped));
+      await startPlayback(result);
+      await advance(11);
+
+      // Notes sit a beat apart at 60 BPM, so three repetitions of a four-beat
+      // range are twelve notes exactly one second apart with no seam to be heard.
+      expect(scheduled.map(n => n.when)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    });
+
+    it('schedules no note twice across a seam', async () => {
+      const { result } = renderHook(() => usePlayback(looped));
+      await startPlayback(result);
+      await advance(8.5);
+
+      expect(new Set(scheduled.map(n => n.when)).size).toBe(scheduled.length);
+    });
+  });
+
   // Editing the timeline used to be inaudible until the next Play, because the note
   // list was snapshotted into the interval closure.
   describe('editing while playing', () => {
@@ -736,21 +777,37 @@ describe('usePlayback', () => {
       expect(volumeCalls).toEqual([{ kind: 'set', volume: 0.8 }]);
     });
 
-    it('re-pins at the loop start on a wrap rather than gliding across the seam', async () => {
+    it('steps back to the curve start at the seam rather than gliding across it', async () => {
       const { result } = renderHook(() =>
         usePlayback({ ...fading, loopStart: 0, loopEnd: 4, loopEnabled: true })
       );
       await startPlayback(result);
-      // Far enough to clear the seam at 4s and cross the whole fade a second time.
+      // Far enough to clear the seam at 4s and start the fade a second time.
       await advance(7.5);
 
-      // Past the seam the level is pinned back to where the curve opens — the value
-      // it holds before its first breakpoint — instead of ramping up from silence.
-      const pins = volumeCalls.filter(c => c.kind === 'set');
-      expect(pins.length).toBeGreaterThan(1);
-      expect(pins.at(-1)?.volume).toBe(1);
-      // And the curve is scheduled again for the second pass.
-      expect(ramps().filter(c => c.volume === 0).length).toBeGreaterThan(1);
+      // The repeat's opening level is *scheduled at the seam*, not stated whenever
+      // the pass that noticed the wrap happened to run.
+      expect(ramps().filter(c => c.when === 4)).toEqual([
+        { kind: 'ramp', volume: 1, when: 4 },
+      ]);
+
+      // A linear ramp interpolates from the event before it, so the outgoing level
+      // is held right up to the seam. Without that the fade's last value would
+      // glide up to the repeat's opening across the whole tail of the range.
+      const hold = ramps().filter(c => c.when! > 3.99 && c.when! < 4);
+      expect(hold).toHaveLength(1);
+      expect(hold[0].volume).toBe(0);
+
+      // The curve then runs again in the new frame: beats 1 and 3 of the repeat.
+      expect(ramps()).toContainEqual({ kind: 'ramp', volume: 1, when: 5 });
+      expect(ramps()).toContainEqual({ kind: 'ramp', volume: 0, when: 7 });
+
+      // Nothing is pinned at the wrap. `setVolume` cancels pending events, and by
+      // then the repeat's ramps are already on the timeline.
+      expect(volumeCalls.filter(c => c.kind === 'set')).toEqual([
+        { kind: 'set', volume: 0.8 },
+        { kind: 'set', volume: 1 },
+      ]);
     });
 
     it('picks up a curve edited while playing', async () => {
@@ -998,16 +1055,30 @@ describe('usePlayback', () => {
       expect(paramCalls).toEqual([]);
     });
 
-    it('re-pins both curves after a loop wrap rather than drifting', async () => {
+    it('restates the sweep at the seam on a wrap rather than drifting', async () => {
       const { result } = renderHook(() =>
         usePlayback({ ...sweeping, loopStart: 0, loopEnd: 4, loopEnabled: true })
       );
       await startPlayback(result);
-      await advance(4.5);
+      // Past the seam at 4s and into the repeat's own sweep, which runs 5s to 7s.
+      await advance(6.5);
 
-      // The wrap invalidates the cursor, so the curve is stated again from the top
-      // rather than being treated as already spent.
-      expect(pinned().length).toBeGreaterThan(1);
+      const fromSeam = automated().filter(c => c.when! >= 4);
+      // The curve opens again exactly at the seam, sample-accurate, rather than
+      // being stated untimed by whichever pass noticed the wrap.
+      expect(fromSeam[0]).toEqual({
+        kind: 'automate',
+        target: { kind: 'param', paramId: 7 },
+        value: 0.2,
+        when: 4,
+      });
+      // And it is re-walked from the bottom instead of carrying on from the 0.9
+      // the last repetition ended on.
+      expect(fromSeam.at(-1)!.value).toBeGreaterThan(0.2);
+      expect(fromSeam.at(-1)!.value).toBeLessThan(0.9);
+
+      // Still only the pin from Play: a wrap places values, it does not state them.
+      expect(pinned()).toHaveLength(1);
     });
 
     it('picks up an edit made while playing', async () => {

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  cycleWindows,
   notesInWindow,
   toClockTime,
   songTimeToBeat,
@@ -97,6 +98,97 @@ describe('scheduler', () => {
       const timings = [timing(1, 60), timing(1, 64), timing(1, 67)];
       const found = notesInWindow({ timings, fromSong: 0.9, toSong: 1.1 });
       expect(found.map(t => t.midiNote)).toEqual([60, 64, 67]);
+    });
+  });
+
+  describe('cycleWindows', () => {
+    /** Beats 0-4 of a 60 BPM song: song seconds 0 to 4, repeating. */
+    const region = { from: 0, end: 4, repeat: true };
+
+    it('leaves a window well inside one repetition alone', () => {
+      expect(cycleWindows(1, 1.2, 0, region)).toEqual([
+        { fromSong: 1, toSong: 1.2, songStartClockTime: 0 },
+      ]);
+    });
+
+    it('cuts a window straddling the seam in two, a loop length apart', () => {
+      // The whole point: the far half is placed against a frame one repetition on,
+      // so the repeat's downbeat is scheduled at 4s while the clock still reads 3.9.
+      expect(cycleWindows(3.75, 4.25, 0, region)).toEqual([
+        { fromSong: 3.75, toSong: 4, songStartClockTime: 0 },
+        { fromSong: 0, toSong: 0.25, songStartClockTime: 4 },
+      ]);
+    });
+
+    it('yields only the far side once the window has cleared the seam', () => {
+      // The pass after the one above, before the wrap is noticed: everything up to
+      // 4.25 has already gone out, so only 4.25 onward is new — and it belongs to
+      // the next repetition.
+      expect(cycleWindows(4.25, 4.5, 0, region)).toEqual([
+        { fromSong: 0.25, toSong: 0.5, songStartClockTime: 4 },
+      ]);
+    });
+
+    it('hands every note out exactly once across a seam', () => {
+      // A pass at a time, as the scheduler runs it: the cursor sits on the clock,
+      // and the frame of reference moves on by a loop length once the playhead
+      // crosses the seam.
+      const timings = [timing(0), timing(1), timing(2), timing(3)];
+      const emitted: number[] = [];
+      let base = 0;
+      let scheduledUpTo = 0;
+
+      // Up to the moment the third repetition's downbeat comes into view, so the
+      // expectation below is two whole repetitions and nothing half-scheduled.
+      for (let pass = 0; (pass * TICK_MS) / 1000 < 7.8; pass++) {
+        const clock = (pass * TICK_MS) / 1000;
+        const toClock = clock + LOOKAHEAD_SECONDS;
+        for (const slice of cycleWindows(scheduledUpTo, toClock, base, region)) {
+          const due = notesInWindow({
+            timings,
+            fromSong: slice.fromSong,
+            toSong: slice.toSong,
+          });
+          emitted.push(...due.map(n => toClockTime(n.startTime, slice.songStartClockTime)));
+        }
+        scheduledUpTo = Math.max(scheduledUpTo, toClock);
+        if (clock - base >= region.end) base += region.end - region.from;
+      }
+
+      // Two repetitions of four notes a second apart, each note handed over once
+      // and each one loop length on from its counterpart.
+      expect(emitted.map(t => Math.round(t * 1e6) / 1e6)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    });
+
+    it('stops at the region end when the range does not repeat', () => {
+      expect(cycleWindows(3.75, 4.25, 0, { ...region, repeat: false })).toEqual([
+        { fromSong: 3.75, toSong: 4, songStartClockTime: 0 },
+      ]);
+    });
+
+    it('offsets a range that does not start at the top of the song', () => {
+      // Beats 4-8 at 60 BPM, played from a clock anchored at 10.
+      const ranged = { from: 4, end: 8, repeat: true };
+      expect(cycleWindows(17.75, 18.25, 10, ranged)).toEqual([
+        { fromSong: 7.75, toSong: 8, songStartClockTime: 10 },
+        { fromSong: 4, toSong: 4.25, songStartClockTime: 14 },
+      ]);
+    });
+
+    it('yields nothing for a window that has already been scheduled', () => {
+      expect(cycleWindows(2, 2, 0, region)).toEqual([]);
+    });
+
+    it('does not spin on a region with no length', () => {
+      // A degenerate range cannot repeat over nothing; the caller stops instead.
+      expect(cycleWindows(0, 0.2, 0, { from: 2, end: 2, repeat: true })).toEqual([]);
+    });
+
+    it('caps how many repetitions one window may be cut into', () => {
+      // A look-ahead longer than the whole loop. The bound keeps this finite rather
+      // than scheduling the same tiny range forever.
+      const tiny = { from: 0, end: 0.02, repeat: true };
+      expect(cycleWindows(0, 1, 0, tiny).length).toBeLessThanOrEqual(4);
     });
   });
 

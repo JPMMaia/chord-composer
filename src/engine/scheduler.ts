@@ -41,6 +41,89 @@ export function notesInWindow({ timings, fromSong, toSong }: ScheduleWindow): No
   return timings.filter(t => t.startTime >= fromSong && t.startTime < toSong);
 }
 
+/** The stretch of song time a run is confined to, and whether it repeats. */
+export interface LoopRegion {
+  /** Song time at which the region begins, in seconds. Inclusive. */
+  from: number;
+  /** Song time at which it ends, in seconds. Exclusive. */
+  end: number;
+  /** Whether reaching `end` starts the region again rather than stopping. */
+  repeat: boolean;
+}
+
+/** One repetition's share of a look-ahead window. */
+export interface CycleWindow {
+  /** Window start in song time, in seconds. Inclusive. */
+  fromSong: number;
+  /** Window end in song time, in seconds. Exclusive. */
+  toSong: number;
+  /**
+   * What the clock reads at song position 0 *for this repetition*.
+   *
+   * One loop length further on than the previous slice's, which is what places a
+   * note belonging to the next repeat at the right moment while the current one is
+   * still sounding.
+   */
+  songStartClockTime: number;
+}
+
+/**
+ * Most repetitions one window may be cut into.
+ *
+ * A look-ahead shorter than the loop can only ever span one seam, so the bound is
+ * never reached in practice; it exists so a degenerate loop — one shorter than a
+ * single tick — cannot spin here.
+ */
+const MAX_CYCLES_PER_WINDOW = 4;
+
+/**
+ * Cut a look-ahead window into one slice per repetition it touches.
+ *
+ * The window is given on the *clock* rather than in song time, because a window
+ * reaching past a seam covers a song time that is about to come round again;
+ * the clock does not repeat, so a cursor on it can only move forward and no note
+ * can be handed out twice.
+ *
+ * Scheduling the far side of a seam before the seam arrives is the whole point.
+ * Stopping at the loop end and waiting for the wrap to be noticed leaves the
+ * notes at the top of a repeat with no look-ahead at all — they reach the
+ * instruments only once their moment has already passed, and each backend places
+ * a stale note at its own idea of "immediately".
+ *
+ * @param fromClock - Clock reading already scheduled up to. Inclusive.
+ * @param toClock - Clock reading to schedule up to. Exclusive.
+ * @param songStartClockTime - What the clock read at song position 0 for the
+ *   repetition currently sounding.
+ */
+export function cycleWindows(
+  fromClock: number,
+  toClock: number,
+  songStartClockTime: number,
+  region: LoopRegion
+): CycleWindow[] {
+  const slices: CycleWindow[] = [];
+  const duration = region.end - region.from;
+  let base = songStartClockTime;
+
+  for (let cycle = 0; cycle < MAX_CYCLES_PER_WINDOW; cycle++) {
+    const fromSong = Math.max(fromClock - base, region.from);
+    const toSong = Math.min(toClock - base, region.end);
+    if (toSong > fromSong) {
+      slices.push({ fromSong, toSong, songStartClockTime: base });
+    }
+
+    // A window ending inside this repetition has nothing left to give the next
+    // one. Neither has one that does not repeat, or a region with no length to
+    // repeat over.
+    if (!region.repeat || duration <= 0) break;
+    if (toClock - base <= region.end) break;
+
+    base += duration;
+  }
+
+  return slices;
+}
+
 /**
  * Song time to a reading on the instrument's clock.
  *

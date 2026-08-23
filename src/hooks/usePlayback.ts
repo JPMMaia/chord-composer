@@ -7,10 +7,12 @@ import {
   LOOKAHEAD_SECONDS,
   TICK_MS,
   beatToSongTime,
+  cycleWindows,
   notesInWindow,
   songTimeToBeat,
   toClockTime,
 } from '@/engine/scheduler';
+import type { CycleWindow } from '@/engine/scheduler';
 import { firstPointAtOrAfter, valueAtBeat } from '@/engine/volumeAutomation';
 import { laneKey, VOLUME_LANE_KEY } from '@/engine/parameterAutomation';
 import { syncVst3Clock } from '@/engine/vst3Instrument';
@@ -44,6 +46,17 @@ function rangeStart(config: PlaybackConfig): number {
 const VOLUME_STEP_EPSILON = 0.005;
 
 /**
+ * How long before a loop seam a ramped curve is held at its outgoing value.
+ *
+ * `rampVolume` is `linearRampToValueAtTime`, which interpolates from whatever
+ * event precedes it — so a bare ramp to the curve's opening value at the seam
+ * would glide the whole tail of the repeat up to it instead of stepping there.
+ * Stating the outgoing level a millisecond short turns that glide into a step,
+ * short enough to be a step to the ear and long enough not to click.
+ */
+const SEAM_STEP_SECONDS = 0.001;
+
+/**
  * How far through one instrument's curve the scheduler has got in this run.
  *
  * `points` is the array the cursor was counted against, not a copy: a mid-playback
@@ -61,6 +74,20 @@ interface AutomationCursor {
   points: AutomationPoint[];
   /** Last level sent, for backends stepped per pass rather than ramped. */
   lastValue: number;
+  /**
+   * Clock reading at song position 0 for the repetition this cursor is walking.
+   *
+   * A look-ahead window may reach past a seam, so a cursor can be a whole
+   * repetition ahead of the playhead. When a slice arrives with a different base
+   * the curve has come round again and opens afresh — see `advanceCurve`.
+   */
+  cycleBase: number;
+  /**
+   * Clock reading of the last value placed on the instrument's timeline, or
+   * -Infinity for a cursor that has only ever pinned. Keeps the hold before a
+   * seam from landing behind a breakpoint already scheduled past it.
+   */
+  lastEmitClock: number;
 }
 
 /**
@@ -92,8 +119,15 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
 
   /** Clock reading at song position 0. Playback's whole frame of reference. */
   const songStartClockRef = useRef(0);
-  /** Song time up to which notes have already been handed to the instrument. */
-  const scheduledUpToRef = useRef(0);
+  /**
+   * Clock reading up to which notes have already been handed to the instruments.
+   *
+   * On the clock rather than in song time because a look-ahead window may reach
+   * past a loop seam into the next repetition, where the same song time comes
+   * round again. The clock does not repeat, so a cursor on it only moves forward
+   * and no note can be dispatched twice.
+   */
+  const scheduledUpToClockRef = useRef(0);
   /** Song position to resume from. Non-zero only after Pause. */
   const resumeFromRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -106,7 +140,8 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
    *
    * The note list is derived from this ref on every pass rather than captured at
    * Play, which is what lets an edit made mid-playback be heard from the next
-   * scheduling window instead of only at the next Play.
+   * scheduling window instead of only at the next Play. A note it changed is still
+   * only ever dispatched once, because `scheduledUpToClockRef` moves forward only.
    */
   const configRef = useRef(config);
   configRef.current = config;
@@ -190,9 +225,15 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
    * plugin parameter is only *how* a value is stated and scheduled, which is what
    * `pin` and `emit` carry in.
    *
-   * @param pin - State the value now. Called on a fresh run, a loop wrap, or an
-   *   edit made mid-playback — which is what makes a Play from the middle of a
-   *   ramp start at the level the ramp had reached rather than at its opening.
+   * @param slice - The repetition this pass is writing into: where its window
+   *   ends, and what the clock reads at song 0 for it. A slice whose base has
+   *   moved on is a new repetition, and the curve opens again *at the seam*
+   *   rather than wherever the pass that noticed it happened to run.
+   * @param pin - State the value now. Called on a fresh run or an edit made
+   *   mid-playback — which is what makes a Play from the middle of a ramp start
+   *   at the level the ramp had reached rather than at its opening. Deliberately
+   *   not used at a seam: `setVolume` cancels pending events, and by then the
+   *   next repetition's are already on the timeline.
    * @param emit - Place a value at a moment on the instrument's clock, or null
    *   for a backend that cannot promise a value at a time.
    * @param maxStep - The longest gap between emitted values, in song seconds, or
@@ -212,13 +253,41 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
       fallback: number,
       elapsedBeat: number,
       bpm: number,
-      horizon: number,
+      slice: CycleWindow,
       pin: (value: number) => void,
       emit: ((value: number, when: number) => void) | null,
       maxStep: number | null
     ) => {
+      const base = slice.songStartClockTime;
+      const horizon = slice.toSong;
+
       let cursor = automationRef.current.get(key);
-      if (!cursor || cursor.points !== points) {
+
+      if (emit && cursor && cursor.points === points && cursor.cycleBase !== base) {
+        // The curve has come round again. Its opening is *scheduled at the seam*,
+        // so a repeat starts where the curve starts on the beat rather than a tick
+        // or so into it. Only a curve that can be placed at a time gets this; a
+        // stepped backend has no seam to aim at and simply follows the playhead.
+        const openBeat = songTimeToBeat(slice.fromSong, bpm);
+        const value = valueAtBeat(points, openBeat, fallback);
+        const seam = toClockTime(slice.fromSong, base);
+
+        if (maxStep === null) {
+          const hold = Math.max(seam - SEAM_STEP_SECONDS, cursor.lastEmitClock);
+          if (hold < seam) emit(cursor.lastValue, hold);
+        }
+        emit(value, seam);
+
+        cursor = {
+          index: firstPointAtOrAfter(points, openBeat),
+          nextSongTime: slice.fromSong,
+          points,
+          lastValue: value,
+          cycleBase: base,
+          lastEmitClock: seam,
+        };
+        automationRef.current.set(key, cursor);
+      } else if (!cursor || cursor.points !== points) {
         // Pinning cancels whatever was scheduled against the old curve and states
         // the value here.
         const value = valueAtBeat(points, elapsedBeat, fallback);
@@ -230,6 +299,8 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
           nextSongTime: beatToSongTime(elapsedBeat, bpm),
           points,
           lastValue: value,
+          cycleBase: base,
+          lastEmitClock: Number.NEGATIVE_INFINITY,
         };
         automationRef.current.set(key, cursor);
       }
@@ -254,7 +325,13 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
           const songTime = beatToSongTime(points[cursor.index].beat, bpm);
           if (songTime >= horizon) break;
 
-          emit(points[cursor.index].value, toClockTime(songTime, songStartClockRef.current));
+          const when = toClockTime(songTime, base);
+          emit(points[cursor.index].value, when);
+          // Kept for the hold placed before the next seam: after the last
+          // breakpoint the level simply stays there, so this is what the curve
+          // reads when the repetition ends.
+          cursor.lastValue = points[cursor.index].value;
+          cursor.lastEmitClock = when;
           cursor.index++;
         }
         return;
@@ -270,20 +347,26 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
         const value = valueAtBeat(points, songTimeToBeat(songTime, bpm), fallback);
         if (Math.abs(value - cursor.lastValue) <= VOLUME_STEP_EPSILON) continue;
 
-        emit(value, toClockTime(songTime, songStartClockRef.current));
+        const when = toClockTime(songTime, base);
+        emit(value, when);
         cursor.lastValue = value;
+        cursor.lastEmitClock = when;
       }
     },
     []
   );
 
   /**
-   * Hand each instrument the part of every curve it owns that falls inside this
-   * pass's look-ahead window: its volume, and one lane per automated plugin
-   * parameter.
+   * Hand each instrument the part of every curve it owns that falls inside one
+   * slice of this pass's look-ahead window: its volume, and one lane per automated
+   * plugin parameter.
+   *
+   * Called once per slice, so a window spanning a seam writes the tail of this
+   * repetition and the opening of the next in the same pass — the levels keeping
+   * step with the notes, which are cut the same way.
    */
   const scheduleAutomation = useCallback(
-    (cfg: PlaybackConfig, pool: InstrumentPool, elapsed: number, horizon: number) => {
+    (cfg: PlaybackConfig, pool: InstrumentPool, elapsed: number, slice: CycleWindow) => {
       const elapsedBeat = songTimeToBeat(elapsed, cfg.bpm);
 
       for (const track of cfg.tracks) {
@@ -303,7 +386,7 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
             track.volume,
             elapsedBeat,
             cfg.bpm,
-            horizon,
+            slice,
             value => instrument.setVolume(value),
             instrument.rampVolume
               ? (value, when) => instrument.rampVolume!(value, when)
@@ -333,7 +416,7 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
             0,
             elapsedBeat,
             cfg.bpm,
-            horizon,
+            slice,
             value => instrument.setTarget!(lane.target, value),
             // Sample-accurate, unlike a plugin's volume: a change goes through
             // VST3's own queue, which carries a sample offset per point.
@@ -354,8 +437,12 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
   }, []);
 
   /**
-   * One scheduling pass: hand the instrument every note between where we left off
+   * One scheduling pass: hand the instruments every note between where we left off
    * and the look-ahead horizon, then advance the playhead.
+   *
+   * The window is walked in slices rather than in one piece, because one reaching
+   * past a loop seam covers two repetitions at once — the tail of the one playing
+   * and the opening of the next, each against its own frame of reference.
    */
   const tick = useCallback(() => {
     const pool = poolRef.current;
@@ -364,9 +451,10 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
     const cfg = configRef.current;
     // Re-derived here, not at Play: an edit since the last pass is already in the
     // config, and a note it changed is only ever dispatched once because
-    // `scheduledUpToRef` moves forward only.
+    // `scheduledUpToClockRef` moves forward only.
     const timings = timingsRef.current?.(cfg.bars) ?? [];
-    const elapsed = pool.now() - songStartClockRef.current;
+    const now = pool.now();
+    const elapsed = now - songStartClockRef.current;
     const loopDuration = getLoopDuration(cfg);
 
     const loopFrom = rangeStart(cfg);
@@ -384,16 +472,28 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
       );
     }
 
-    const horizon = elapsed + LOOKAHEAD_SECONDS;
     /** Song time at which playback ends or wraps. */
     const endSong = loopFrom + loopDuration;
-  
-    const due = notesInWindow({
-      timings,
-      fromSong: scheduledUpToRef.current,
-      toSong: Math.min(horizon, endSong),
-    });
-  
+    const horizonClock = now + LOOKAHEAD_SECONDS;
+
+    /**
+     * The look-ahead window, cut at the seam.
+     *
+     * Anything past the seam belongs to the next repetition and is placed against
+     * a frame of reference one loop length further on. Cutting the window here —
+     * rather than stopping at `endSong` and picking the rest up once the wrap has
+     * been noticed — is what gives the notes at the top of a repeat the same
+     * look-ahead as any other note. Without it they reached the instruments only
+     * after their moment had passed, and each backend put a stale note at its own
+     * idea of "immediately", which is what pulled them apart once per repetition.
+     */
+    const slices = cycleWindows(
+      scheduledUpToClockRef.current,
+      horizonClock,
+      songStartClockRef.current,
+      { from: loopFrom, end: endSong, repeat: cfg.loopEnabled }
+    );
+
     // Mute and solo are read here, per note, rather than baked into `timings`,
     // so toggling either during playback is heard on the next tick. An audition set
     // is read the same way and for the same reason: opening or closing the phrase
@@ -404,41 +504,55 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
         cfg.tracks.filter(t => isTrackAudible(t, cfg.tracks, cfg.groups ?? [])).map(t => t.id)
     );
   
-    for (const note of due) {
-      if (!audible.has(note.trackId)) continue;
-  
-      pool.get(note.trackId)?.schedule({
-        midiNote: note.midiNote,
-        velocity: note.velocity,
-        when: toClockTime(note.startTime, songStartClockRef.current),
-        duration: note.duration,
+    for (const slice of slices) {
+      const due = notesInWindow({
+        timings,
+        fromSong: slice.fromSong,
+        toSong: slice.toSong,
       });
+
+      for (const note of due) {
+        if (!audible.has(note.trackId)) continue;
+
+        pool.get(note.trackId)?.schedule({
+          midiNote: note.midiNote,
+          velocity: note.velocity,
+          when: toClockTime(note.startTime, slice.songStartClockTime),
+          duration: note.duration,
+        });
+      }
+
+      // Levels after notes, on the same slice: a fade is scheduled onto the gain
+      // node rather than baked into the notes, so it is heard *through* a held
+      // chord instead of only at the next note boundary.
+      scheduleAutomation(cfg, pool, elapsed, slice);
     }
 
-    // Levels after notes, on the same horizon: a fade is scheduled onto the gain
-    // node rather than baked into the notes, so it is heard *through* a held chord
-    // instead of only at the next note boundary.
-    scheduleAutomation(cfg, pool, elapsed, Math.min(horizon, endSong));
-
-    scheduledUpToRef.current = Math.max(scheduledUpToRef.current, horizon);
+    scheduledUpToClockRef.current = Math.max(scheduledUpToClockRef.current, horizonClock);
   
     // Reaching the end either wraps the loop or ends playback. Wrapping shifts the
-    // frame of reference forward by one loop length rather than resetting it to
+    // frame of reference forward by whole loop lengths rather than resetting it to
     // `now`, so the wrap lands on the beat instead of wherever the tick fired.
     if (elapsed >= endSong) {
-      if (cfg.loopEnabled) {
-        songStartClockRef.current += loopDuration;
-        scheduledUpToRef.current = loopFrom;
-        // Forgetting the cursors makes the next pass re-pin each level at the top of
-        // the range, so a repeat opens where the curve opens instead of gliding back
-        // up from wherever the last pass ended.
-        automationRef.current.clear();
+      if (cfg.loopEnabled && loopDuration > 0) {
+        // Whole repetitions at once, not one: a pass delayed past a short loop's
+        // length would otherwise need a further pass per repetition to catch up,
+        // each showing a playhead a repetition behind where the sound already is.
+        const skipped = Math.floor((elapsed - loopFrom) / loopDuration) * loopDuration;
+        songStartClockRef.current += skipped;
+        // Bookkeeping only. This repetition's notes and levels went out a window
+        // ago, scheduled across the seam, and the scheduling cursor is on the clock
+        // rather than in song time so it needs no rewinding. The automation cursors
+        // are deliberately left alone too: each is already walking the new
+        // repetition, and dropping them would re-pin every level here — at a moment
+        // the tick chose rather than the beat, cancelling the events just placed.
+        //
         // Re-label the clicks already scheduled past the seam into the new frame.
         // Inferring the wrap from song time moving backward would not do: it fails
         // when the range starts at the top of the song and the wrap lands on the
         // same reading it started on.
-        notifyLoopWrap(loopDuration);
-        setCurrentTime(loopFrom);
+        notifyLoopWrap(skipped);
+        setCurrentTime(elapsed - skipped);
         return;
       }
   
@@ -558,7 +672,7 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
       // Anchoring the reference *behind* `now` by the resume offset is what makes a
       // paused project pick up where it left off with the same arithmetic.
       songStartClockRef.current = pool.now() - resumeFrom;
-      scheduledUpToRef.current = resumeFrom;
+      scheduledUpToClockRef.current = songStartClockRef.current + resumeFrom;
 
       setIsPlaying(true);
       setIsPaused(false);
@@ -596,7 +710,7 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
     clickQueueBuiltRef.current = false;
 
     resumeFromRef.current = 0;
-    scheduledUpToRef.current = 0;
+    scheduledUpToClockRef.current = 0;
     setIsPlaying(false);
     setIsPaused(false);
     setCurrentTime(0);

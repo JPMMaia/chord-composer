@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, fireEvent } from '@testing-library/react';
 import { useSegmentShortcuts } from '@/hooks/useSegmentShortcuts';
 import { projectStore } from '@/store/projectStore';
@@ -6,6 +6,7 @@ import { selectionStore } from '@/store/selectionStore';
 import { editorStore, ZOOM_LEVELS } from '@/store/editorStore';
 import { PIXELS_PER_BEAT } from '@/utils/constants';
 import type { ChordSegment } from '@/types/music';
+import type { InstrumentPool } from '@/engine/instrumentPool';
 import { barChords } from '@/engine/timeline';
 import { PHRASE_TRACK_KEY } from '@/engine/phrases';
 import { editableBars, openTestPhrase } from '../helpers/phrases';
@@ -356,6 +357,153 @@ describe('useSegmentShortcuts', () => {
       fireEvent.keyDown(window, { key: 'Escape' });
 
       expect(selectionStore.getState().selectedSegmentIds).toEqual([]);
+    });
+  });
+
+  describe('sounding a pitch move', () => {
+    /** Every pitch the fake instrument was asked to hold, and its stopper. */
+    interface Held {
+      midiNote: number;
+      stop: ReturnType<typeof vi.fn>;
+    }
+
+    function fakePool() {
+      const held: Held[] = [];
+      const instrument = {
+        now: () => 0,
+        schedule: vi.fn(),
+        sustain: ({ midiNote }: { midiNote: number }) => {
+          const stop = vi.fn();
+          held.push({ midiNote, stop });
+          return stop;
+        },
+      };
+      const pool = { get: vi.fn(() => instrument) };
+      return {
+        held,
+        getPool: () => pool as unknown as InstrumentPool,
+        pool,
+      };
+    }
+
+    /** The pitches still ringing, in the order they were struck. */
+    const sounding = (held: Held[]) =>
+      held.filter(h => h.stop.mock.calls.length === 0).map(h => h.midiNote);
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('sounds the chord it stepped to, not the one it stepped from', () => {
+      const segment = placeChord();
+      selectionStore.getState().selectSegment(segment.id);
+      const { held, getPool } = fakePool();
+      renderHook(() => useSegmentShortcuts({ getPool }));
+
+      fireEvent.keyDown(window, { key: 'ArrowUp' });
+
+      // C major stepped up a degree is D minor: the *new* voicing, read back out of
+      // the store rather than from the segment the caller was holding.
+      expect(sounding(held)).toEqual([62, 65, 69]);
+    });
+
+    it('sounds it on the instrument being edited', () => {
+      const segment = placeChord();
+      selectionStore.getState().selectSegment(segment.id);
+      const { getPool, pool } = fakePool();
+      renderHook(() => useSegmentShortcuts({ getPool }));
+
+      fireEvent.keyDown(window, { key: 'ArrowUp' });
+
+      expect(pool.get).toHaveBeenCalledWith(trackId());
+    });
+
+    it('sounds the octave move too', () => {
+      const segment = placeChord({ kind: 'note', pitch: 60, quality: undefined });
+      selectionStore.getState().selectSegment(segment.id);
+      const { held, getPool } = fakePool();
+      renderHook(() => useSegmentShortcuts({ getPool }));
+
+      fireEvent.keyDown(window, { key: '+' });
+
+      expect(sounding(held)).toEqual([72]);
+    });
+
+    // Holding the arrow key is a run up the scale, not a chord built out of every
+    // step it passed through.
+    it('releases the previous step before sounding the next', () => {
+      const segment = placeChord({ kind: 'note', pitch: 60, quality: undefined });
+      selectionStore.getState().selectSegment(segment.id);
+      const { held, getPool } = fakePool();
+      renderHook(() => useSegmentShortcuts({ getPool }));
+
+      fireEvent.keyDown(window, { key: 'ArrowUp' });
+      fireEvent.keyDown(window, { key: 'ArrowUp' });
+
+      expect(held).toHaveLength(2);
+      expect(held[0].stop).toHaveBeenCalled();
+      expect(sounding(held)).toEqual([64]);
+    });
+
+    it('lets the preview go after a moment', () => {
+      vi.useFakeTimers();
+      const segment = placeChord();
+      selectionStore.getState().selectSegment(segment.id);
+      const { held, getPool } = fakePool();
+      renderHook(() => useSegmentShortcuts({ getPool }));
+
+      fireEvent.keyDown(window, { key: 'ArrowUp' });
+      expect(sounding(held)).toHaveLength(3);
+
+      vi.advanceTimersByTime(1000);
+      expect(sounding(held)).toEqual([]);
+    });
+
+    it('leaves nothing ringing when the roll goes away', () => {
+      const segment = placeChord();
+      selectionStore.getState().selectSegment(segment.id);
+      const { held, getPool } = fakePool();
+      const { unmount } = renderHook(() => useSegmentShortcuts({ getPool }));
+
+      fireEvent.keyDown(window, { key: 'ArrowUp' });
+      unmount();
+
+      expect(sounding(held)).toEqual([]);
+    });
+
+    // The graph comes up lazily, so the very first edit of a session can land before
+    // there is anything to play it on. That edit still has to happen.
+    it('still steps the pitch with the audio graph down', () => {
+      const segment = placeChord();
+      selectionStore.getState().selectSegment(segment.id);
+      const ensureAudio = vi.fn(() => Promise.resolve({} as InstrumentPool));
+      renderHook(() => useSegmentShortcuts({ getPool: () => null, ensureAudio }));
+
+      fireEvent.keyDown(window, { key: 'ArrowUp' });
+
+      expect(segmentOf(segment.id)).toMatchObject({ root: 'D' });
+      expect(ensureAudio).toHaveBeenCalled();
+    });
+
+    it('steps silently when given no audio at all', () => {
+      const segment = placeChord();
+      selectionStore.getState().selectSegment(segment.id);
+      renderHook(() => useSegmentShortcuts());
+
+      expect(() => fireEvent.keyDown(window, { key: 'ArrowUp' })).not.toThrow();
+      expect(segmentOf(segment.id)).toMatchObject({ root: 'D' });
+    });
+
+    it('says nothing about an inversion or a deletion', () => {
+      const segment = placeChord();
+      selectionStore.getState().selectSegment(segment.id);
+      const { held, getPool } = fakePool();
+      renderHook(() => useSegmentShortcuts({ getPool }));
+
+      fireEvent.keyDown(window, { key: 'i' });
+      fireEvent.keyDown(window, { key: 'Delete' });
+
+      expect(held).toEqual([]);
     });
   });
 });

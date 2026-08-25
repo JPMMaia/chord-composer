@@ -95,3 +95,27 @@ export function auditionSegment(
     for (const release of releases) release();
   };
 }
+
+/**
+ * Sound several segments at once, as one stack — what a multi-block selection is
+ * when it is previewed rather than played.
+ *
+ * The releases are collapsed into one so a caller holding a single closure can stop
+ * the whole preview, however many blocks went into it.
+ */
+export function auditionSegments(
+  instrument: Instrument | undefined,
+  segments: ChordSegment[],
+  scaleOf: (segment: ChordSegment) => Scale,
+  projectTs: TimeSignature
+): () => void {
+  if (!instrument) return () => {};
+
+  const releases = segments.map(segment =>
+    auditionSegment(instrument, segment, scaleOf(segment), projectTs)
+  );
+
+  return () => {
+    for (const release of releases) release();
+  };
+}

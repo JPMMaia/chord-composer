@@ -267,8 +267,9 @@ function App() {
   }, [recordQuantize, setRecordQuantize]);
 
   // ↑/↓ step the selected block through its bar's scale, +/- move it an octave,
-  // and `i` cycles a chord's inversion.
-  useSegmentShortcuts();
+  // and `i` cycles a chord's inversion. The two pitch moves sound the block they
+  // moved, so a step can be heard without pressing Play.
+  useSegmentShortcuts({ getPool, ensureAudio });
 
   // Ctrl+C / Ctrl+V to copy and paste selected segments.
   useSegmentCopyPaste();

@@ -5,6 +5,7 @@ import { editorStore } from '@/store/editorStore';
 import { flattenSegments } from '@/engine/timeline';
 import { PHRASE_TRACK_KEY, phraseById } from '@/engine/phrases';
 import { isTextEntry } from '@/utils/keyboard';
+import { useSegmentAudition, type SegmentAuditionOptions } from '@/hooks/useSegmentAudition';
 
 /**
  * Keyboard shortcuts that act on the timeline's selected segments.
@@ -27,8 +28,12 @@ import { isTextEntry } from '@/utils/keyboard';
  * drag, or after a click lands elsewhere in the lane, where focus does not follow.
  * The block keeps its own handler for `←`/`→`, which need the bar and start-beat
  * context only it has.
+ *
+ * The two moves that change pitch also *sound* the block they moved, so where a step
+ * landed can be heard without pressing Play. The audio handles are optional: without
+ * them the shortcuts still edit, silently.
  */
-export function useSegmentShortcuts(): void {
+export function useSegmentShortcuts(audio: SegmentAuditionOptions = {}): void {
   const selectedSegmentIds = selectionStore(s => s.selectedSegmentIds);
   const setSelectedSegments = selectionStore(s => s.setSelectedSegments);
   const clearSegmentSelection = selectionStore(s => s.clearSegmentSelection);
@@ -36,6 +41,7 @@ export function useSegmentShortcuts(): void {
   const shiftSegmentsOctave = projectStore(s => s.shiftSegmentsOctave);
   const cycleSegmentsInversion = projectStore(s => s.cycleSegmentsInversion);
   const removeSegments = projectStore(s => s.removeSegments);
+  const previewSegments = useSegmentAudition(audio);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -88,21 +94,28 @@ export function useSegmentShortcuts(): void {
       if (selectedSegmentIds.length === 0) return;
 
       switch (e.key) {
+        // The pitch moves preview themselves, from the store's *new* state — see
+        // `useSegmentAudition`. Auto-repeat is left alone: holding the key is a run
+        // up the scale, and hearing every step of it is the point.
         case 'ArrowUp':
           stepSegmentsPitch(selectedSegmentIds, 1);
+          previewSegments(selectedSegmentIds);
           break;
         case 'ArrowDown':
           stepSegmentsPitch(selectedSegmentIds, -1);
+          previewSegments(selectedSegmentIds);
           break;
         // '=' and '_' are the unshifted twins of '+' and '-' on most layouts, and
         // reaching for either plainly means the same thing.
         case '+':
         case '=':
           shiftSegmentsOctave(selectedSegmentIds, 1);
+          previewSegments(selectedSegmentIds);
           break;
         case '-':
         case '_':
           shiftSegmentsOctave(selectedSegmentIds, -1);
+          previewSegments(selectedSegmentIds);
           break;
         case 'i':
         case 'I':
@@ -132,5 +145,6 @@ export function useSegmentShortcuts(): void {
     shiftSegmentsOctave,
     cycleSegmentsInversion,
     removeSegments,
+    previewSegments,
   ]);
 }

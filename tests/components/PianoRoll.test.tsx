@@ -1008,4 +1008,182 @@ describe('PianoRoll', () => {
     });
   });
 
+
+  describe('hover tooltip', () => {
+    const PIANO_KEYS_WIDTH = 80;
+    const PIXELS_PER_BEAT = 10;
+    const PIXELS_PER_OCTAVE = 120;
+
+    const OTHER_TRACK = 'track-strings';
+    const twoTracks: Track[] = [
+      { ...mockTracks[0] },
+      {
+        id: OTHER_TRACK,
+        name: 'Strings',
+        instrument: 'string_ensemble_1',
+        volume: 1,
+        pan: 0,
+        muted: false,
+        solo: false,
+        visible: true,
+        color: '#f59e0b',
+      },
+    ];
+
+    /**
+     * Bar 1 carries the Piano's C4 and, on the same row and beat, the Strings' — an
+     * overlap, so the chip has to pick one. Bar 2 carries a Piano note that no click
+     * could reach, since only the selected bar is editable.
+     */
+    const hoverBars: Bar[] = [
+      {
+        id: 'h0',
+        barIndex: 0,
+        content: {
+          [TEST_TRACK_ID]: {
+            chords: [],
+            notes: [{ id: 'piano-c4', pitch: 60, startBeat: 0, duration: 1.5, velocity: 100 }],
+          },
+          [OTHER_TRACK]: {
+            chords: [],
+            notes: [{ id: 'strings-c4', pitch: 60, startBeat: 0, duration: 1.5, velocity: 100 }],
+          },
+        },
+      },
+      {
+        id: 'h1',
+        barIndex: 1,
+        content: soloContent([], [
+          { id: 'piano-a5', pitch: 81, startBeat: 0, duration: 1, velocity: 100 },
+        ]),
+      },
+    ];
+
+    function renderRoll(extra: Partial<React.ComponentProps<typeof PianoRoll>> = {}) {
+      return render(
+        <PianoRoll
+          bars={hoverBars}
+          selectedBarId="h0"
+          tracks={twoTracks}
+          selectedTrackId={TEST_TRACK_ID}
+          playheadBeat={0}
+          pixelsPerBeat={PIXELS_PER_BEAT}
+          pixelsPerOctave={PIXELS_PER_OCTAVE}
+          gridSize={0.25}
+          timeSignature={{ beatsPerMeasure: 4, beatUnit: 4 }}
+          {...extra}
+        />
+      );
+    }
+
+    /** A point inside the note at `absoluteBeat` on `pitch`. */
+    const pointOn = (absoluteBeat: number, pitch: number) => ({
+      clientX: PIANO_KEYS_WIDTH + absoluteBeat * PIXELS_PER_BEAT + 2,
+      clientY: pitchToPixel(pitch, PIXELS_PER_OCTAVE) + 1,
+    });
+
+    it('names the note under the pointer', () => {
+      const { container, queryByTestId } = renderRoll();
+
+      fireEvent.mouseMove(container.querySelector('canvas')!, pointOn(0, 60));
+
+      expect(queryByTestId('piano-roll-tooltip')).toHaveTextContent('C4 · 1.5 beats · Piano');
+    });
+
+    it('says "beat" in the singular for a one-beat note', () => {
+      const { container, queryByTestId } = renderRoll();
+
+      fireEvent.mouseMove(container.querySelector('canvas')!, pointOn(4, 81));
+
+      expect(queryByTestId('piano-roll-tooltip')).toHaveTextContent('A5 · 1 beat · Piano');
+    });
+
+    it('shows nothing over empty grid', () => {
+      const { container, queryByTestId } = renderRoll();
+
+      fireEvent.mouseMove(container.querySelector('canvas')!, pointOn(0, 67));
+
+      expect(queryByTestId('piano-roll-tooltip')).not.toBeInTheDocument();
+    });
+
+    it('shows nothing over the key column', () => {
+      const { container, queryByTestId } = renderRoll();
+
+      fireEvent.mouseMove(container.querySelector('canvas')!, {
+        clientX: 10,
+        clientY: pitchToPixel(60, PIXELS_PER_OCTAVE) + 1,
+      });
+
+      expect(queryByTestId('piano-roll-tooltip')).not.toBeInTheDocument();
+    });
+
+    it('goes away when the pointer leaves the roll', () => {
+      const { container, queryByTestId } = renderRoll();
+      const canvas = container.querySelector('canvas')!;
+
+      fireEvent.mouseMove(canvas, pointOn(0, 60));
+      expect(queryByTestId('piano-roll-tooltip')).toBeInTheDocument();
+
+      fireEvent.mouseLeave(canvas);
+      expect(queryByTestId('piano-roll-tooltip')).not.toBeInTheDocument();
+    });
+
+    // Reading a pitch is not editing it: a note the roll draws dimmed is still worth
+    // naming, even though a click there would do nothing.
+    it('names a note outside the selected bar', () => {
+      const { container, queryByTestId } = renderRoll();
+
+      fireEvent.mouseMove(container.querySelector('canvas')!, pointOn(4, 81));
+
+      expect(queryByTestId('piano-roll-tooltip')).toHaveTextContent('Piano');
+    });
+
+    it('names the other instrument when its note is the one hovered', () => {
+      const { container, queryByTestId } = renderRoll({ selectedTrackId: OTHER_TRACK });
+
+      fireEvent.mouseMove(container.querySelector('canvas')!, pointOn(0, 60));
+
+      expect(queryByTestId('piano-roll-tooltip')).toHaveTextContent('Strings');
+    });
+
+    // The note painted on top of an overlap is the note the eye means.
+    it('names the note drawn on top when two overlap', () => {
+      const { container, queryByTestId } = renderRoll();
+
+      fireEvent.mouseMove(container.querySelector('canvas')!, pointOn(0, 60));
+
+      expect(queryByTestId('piano-roll-tooltip')).toHaveTextContent('Piano');
+      expect(queryByTestId('piano-roll-tooltip')).not.toHaveTextContent('Strings');
+    });
+
+    it('says nothing about a hidden instrument', () => {
+      const hidden = twoTracks.map(t => (t.id === TEST_TRACK_ID ? { ...t, visible: false } : t));
+      const { container, queryByTestId } = renderRoll({
+        tracks: hidden,
+        selectedTrackId: OTHER_TRACK,
+      });
+
+      fireEvent.mouseMove(container.querySelector('canvas')!, pointOn(0, 60));
+
+      expect(queryByTestId('piano-roll-tooltip')).toHaveTextContent('Strings');
+    });
+
+    it('follows the shared horizontal scroll', () => {
+      const { container, queryByTestId } = renderRoll({ scrollLeft: 20 });
+      const canvas = container.querySelector('canvas')!;
+
+      // Beat 0 has been pulled two beats left, so the note is no longer where it was.
+      fireEvent.mouseMove(canvas, pointOn(0, 60));
+      expect(queryByTestId('piano-roll-tooltip')).not.toBeInTheDocument();
+
+      // Bar 2's note is at absolute beat 4, so scrolling two beats brings it two
+      // beats nearer the keys.
+      fireEvent.mouseMove(canvas, {
+        clientX: PIANO_KEYS_WIDTH + 4 * PIXELS_PER_BEAT - 20 + 2,
+        clientY: pitchToPixel(81, PIXELS_PER_OCTAVE) + 1,
+      });
+      expect(queryByTestId('piano-roll-tooltip')).toHaveTextContent('A5');
+    });
+  });
+
 });

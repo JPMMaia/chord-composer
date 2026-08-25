@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback, useMemo } from 'react';
+import { useRef, useEffect, useCallback, useMemo, useState } from 'react';
 import type { Bar, Note, TimeSignature, Track } from '@/types/music';
 import {
   snapToGrid,
@@ -133,6 +133,27 @@ function withAlpha(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+/** The rectangle a note occupies on the canvas, in the same space hit-tests use. */
+function noteRect(
+  { note, absoluteBeat }: PositionedNote,
+  pixelsPerBeat: number,
+  pixelsPerOctave: number,
+  scrollLeft: number
+): { x: number; y: number; width: number; height: number } {
+  return {
+    x: PIANO_KEYS_WIDTH - scrollLeft + beatToPixel(absoluteBeat, pixelsPerBeat),
+    y: pitchToPixel(note.pitch, pixelsPerOctave),
+    width: beatToPixel(note.duration, pixelsPerBeat),
+    height: pixelsPerOctave / 12,
+  };
+}
+
+/** A beat count without trailing zeros — `1`, `1.5`, not `1.000`. */
+function beatsLabel(beats: number): string {
+  const rounded = Number(beats.toFixed(3));
+  return `${rounded} ${rounded === 1 ? 'beat' : 'beats'}`;
+}
+
 export function PianoRoll({
   bars,
   selectedBarId,
@@ -159,6 +180,12 @@ export function PianoRoll({
     noteId: '',
   });
   const animationFrameRef = useRef<number>(0);
+  /**
+   * The note under the pointer, or null. Held as the positioned note rather than as
+   * a pointer coordinate so the chip is anchored to the note's own rectangle: the
+   * state then changes once per note crossed instead of once per mouse move.
+   */
+  const [hovered, setHovered] = useState<PositionedNote | null>(null);
   const hasCentredRef = useRef(false);
   // The wheel listener is installed once, so it reads the live offset from a ref
   // rather than closing over a stale one.
@@ -484,20 +511,50 @@ export function PianoRoll({
     };
   }, [render]);
 
-  /** The selected bar's note under a canvas point, if any. */
+  /** Whether a canvas point falls inside a note's drawn rectangle. */
+  const hits = useCallback(
+    (positioned: PositionedNote, x: number, y: number): boolean => {
+      const rect = noteRect(positioned, pixelsPerBeat, pixelsPerOctave, scrollLeft);
+      return (
+        x >= rect.x &&
+        x <= rect.x + rect.width &&
+        y >= rect.y &&
+        y <= rect.y + rect.height
+      );
+    },
+    [pixelsPerBeat, pixelsPerOctave, scrollLeft]
+  );
+
+  /** The selected bar's note under a canvas point, if any — what a click can grab. */
   const noteAt = useCallback(
     (x: number, y: number): PositionedNote | undefined =>
-      selectedBarNotes.find(({ note, absoluteBeat }) => {
-        const noteX = PIANO_KEYS_WIDTH - scrollLeft + beatToPixel(absoluteBeat, pixelsPerBeat);
-        const noteY = pitchToPixel(note.pitch, pixelsPerOctave);
-        const noteWidth = beatToPixel(note.duration, pixelsPerBeat);
-        const noteHeight = pixelsPerOctave / 12;
+      selectedBarNotes.find(positioned => hits(positioned, x, y)),
+    [selectedBarNotes, hits]
+  );
 
-        return (
-          x >= noteX && x <= noteX + noteWidth && y >= noteY && y <= noteY + noteHeight
-        );
-      }),
-    [selectedBarNotes, pixelsPerBeat, pixelsPerOctave, scrollLeft]
+  /**
+   * Any visible note under a canvas point — what the tooltip names.
+   *
+   * Wider than `noteAt` on purpose: reading a pitch is not editing it, so a note
+   * belonging to another bar or another instrument is still worth naming. Searched
+   * in reverse draw order (`drawOrder` paints faintest first), so the note the eye
+   * sees on top of an overlap is the note the chip describes.
+   */
+  const anyNoteAt = useCallback(
+    (x: number, y: number): PositionedNote | undefined => {
+      let best: PositionedNote | undefined;
+      let bestAlpha = -1;
+      for (const positioned of positionedNotes) {
+        if (!hits(positioned, x, y)) continue;
+        const alpha = noteAlpha(positioned.isInSelectedTrack, positioned.isInSelectedBar);
+        if (alpha > bestAlpha) {
+          best = positioned;
+          bestAlpha = alpha;
+        }
+      }
+      return best;
+    },
+    [positionedNotes, hits]
   );
 
   const beginDrag = useCallback((hit: PositionedNote, x: number, y: number) => {
@@ -585,21 +642,29 @@ export function PianoRoll({
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const dragState = dragStateRef.current;
-      if (!dragState.isDragging) return;
-
       const canvas = canvasRef.current;
       if (!canvas) return;
 
       const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      // Tracked before the drag check below: a drag in progress is exactly when
+      // knowing which note is under the pointer matters most.
+      // `positionedNotes` is memoised, so the same note yields the same object and
+      // React bails out of the re-render — this costs one render per note crossed,
+      // not one per mouse move.
+      setHovered(x < PIANO_KEYS_WIDTH ? null : (anyNoteAt(x, y) ?? null));
+
+      const dragState = dragStateRef.current;
+      if (!dragState.isDragging) return;
 
       dragStateRef.current = {
         ...dragState,
         startX: x,
       };
     },
-    []
+    [anyNoteAt]
   );
 
   const handleMouseUp = useCallback(
@@ -613,6 +678,42 @@ export function PianoRoll({
     [onNoteDrag]
   );
 
+  /**
+   * The chip's text and where to put it.
+   *
+   * Anchored to the note rather than to the pointer, and flipped to the note's left
+   * when it would otherwise run off the right edge of the viewport. The canvas is as
+   * tall as the whole key bed and the container scrolls over it, so canvas
+   * coordinates *are* the container's content coordinates and an absolutely
+   * positioned child at `(x, y)` scrolls with the note for free.
+   */
+  const tooltip = useMemo(() => {
+    if (!hovered) return null;
+
+    const track = tracks.find(t => t.id === hovered.trackId);
+    const rect = noteRect(hovered, pixelsPerBeat, pixelsPerOctave, scrollLeft);
+    const label = [
+      midiToNoteLabel(hovered.note.pitch),
+      beatsLabel(hovered.note.duration),
+      track?.name,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+
+    // Roughly the chip's own width, which is not measurable before it is laid out.
+    const estimatedWidth = label.length * 7 + 16;
+    const viewportWidth = containerRef.current?.clientWidth ?? 0;
+    const right = rect.x + rect.width + 8;
+    const flip = viewportWidth > 0 && right + estimatedWidth > viewportWidth;
+
+    return {
+      label,
+      left: flip ? undefined : right,
+      right: flip ? Math.max(0, viewportWidth - rect.x + 8) : undefined,
+      top: Math.max(0, rect.y - 4),
+    };
+  }, [hovered, tracks, pixelsPerBeat, pixelsPerOctave, scrollLeft]);
+
   return (
     <div
       ref={containerRef}
@@ -625,6 +726,7 @@ export function PianoRoll({
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
+        onMouseLeave={() => setHovered(null)}
         style={{
           width: '100%',
           height: `${contentHeight}px`,
@@ -632,6 +734,19 @@ export function PianoRoll({
           cursor: 'crosshair',
         }}
       />
+
+      {/* Names the note under the pointer. The roll is one canvas, so there is no
+          per-note element to carry a `title` — and 88 rows of ten pixels is exactly
+          where reading a pitch off the key column stops being reliable. */}
+      {tooltip && (
+        <div
+          data-testid="piano-roll-tooltip"
+          className="absolute z-10 pointer-events-none whitespace-nowrap rounded border border-gray-600 bg-gray-800 px-2 py-1 text-xs text-gray-100 shadow"
+          style={{ left: tooltip.left, right: tooltip.right, top: tooltip.top }}
+        >
+          {tooltip.label}
+        </div>
+      )}
     </div>
   );
 }

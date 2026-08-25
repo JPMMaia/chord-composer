@@ -14,7 +14,7 @@ import { PHRASE_TRACK_KEY } from '@/engine/phrases';
 import { addEditableBar, editableBars, openTestPhrase } from '../helpers/phrases';
 import { selectionStore } from '@/store/selectionStore';
 import { editorStore } from '@/store/editorStore';
-import { getPaletteItems } from '@/engine/palette';
+import { getPaletteItems, PALETTE_VELOCITY } from '@/engine/palette';
 import type { PaletteItem } from '@/engine/palette';
 import { type MelodicFormula } from '@/engine/formulas';
 import { emptyLibrary, serializeLibrary, withGroup } from '@/engine/formulaLibrary';
@@ -928,7 +928,7 @@ describe('ChordTimeline', () => {
     // anyone reading the block through the accessible name instead.
     expect(screen.getByTestId(`chord-block-${chord.id}`)).toHaveAttribute(
       'aria-label',
-      'Chord C octave 4 2nd inversion'
+      `Chord C octave 4 2nd inversion velocity ${PALETTE_VELOCITY}`
     );
   });
 
@@ -979,11 +979,32 @@ describe('ChordTimeline', () => {
   describe('velocity shading', () => {
     it('draws a block that has never been given one at full brightness', () => {
       // The guarantee that matters: every project written before velocity could
-      // be edited looks exactly as it did.
+      // be edited looks exactly as it did. Such a segment carries none at all,
+      // which is why this one is inserted rather than dropped — the palette
+      // stamps every block it produces with one.
+      render(<ChordTimeline />);
+      const unmarked: ChordSegment = {
+        id: 'unmarked',
+        kind: 'chord',
+        root: 'C',
+        quality: 'major',
+        chordSymbol: 'C',
+        octave: 4,
+        duration: 1,
+      };
+      act(() => projectStore.getState().insertSegment(bars()[0].id, 0, unmarked, trackId()));
+
+      expect(screen.getByTestId(`chord-block-${unmarked.id}`)).toHaveStyle({
+        filter: 'brightness(1)',
+      });
+    });
+
+    it('draws a block dropped from the palette below full brightness', () => {
+      // The palette's blocks are deliberately quiet, and the shading says so.
       render(<ChordTimeline />);
       dropAt(bars()[0].id, cMajorChords()[0], 0);
 
-      expect(screen.getByTestId(`chord-block-${segments()[0].id}`)).toHaveStyle({
+      expect(screen.getByTestId(`chord-block-${segments()[0].id}`)).not.toHaveStyle({
         filter: 'brightness(1)',
       });
     });

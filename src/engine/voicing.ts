@@ -41,9 +41,10 @@ export interface TimedPitch {
 }
 
 /**
- * The velocity a note carries when nothing states one — every note the palette
- * and the chord blocks produce, and the fixed value this app used everywhere
- * before live recording could capture a real one.
+ * The velocity a note carries when nothing states one — the fixed value this app
+ * used everywhere before live recording could capture a real one, which is what
+ * keeps projects written before then sounding identical. Blocks dropped from the
+ * palette state one of their own (`PALETTE_VELOCITY`).
  */
 export const DEFAULT_VELOCITY = 100;
 

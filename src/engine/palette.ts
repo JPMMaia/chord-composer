@@ -45,6 +45,14 @@ export interface PaletteItem {
   romanNumeral?: string;
 }
 
+/**
+ * Velocity every block dropped from the palette starts at.
+ *
+ * Softer than the 100 an unmarked segment reads as, so a sketch laid out from the
+ * palette leaves room to accent above it as well as ease below it.
+ */
+export const PALETTE_VELOCITY = 50;
+
 /** Default octave for note blocks: 4, so the tonic sits at middle C. */
 const DEFAULT_OCTAVE = 4;
 
@@ -187,6 +195,7 @@ export function paletteItemToSegment(
     quality: item.quality,
     octave: item.octave,
     duration,
+    velocity: PALETTE_VELOCITY,
     scale,
   };
 }

@@ -3,6 +3,7 @@ import {
   getPaletteItems,
   paletteItemToSegment,
   formatChordSymbol,
+  PALETTE_VELOCITY,
 } from "@/engine/palette";
 import { Scale } from "@/types/music";
 
@@ -208,6 +209,16 @@ describe("palette", () => {
       expect(segment.pitch).toBe(64);
       expect(segment.chordSymbol).toBe("E4");
       expect(segment.octave).toBe(4);
+    });
+
+    it("starts every block at the palette's quieter velocity", () => {
+      // Half-loud rather than the 100 an unmarked segment reads as, so a sketch
+      // laid out from the palette can be accented as well as eased.
+      expect(PALETTE_VELOCITY).toBe(50);
+      for (const mode of ["notes", "chords", "sevenths"] as const) {
+        const item = getPaletteItems(C_MAJOR, mode)[0];
+        expect(paletteItemToSegment(item, 1, C_MAJOR).velocity).toBe(PALETTE_VELOCITY);
+      }
     });
 
     it("carries the palette's octave onto a chord segment", () => {

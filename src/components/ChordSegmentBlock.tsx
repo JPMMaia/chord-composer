@@ -1,6 +1,6 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { ChordSegment } from '@/types/music';
-import { MIN_SEGMENT_BEATS } from '@/engine/timeline';
+import { MIN_SEGMENT_BEATS, snapBeat } from '@/engine/timeline';
 import { midiToNoteLabel } from '@/engine/chords';
 import { segmentVelocity } from '@/engine/chordOperations';
 import { DEFAULT_VELOCITY } from '@/engine/voicing';
@@ -12,6 +12,10 @@ interface ChordSegmentBlockProps {
   startBeat: number;
   /** Horizontal scale: sizes the block, and reads a pointer delta back as beats. */
   pixelsPerBeat: number;
+  /** Lattice a resize lands on — the same one the commit will snap to. */
+  snapBeats: number;
+  /** Longest this block may grow: the beats left between its start and the phrase end. */
+  maxDuration: number;
   onSelect: (segmentId: string) => void;
   onRemove: (segmentId: string) => void;
   onResize: (segmentId: string, durationBeats: number) => void;
@@ -90,6 +94,8 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
   isSelected,
   startBeat,
   pixelsPerBeat,
+  snapBeats,
+  maxDuration,
   onSelect,
   onRemove,
   onResize,
@@ -100,33 +106,83 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
 }) => {
   const isNote = segment.kind === 'note';
 
-  // Captured once per gesture: reading the live duration on every move would
-  // compound each delta against the previous result.
-  const resizeRef = useRef<{ startX: number; startDuration: number } | null>(null);
+  // The gesture in flight. `startX` and `startDuration` are captured once: reading
+  // the live duration on every move would compound each delta against the previous
+  // result. `duration` is where the drag currently stands, and is what gets committed.
+  const resizeRef = useRef<
+    { startX: number; startDuration: number; duration: number } | null
+  >(null);
+  // What the block draws mid-gesture. The store is written once, on release.
+  //
+  // Writing it on every pointermove — as this used to — recompiled the whole song
+  // per mouse-move and left one undo entry behind for each, so a single Ctrl+Z could
+  // only ever rewind one mouse-move's worth of a drag (and a long drag flushed the
+  // rest of the history out of the fifty-entry stack). It also made an overshoot
+  // permanent: the refit only ever pushes neighbours later, never back.
+  const [preview, setPreview] = useState<number | null>(null);
 
   useEffect(() => {
+    const cancel = () => {
+      resizeRef.current = null;
+      setPreview(null);
+    };
+
     const handleMove = (e: PointerEvent) => {
       const state = resizeRef.current;
       if (!state) return;
+      // The release landed somewhere that never reached us — outside the window, or
+      // under a context menu. Without this the gesture stays armed and the block goes
+      // on resizing under a button nobody is holding.
+      if (e.buttons === 0) return cancel();
+
       const deltaBeats = (e.clientX - state.startX) / pixelsPerBeat;
-      onResize(segment.id, Math.max(MIN_SEGMENT_BEATS, state.startDuration + deltaBeats));
+      // Snapped and clamped exactly as `resizeSegment` will be on commit, so the block
+      // does not jump the moment the pointer is released.
+      const next = Math.min(
+        Math.max(MIN_SEGMENT_BEATS, snapBeat(state.startDuration + deltaBeats, snapBeats)),
+        maxDuration
+      );
+      if (next === state.duration) return;
+      state.duration = next;
+      setPreview(next);
     };
+
     const handleUp = () => {
-      resizeRef.current = null;
+      const state = resizeRef.current;
+      cancel();
+      // A press that never moved, or that came back to the width it started at, is not
+      // an edit — committing it would spend an undo step on nothing.
+      if (state && state.duration !== segment.duration) onResize(segment.id, state.duration);
+    };
+
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || !resizeRef.current) return;
+      // Caught before `useSegmentShortcuts` reads the same key as "clear the selection":
+      // mid-gesture, Escape means abandon the resize and nothing else.
+      e.stopPropagation();
+      cancel();
     };
 
     window.addEventListener('pointermove', handleMove);
     window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('keydown', handleKey, true);
     return () => {
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('keydown', handleKey, true);
     };
-  }, [segment.id, pixelsPerBeat, onResize]);
+  }, [segment.id, segment.duration, pixelsPerBeat, snapBeats, maxDuration, onResize]);
 
   const handleResizeStart = (e: React.PointerEvent) => {
     e.stopPropagation();
     e.preventDefault();
-    resizeRef.current = { startX: e.clientX, startDuration: segment.duration };
+    resizeRef.current = {
+      startX: e.clientX,
+      startDuration: segment.duration,
+      duration: segment.duration,
+    };
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -180,7 +236,7 @@ export const ChordSegmentBlock: React.FC<ChordSegmentBlockProps> = ({
       // and would otherwise paint its lane straight over the overhanging tail.
       style={{
         left: `${startBeat * pixelsPerBeat}px`,
-        width: `${segment.duration * pixelsPerBeat}px`,
+        width: `${(preview ?? segment.duration) * pixelsPerBeat}px`,
         // One declaration rather than three utility classes, so the three states
         // cannot depend on the order Tailwind happens to emit them in.
         zIndex: isDragging ? 20 : isSelected ? 10 : 1,

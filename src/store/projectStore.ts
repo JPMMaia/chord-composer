@@ -1526,9 +1526,14 @@ export const projectStore = create<ProjectState>((set, get) => ({
       getBarStartBeat(surface.bars, surface.bars.indexOf(owner), project.timeSignature) + start;
     const maxBeats = getTotalBeats(surface.bars, project.timeSignature) - absoluteStart;
 
-    const bars = mapBar(surface.bars, owner.id, PHRASE_TRACK_KEY, () =>
-      resizeSegment(chords, segmentId, duration, snapBeats, maxBeats)
-    );
+    const resized = resizeSegment(chords, segmentId, duration, snapBeats, maxBeats);
+    // A resize that lands on the width the block already had is not an edit. Refitting
+    // and recompiling for it would mint a fresh project object, and with it an undo
+    // entry that rewinds to a state indistinguishable from the current one.
+    const before = chords.find(c => c.id === segmentId)!.duration;
+    if (resized.find(c => c.id === segmentId)!.duration === before) return;
+
+    const bars = mapBar(surface.bars, owner.id, PHRASE_TRACK_KEY, () => resized);
     set({ project: applyPhraseBars(project, surface.phrase.id, bars) });
   },
 

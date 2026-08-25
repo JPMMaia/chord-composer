@@ -1149,6 +1149,12 @@ export const ChordTimeline: React.FC = () => {
 
                   {laneSegments(bar, barIndex, lane).map(segment => {
                     const startBeat = segment.startBeat ?? 0;
+                    // A block may grow through the bar line — a chord held over one is
+                    // ordinary music — but not past the end of the phrase. Computed the
+                    // same way `resizeSegmentDuration` does, so the drag previews the
+                    // width the commit will actually give it.
+                    const maxDuration =
+                      totalBeats - (getBarStartBeat(bars, barIndex, projectTs) + startBeat);
 
                     return (
                       <ChordSegmentBlock
@@ -1158,6 +1164,8 @@ export const ChordTimeline: React.FC = () => {
                         isDragging={drag?.preview.has(segment.id) ?? false}
                         startBeat={startBeat}
                         pixelsPerBeat={pixelsPerBeat}
+                        snapBeats={snapBeats}
+                        maxDuration={maxDuration}
                         onSelect={id => {
                           selectBar(bar.id);
                           selectSegment(id);

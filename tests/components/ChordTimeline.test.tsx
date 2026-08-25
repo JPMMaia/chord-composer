@@ -1027,14 +1027,26 @@ describe('ChordTimeline', () => {
     });
   });
 
+  /** Grab a block's right-edge grip. `buttons: 1` is the held button a real drag reports. */
+  const startResize = (id: string, clientX = 0) => {
+    fireEvent.pointerDown(screen.getByTestId(`resize-handle-${id}`), {
+      clientX,
+      pointerId: 1,
+      buttons: 1,
+    });
+  };
+
+  const dragResize = (clientX: number) => {
+    fireEvent.pointerMove(window, { clientX, pointerId: 1, buttons: 1 });
+  };
+
   it('resizes a segment by dragging its right edge', () => {
     render(<ChordTimeline />);
     dropAt(bars()[0].id, cMajorChords()[0], 0);
     const id = segments()[0].id;
 
-    const handle = screen.getByTestId(`resize-handle-${id}`);
-    fireEvent.pointerDown(handle, { clientX: 0, pointerId: 1 });
-    fireEvent.pointerMove(window, { clientX: PIXELS_PER_BEAT, pointerId: 1 });
+    startResize(id);
+    dragResize(PIXELS_PER_BEAT);
     fireEvent.pointerUp(window, { clientX: PIXELS_PER_BEAT, pointerId: 1 });
 
     expect(segments()[0].duration).toBe(2);
@@ -1043,6 +1055,114 @@ describe('ChordTimeline', () => {
     expect(screen.getByTestId(`chord-block-${id}`)).toHaveStyle({
       width: `${2 * PIXELS_PER_BEAT}px`,
     });
+  });
+
+  // A resize is one edit, not one per mouse-move. The store used to be written on every
+  // pointermove, which recompiled the song sixty times a second and left an undo entry
+  // behind for each — so Ctrl+Z after a drag appeared to do nothing at all.
+  it('previews a resize without touching the project until the pointer is released', () => {
+    render(<ChordTimeline />);
+    dropAt(bars()[0].id, cMajorChords()[0], 0);
+    const id = segments()[0].id;
+
+    startResize(id);
+    dragResize(2 * PIXELS_PER_BEAT);
+
+    expect(screen.getByTestId(`chord-block-${id}`)).toHaveStyle({
+      width: `${3 * PIXELS_PER_BEAT}px`,
+    });
+    expect(segments()[0].duration).toBe(1);
+  });
+
+  /** How many times the project was written while `gesture` ran — one per undo entry. */
+  const countWrites = (gesture: () => void): number => {
+    let writes = 0;
+    const unsubscribe = projectStore.subscribe(() => {
+      writes += 1;
+    });
+    gesture();
+    unsubscribe();
+    return writes;
+  };
+
+  it('writes one resize to the store however many moves the drag took', () => {
+    render(<ChordTimeline />);
+    dropAt(bars()[0].id, cMajorChords()[0], 0);
+    const id = segments()[0].id;
+
+    const writes = countWrites(() => {
+      startResize(id);
+      for (const x of [0.5, 1, 1.5, 2, 2.5, 3]) dragResize(x * PIXELS_PER_BEAT);
+      fireEvent.pointerUp(window, { clientX: 3 * PIXELS_PER_BEAT, pointerId: 1 });
+    });
+
+    expect(writes).toBe(1);
+    expect(segments()[0].duration).toBe(4);
+  });
+
+  it('commits nothing when a resize ends back at the width it started from', () => {
+    render(<ChordTimeline />);
+    dropAt(bars()[0].id, cMajorChords()[0], 0);
+    const id = segments()[0].id;
+
+    const writes = countWrites(() => {
+      startResize(id);
+      dragResize(3 * PIXELS_PER_BEAT);
+      dragResize(0);
+      fireEvent.pointerUp(window, { clientX: 0, pointerId: 1 });
+    });
+
+    expect(writes).toBe(0);
+    expect(segments()[0].duration).toBe(1);
+  });
+
+  it('abandons a resize on Escape', () => {
+    render(<ChordTimeline />);
+    dropAt(bars()[0].id, cMajorChords()[0], 0);
+    const id = segments()[0].id;
+
+    startResize(id);
+    dragResize(2 * PIXELS_PER_BEAT);
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    expect(screen.getByTestId(`chord-block-${id}`)).toHaveStyle({
+      width: `${1 * PIXELS_PER_BEAT}px`,
+    });
+
+    // The release that follows the cancel must not resurrect the gesture.
+    fireEvent.pointerUp(window, { clientX: 2 * PIXELS_PER_BEAT, pointerId: 1 });
+    expect(segments()[0].duration).toBe(1);
+  });
+
+  // A release that lands outside the window never reaches us. Without a cancel the
+  // gesture stays armed and the block goes on resizing under nothing.
+  it('drops a resize whose pointer was released away from the page', () => {
+    render(<ChordTimeline />);
+    dropAt(bars()[0].id, cMajorChords()[0], 0);
+    const id = segments()[0].id;
+
+    startResize(id);
+    dragResize(2 * PIXELS_PER_BEAT);
+    fireEvent.pointerMove(window, { clientX: 3 * PIXELS_PER_BEAT, pointerId: 1, buttons: 0 });
+    fireEvent.pointerMove(window, { clientX: 5 * PIXELS_PER_BEAT, pointerId: 1, buttons: 0 });
+
+    expect(segments()[0].duration).toBe(1);
+    expect(screen.getByTestId(`chord-block-${id}`)).toHaveStyle({
+      width: `${1 * PIXELS_PER_BEAT}px`,
+    });
+  });
+
+  it('drops a resize the browser cancels', () => {
+    render(<ChordTimeline />);
+    dropAt(bars()[0].id, cMajorChords()[0], 0);
+    const id = segments()[0].id;
+
+    startResize(id);
+    dragResize(2 * PIXELS_PER_BEAT);
+    fireEvent.pointerCancel(window, { pointerId: 1 });
+    fireEvent.pointerUp(window, { clientX: 2 * PIXELS_PER_BEAT, pointerId: 1 });
+
+    expect(segments()[0].duration).toBe(1);
   });
 
   it('nudges a segment by one snap step with the arrow keys', () => {

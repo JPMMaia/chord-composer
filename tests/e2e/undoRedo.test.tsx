@@ -10,6 +10,8 @@ import { PHRASE_TRACK_KEY } from '@/engine/phrases';
 import { UndoRedoContext, type UndoRedoContextValue } from '@/context/undoRedoContext';
 import { Transport } from '@/components/Transport';
 import { createUndoRedoMiddleware } from '@/engine/undoRedo';
+import { ChordTimeline } from '@/components/ChordTimeline';
+import { PIXELS_PER_BEAT } from '@/utils/constants';
 import type { Project, ChordSegment } from '@/types/music';
 
 // ---------------------------------------------------------------------------
@@ -179,5 +181,99 @@ describe('E2E — Transport undo/redo buttons revert operations end-to-end', () 
     const barAfterRedo = projectStore.getState().project!.bars[0];
     const chordsAfterRedo = barAfterRedo.content[trackId]?.chords.length ?? 0;
     expect(chordsAfterRedo).toBe(chordsAfterInsert);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Resizing a block is one edit, and one undo step.
+//
+// The store used to be written on every pointermove of the gesture, so a drag left
+// behind one history entry per mouse-move: Ctrl+Z rewound a single move, which looks
+// on screen exactly like undo doing nothing at all. A long drag also pushed the rest
+// of the history out of the fifty-entry stack.
+// ---------------------------------------------------------------------------
+
+describe('E2E — undoing a chord-timeline resize', () => {
+  let ur: ReturnType<typeof createUndoRedoMiddleware<Project | null>>;
+  let unsub: (() => void) | undefined;
+
+  const undo = () => {
+    const prev = ur.undo();
+    projectStore.setState({ project: prev });
+  };
+
+  beforeEach(() => {
+    unsub?.();
+    ur = createUndoRedoMiddleware<Project | null>(null, 50);
+    setRecordingGate(ur.setRecording);
+    unsub = projectStore.subscribe(fullState => ur.pushState(fullState.project));
+    mountProject();
+  });
+
+  afterEach(() => {
+    unsub?.();
+    cleanup();
+  });
+
+  /** Put one one-beat block at the start of the open phrase, and hand back its id. */
+  const placeBlock = (id: string): string => {
+    const segment: ChordSegment = {
+      id,
+      kind: 'chord',
+      duration: 1,
+      root: 'C',
+      quality: 'major',
+      chordSymbol: 'C',
+    };
+    projectStore
+      .getState()
+      .insertSegment(editableBars()[0].id, 0, segment, projectStore.getState().project!.tracks[0].id);
+    return id;
+  };
+
+  const duration = (id: string): number | undefined =>
+    editableBars()
+      .flatMap(bar => bar.content[PHRASE_TRACK_KEY]?.chords ?? [])
+      .find(chord => chord.id === id)?.duration;
+
+  /** Drag the block's right edge out to `beats`, in several moves like a real drag. */
+  const resizeTo = (id: string, beats: number) => {
+    fireEvent.pointerDown(screen.getByTestId(`resize-handle-${id}`), {
+      clientX: 0,
+      pointerId: 1,
+      buttons: 1,
+    });
+    for (let x = 0.25; x <= beats - 1; x += 0.25) {
+      fireEvent.pointerMove(window, { clientX: x * PIXELS_PER_BEAT, pointerId: 1, buttons: 1 });
+    }
+    fireEvent.pointerUp(window, { clientX: (beats - 1) * PIXELS_PER_BEAT, pointerId: 1 });
+  };
+
+  it('takes one undo to put a resized block back to the width it had', () => {
+    const id = placeBlock('seg-e2e-resize');
+    render(<ChordTimeline />);
+
+    resizeTo(id, 3);
+    expect(duration(id)).toBe(3);
+
+    undo();
+    expect(duration(id)).toBe(1);
+
+    const next = ur.redo();
+    projectStore.setState({ project: next });
+    expect(duration(id)).toBe(3);
+  });
+
+  it('does not spend the rest of the history on one resize drag', () => {
+    const id = placeBlock('seg-e2e-resize-history');
+    render(<ChordTimeline />);
+
+    resizeTo(id, 4);
+
+    // Back past the resize, then past the insertion that came before it.
+    undo();
+    expect(duration(id)).toBe(1);
+    undo();
+    expect(duration(id)).toBeUndefined();
   });
 });

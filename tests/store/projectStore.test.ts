@@ -1158,6 +1158,24 @@ describe('projectStore', () => {
       projectStore.getState().resizeSegmentDuration('nope', 2, 0.25);
       expect(barChords(editableBars()[0], editKey(trackId()))[0].duration).toBe(1);
     });
+
+    // Undo history is fed by the project's identity, so a resize to the width a block
+    // already has must not mint a new project — it would cost an undo step that
+    // rewinds to a state nobody can tell apart from the current one.
+    it('leaves the project untouched when the width does not change', () => {
+      appendSegment(chordSegment({ id: 'a' }));
+      const before = projectStore.getState().project;
+      projectStore.getState().resizeSegmentDuration('a', 1, 0.25);
+      expect(projectStore.getState().project).toBe(before);
+    });
+
+    it('leaves the project untouched when a resize snaps back to the current width', () => {
+      appendSegment(chordSegment({ id: 'a' }));
+      const before = projectStore.getState().project;
+      // 1.1 snaps to 1, which is where the block already is.
+      projectStore.getState().resizeSegmentDuration('a', 1.1, 0.25);
+      expect(projectStore.getState().project).toBe(before);
+    });
   });
 
   describe('setSegmentsScale note regeneration', () => {

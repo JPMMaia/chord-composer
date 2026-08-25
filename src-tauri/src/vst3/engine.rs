@@ -103,9 +103,13 @@ enum Command {
     Stop { slot: SlotId },
     /// Release everything sounding, everywhere.
     StopAll,
-    /// Re-anchor the clock. `host_time` has already been corrected for the
-    /// delay between the webview reading it and this command being queued.
-    Sync { host_time: f64 },
+    /// Re-anchor the clock.
+    ///
+    /// `queued_at` is when this command was put on the queue, and travels with
+    /// it so that the audio thread can measure how long it waited: the anchor is
+    /// only usable if `host_time` is corrected forward by that wait. Correcting
+    /// it on the sending side is not possible — the wait has not happened yet.
+    Sync { host_time: f64, queued_at: Instant },
 }
 
 /// The control-side handle. Cheap to clone commands into from any thread.
@@ -596,14 +600,17 @@ impl Engine {
     /// `host_time` is what `AudioContext.currentTime` read in the webview. By
     /// the time the audio thread sees this command a block boundary may have
     /// passed, and it can only observe its own frame counter at block starts —
-    /// so the elapsed wall time between here and there is measured and folded
-    /// into `host_time` before it is used. Without that correction the anchor
-    /// jitters by up to a block period, and every note placed against it jitters
-    /// with it.
+    /// so the wait is measured *there*, by `Command::Sync`'s `queued_at`, and
+    /// folded into `host_time` at the moment the anchor is taken. Without that
+    /// correction the anchor jitters by up to a block period on every re-sync,
+    /// and everything placed against it jitters with it: a note lands a few
+    /// milliseconds out, which nobody hears, but an automation curve converted
+    /// against two anchors in turn can hand the plugin a value that goes
+    /// *backwards*, which is audible as a click.
     pub fn sync(&self, host_time: f64) -> Result<(), String> {
-        let queued_at = Instant::now();
         self.send(Command::Sync {
-            host_time: host_time + queued_at.elapsed().as_secs_f64(),
+            host_time,
+            queued_at: Instant::now(),
         })
     }
 }
@@ -961,6 +968,12 @@ fn apply(
                 None => frame,
             };
             if let Some(slot) = slots.iter_mut().find(|s| s.id == id) {
+                // An untimed change *replaces* this parameter's future rather
+                // than joining it: it says "the value is this, as of now", and a
+                // curve's queued points are exactly what that overrides.
+                if host_time.is_none() {
+                    slot.plugin.0.param_scheduler.drop_param(param);
+                }
                 slot.plugin.0.param_scheduler.schedule(param, value, at);
             }
         }
@@ -996,8 +1009,19 @@ fn apply(
                 slot.plugin.0.param_scheduler.clear();
             }
         }
-        Command::Sync { host_time } => {
-            clock.sync(host_time, frame.max(0) as u64);
+        Command::Sync {
+            host_time,
+            queued_at,
+        } => {
+            // `frame` is this callback's starting frame, so the anchor says
+            // "the webview clock read X when the stream stood here". X has to
+            // be advanced by however long the command sat on the queue, which
+            // is only knowable now. A clock read costs nothing and happens
+            // twice a second.
+            clock.sync(
+                host_time + queued_at.elapsed().as_secs_f64(),
+                frame.max(0) as u64,
+            );
         }
     }
 }

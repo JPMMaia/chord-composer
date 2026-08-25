@@ -15,6 +15,7 @@ import {
 import type { CycleWindow } from '@/engine/scheduler';
 import { firstPointAtOrAfter, valueAtBeat } from '@/engine/volumeAutomation';
 import { laneKey, VOLUME_LANE_KEY } from '@/engine/parameterAutomation';
+import { toControllerStep } from '@/engine/touchpadExpression';
 import { syncVst3Clock } from '@/engine/vst3Instrument';
 import { registerAudioContext } from '@/engine/audioOutput';
 import {
@@ -245,6 +246,15 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
    *   sample and holds until the next one, so a four-bar sweep described by its
    *   two ends would sit still and jump at the far one. Sampling the curve is
    *   what makes a sweep a sweep.
+   * @param snap - Round every value to the grid the target can actually resolve,
+   *   or null for a target that is genuinely continuous.
+   *
+   *   Passed for a `cc:` lane, where the target is a 7-bit controller: see
+   *   `toControllerStep`. It changes what "the value moved" means as well as what
+   *   is sent — a sampled curve then emits each controller step once, at the
+   *   moment it crosses it, instead of `maxStep`'s worth of sub-step dither — so
+   *   the two travel together rather than as a value filter and a rate filter that
+   *   could disagree.
    */
   const advanceCurve = useCallback(
     (
@@ -256,10 +266,24 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
       slice: CycleWindow,
       pin: (value: number) => void,
       emit: ((value: number, when: number) => void) | null,
-      maxStep: number | null
+      maxStep: number | null,
+      snap: ((value: number) => number) | null = null
     ) => {
       const base = slice.songStartClockTime;
       const horizon = slice.toSong;
+
+      /** The curve at a beat, as the target can actually hold it. */
+      const readAt = (beat: number) => {
+        const value = valueAtBeat(points, beat, fallback);
+        return snap ? snap(value) : value;
+      };
+
+      // Snapped values are already on the target's own grid, so two of them are
+      // either the same value or a genuine step apart; an epsilon there could
+      // only erase a step the target *can* resolve. Unsnapped, the epsilon is
+      // what stops a flat stretch of curve from being twenty commands a second.
+      const moved = (value: number, last: number) =>
+        snap ? value !== last : Math.abs(value - last) > VOLUME_STEP_EPSILON;
 
       let cursor = automationRef.current.get(key);
 
@@ -269,7 +293,7 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
         // or so into it. Only a curve that can be placed at a time gets this; a
         // stepped backend has no seam to aim at and simply follows the playhead.
         const openBeat = songTimeToBeat(slice.fromSong, bpm);
-        const value = valueAtBeat(points, openBeat, fallback);
+        const value = readAt(openBeat);
         const seam = toClockTime(slice.fromSong, base);
 
         if (maxStep === null) {
@@ -290,7 +314,7 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
       } else if (!cursor || cursor.points !== points) {
         // Pinning cancels whatever was scheduled against the old curve and states
         // the value here.
-        const value = valueAtBeat(points, elapsedBeat, fallback);
+        const value = readAt(elapsedBeat);
         pin(value);
         cursor = {
           index: firstPointAtOrAfter(points, elapsedBeat),
@@ -309,8 +333,8 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
         // Stepped instead of scheduled, for a backend whose value is set through
         // something with no notion of time. Only on a real change: a flat stretch
         // of curve is not twenty commands a second.
-        const value = valueAtBeat(points, elapsedBeat, fallback);
-        if (Math.abs(value - cursor.lastValue) > VOLUME_STEP_EPSILON) {
+        const value = readAt(elapsedBeat);
+        if (moved(value, cursor.lastValue)) {
           pin(value);
           cursor.lastValue = value;
         }
@@ -344,8 +368,8 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
         const songTime = cursor.nextSongTime;
         cursor.nextSongTime += maxStep;
 
-        const value = valueAtBeat(points, songTimeToBeat(songTime, bpm), fallback);
-        if (Math.abs(value - cursor.lastValue) <= VOLUME_STEP_EPSILON) continue;
+        const value = readAt(songTimeToBeat(songTime, bpm));
+        if (!moved(value, cursor.lastValue)) continue;
 
         const when = toClockTime(songTime, base);
         emit(value, when);
@@ -421,7 +445,11 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
             // Sample-accurate, unlike a plugin's volume: a change goes through
             // VST3's own queue, which carries a sample offset per point.
             (value, when) => instrument.automateTarget!(lane.target, value, when),
-            PARAM_GRID_SECONDS
+            PARAM_GRID_SECONDS,
+            // A controller is 7-bit and a plugin parameter is not, so only the
+            // former is snapped. The grid still finds the crossings; snapping
+            // only decides which of them are worth sending.
+            lane.target.kind === 'cc' ? toControllerStep : null
           );
         }
       }

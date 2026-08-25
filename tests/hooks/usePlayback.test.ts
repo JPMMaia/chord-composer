@@ -1029,6 +1029,84 @@ describe('usePlayback', () => {
       expect(cc.at(-1)).toBeCloseTo(0.1, 1);
     });
 
+    /** A slow full sweep on CC 20, the shape a glissando controller is drawn as. */
+    const gliss: PlaybackConfig = {
+      ...config,
+      tracks: [
+        {
+          ...testTrack,
+          parameterAutomation: [
+            {
+              target: CC20,
+              name: 'Glissando',
+              points: [
+                { beat: 0, value: 0 },
+                { beat: 4, value: 1 },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    // A controller is a 7-bit value, so a normalised value between two steps
+    // names a position no controller could have been in. An instrument that acts
+    // on controller movement — a harp plays a string per step — hears the
+    // difference as a retrigger, which is why this is snapped on the way out
+    // rather than left to the plugin's own rounding.
+    it('sends a controller curve as exact controller steps', async () => {
+      const { result } = renderHook(() => usePlayback(gliss));
+      await startPlayback(result);
+      await advance(5);
+
+      const values = forTarget('cc:20').map(c => c.value);
+      expect(values.length).toBeGreaterThan(0);
+      for (const value of values) {
+        expect(value * 127).toBeCloseTo(Math.round(value * 127), 10);
+      }
+    });
+
+    // The grid is 10 ms, so a four-second sweep is 400 samples; a controller has
+    // only 128 places to be. Every step is worth sending once and no more —
+    // anything beyond that is movement the plugin can hear and the ear cannot.
+    it('sends each controller step once, in order, and never repeats one', async () => {
+      const { result } = renderHook(() => usePlayback(gliss));
+      await startPlayback(result);
+      await advance(5);
+
+      const steps = forTarget('cc:20').map(c => Math.round(c.value * 127));
+      expect(steps).toEqual([...new Set(steps)]);
+      expect(steps).toEqual([...steps].sort((a, b) => a - b));
+      expect(steps.at(-1)).toBe(127);
+      expect(steps.length).toBeLessThanOrEqual(128);
+    });
+
+    // A plugin parameter is genuinely continuous, and snapping it to 128 places
+    // would throw away resolution the plugin does have.
+    it('leaves a plugin parameter at full resolution', async () => {
+      const { result } = renderHook(() => usePlayback(sweeping));
+      await startPlayback(result);
+      await advance(4);
+
+      const values = forTarget('param:7').map(c => c.value);
+      expect(values.some(v => Math.abs(v * 127 - Math.round(v * 127)) > 1e-6)).toBe(true);
+    });
+
+    it('pins a controller on its own step when a run starts mid-sweep', async () => {
+      const twoBars = [makeBar(0, [makeNote(60, 0)]), makeBar(1, [makeNote(67, 0)])];
+      const { result } = renderHook(() =>
+        usePlayback({ ...gliss, bars: twoBars, loopStart: 2, loopEnd: 6 })
+      );
+      await startPlayback(result);
+
+      // Half way through a 0→1 sweep across four beats: 0.5 rounds to step 64.
+      expect(pinned().at(-1)).toEqual({
+        kind: 'set',
+        target: CC20,
+        value: 64 / 127,
+      });
+    });
+
     it('leaves the volume curve to its own path', async () => {
       const { result } = renderHook(() => usePlayback(sweeping));
       await startPlayback(result);

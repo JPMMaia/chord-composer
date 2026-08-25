@@ -74,6 +74,25 @@ export function toControllerValue(value: number): number {
 }
 
 /**
+ * The value snapped to the controller step it rounds to, still normalised 0-1.
+ *
+ * What a `cc:` curve is *sent* as. A controller is a 7-bit value, so a normalised
+ * value between two steps names a position no controller could ever have been in —
+ * and the plugin resolving it back to a controller number will round it to one of
+ * the two neighbours anyway. Snapping first makes the difference explicit rather
+ * than leaving it to the plugin, and makes a sampled curve send exactly the run of
+ * values the same gesture played by hand would: each step once, in order, at the
+ * moment the curve crosses it.
+ *
+ * That matters for an instrument that *acts* on controller movement rather than
+ * merely reading it — a harp's glissando plays a string per step — where a curve
+ * dithering below a step is movement the plugin can hear and the ear cannot.
+ */
+export function toControllerStep(value: number): number {
+  return toControllerValue(value) / 127;
+}
+
+/**
  * Whether a sample is worth storing in a lane, given the last one that was kept.
  *
  * A gesture is sampled at whatever rate the pointer reports — 60 to 1000 a second on

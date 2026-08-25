@@ -197,7 +197,7 @@ impl Plugin {
                 channel_ptrs: vec![ptr::null_mut(); channels],
                 channels,
                 scheduler: Scheduler::new(EVENT_CAPACITY),
-                param_scheduler: ParamScheduler::new(PARAM_CAPACITY),
+                param_scheduler: ParamScheduler::new(PARAM_CAPACITY, PARAM_QUEUE_CAPACITY),
                 max_block,
                 gain: 1.0,
                 last_process: kResultOk,

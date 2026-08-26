@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { auditionPitches, auditionSegment } from '@/engine/audition';
+import { auditionNotes, auditionPitches, auditionSegment } from '@/engine/audition';
 import type { Instrument, ScheduledNote } from '@/engine/instrument';
 import type { ChordSegment, Scale, TimeSignature } from '@/types/music';
 
@@ -20,7 +20,7 @@ const chord = (overrides: Partial<ChordSegment> = {}): ChordSegment => ({
 /** An instrument that records what it was asked to do, with a switchable `sustain`. */
 function mockInstrument(withSustain: boolean) {
   const scheduled: ScheduledNote[] = [];
-  const started: number[] = [];
+  const started: { midiNote: number; velocity: number }[] = [];
   const stopped: number[] = [];
 
   const instrument: Instrument = {
@@ -36,8 +36,8 @@ function mockInstrument(withSustain: boolean) {
     dispose: vi.fn(),
     ...(withSustain
       ? {
-          sustain: ({ midiNote }: { midiNote: number }) => {
-            started.push(midiNote);
+          sustain: ({ midiNote, velocity }: { midiNote: number; velocity: number }) => {
+            started.push({ midiNote, velocity });
             return () => stopped.push(midiNote);
           },
         }
@@ -48,6 +48,16 @@ function mockInstrument(withSustain: boolean) {
 }
 
 describe('audition', () => {
+  describe('auditionNotes', () => {
+    it('carries the block’s velocity alongside each pitch', () => {
+      expect(auditionNotes(chord({ velocity: 30 }), C_MAJOR, TS_4_4)).toEqual([
+        { pitch: 60, velocity: 30 },
+        { pitch: 64, velocity: 30 },
+        { pitch: 67, velocity: 30 },
+      ]);
+    });
+  });
+
   describe('auditionPitches', () => {
     it('voices a chord block as its stack', () => {
       expect(auditionPitches(chord(), C_MAJOR, TS_4_4)).toEqual([60, 64, 67]);
@@ -79,7 +89,7 @@ describe('audition', () => {
       const { instrument, started, stopped } = mockInstrument(true);
       const release = auditionSegment(instrument, chord(), C_MAJOR, TS_4_4);
 
-      expect(started).toEqual([60, 64, 67]);
+      expect(started.map(n => n.midiNote)).toEqual([60, 64, 67]);
       expect(stopped).toEqual([]);
 
       release();
@@ -96,13 +106,43 @@ describe('audition', () => {
 
     it('falls back to a fixed-length preview when the backend cannot hold a note', () => {
       const { instrument, scheduled } = mockInstrument(false);
-      const release = auditionSegment(instrument, chord(), C_MAJOR, TS_4_4);
+      const release = auditionSegment(instrument, chord({ velocity: 30 }), C_MAJOR, TS_4_4);
 
       expect(scheduled.map(n => n.midiNote)).toEqual([60, 64, 67]);
       expect(scheduled.every(n => n.when === 10 && n.duration > 0)).toBe(true);
+      // The fallback is quieter for a quiet block too, not a flat 100.
+      expect(scheduled.map(n => n.velocity)).toEqual([30, 30, 30]);
       // Releasing must not reach for stopAll, which would cut playback as well.
       release();
       expect(instrument.stopAll).not.toHaveBeenCalled();
+    });
+
+    it('sounds every pitch at the block’s own velocity', () => {
+      const { instrument, started } = mockInstrument(true);
+      auditionSegment(instrument, chord({ velocity: 30 }), C_MAJOR, TS_4_4);
+
+      expect(started).toEqual([
+        { midiNote: 60, velocity: 30 },
+        { midiNote: 64, velocity: 30 },
+        { midiNote: 67, velocity: 30 },
+      ]);
+    });
+
+    it('sounds an unmarked block at 100, as it always did', () => {
+      const { instrument, started } = mockInstrument(true);
+      auditionSegment(instrument, chord(), C_MAJOR, TS_4_4);
+
+      expect(started.map(n => n.velocity)).toEqual([100, 100, 100]);
+    });
+
+    it('normalises a velocity no sampler could use', () => {
+      const { instrument, started } = mockInstrument(true);
+      auditionSegment(instrument, chord({ velocity: 200 }), C_MAJOR, TS_4_4);
+      expect(started.map(n => n.velocity)).toEqual([127, 127, 127]);
+
+      const nonsense = mockInstrument(true);
+      auditionSegment(nonsense.instrument, chord({ velocity: NaN }), C_MAJOR, TS_4_4);
+      expect(nonsense.started.map(n => n.velocity)).toEqual([100, 100, 100]);
     });
 
     it('is a no-op with no instrument to sound on', () => {

@@ -562,24 +562,22 @@ export const ChordTimeline: React.FC = () => {
   const dropFormula = (formula: MelodicFormula, bar: Bar, lane: number, dropBeat: number) => {
     const phraseStart = getBarStartBeat(bars, bar.barIndex, projectTs) + dropBeat;
 
+    // The formula is already a set of offsets from its own start, which is exactly
+    // what the clipboard holds — so the notes go in verbatim, anchored at the drop.
     const placed = realizeFormula(
       formula,
       paletteScale,
       paletteOctave,
       formulaStartDegree
-    ).flatMap<CopiedSegment>(({ segment, offsetBeats }) => {
-      // `extend` so a phrase running off the end of the project names the bars it
-      // needs rather than piling up on the last one — paste creates them.
-      const at = resolveBeatPosition(phraseStart + offsetBeats, bars, projectTs, true);
-      return at ? [{ segment: { ...segment, lane }, ...at, baseStartBeat: 0 }] : [];
-    });
+    ).map<CopiedSegment>(({ segment, offsetBeats }) => ({
+      segment: { ...segment, lane },
+      offsetBeat: offsetBeats,
+      laneOffset: 0,
+    }));
 
     if (placed.length === 0) return;
 
-    // The anchor is the first note's own position, which makes paste's offset
-    // arithmetic the identity: the positions resolved above are used verbatim.
-    placed[0].baseStartBeat = placed[0].startBeat;
-    const ids = pasteSegments(placed, selectedTrackId, placed[0].barIndex, placed[0].startBeat);
+    const ids = pasteSegments(placed, selectedTrackId, phraseStart);
 
     selectBar(bar.id);
     if (ids && ids.length > 0) setSelectedSegments(ids);

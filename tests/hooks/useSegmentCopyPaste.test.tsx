@@ -75,11 +75,11 @@ describe('useSegmentCopyPaste', () => {
     const chordCountBefore = ur.current()!.phrases[0].bars[0].content[PHRASE_TRACK_KEY]!.chords.length;
 
     // Simulate the paste key-down (pasteSegments is the store method)
+    // Beat 2 of bar 0 — clear of the source chord sitting on beat 0.
     const pasteResult = state().pasteSegments(
       clipboardStore.getState().segments,
       trackId(),
-      0,        // paste into bar 0
-      2         // at beat 2
+      2
     );
 
     // Paste must have produced new segments
@@ -98,12 +98,7 @@ describe('useSegmentCopyPaste', () => {
     placeAndCopyChord();
     renderHook(() => useSegmentCopyPaste());
 
-    state().pasteSegments(
-      clipboardStore.getState().segments,
-      trackId(),
-      0,
-      2
-    );
+    state().pasteSegments(clipboardStore.getState().segments, trackId(), 2);
 
     const afterPaste = state().project;
     const barChordsAfter = afterPaste!.bars[0].content[trackId()]!.chords;
@@ -119,12 +114,7 @@ describe('useSegmentCopyPaste', () => {
     placeAndCopyChord();
     renderHook(() => useSegmentCopyPaste());
 
-    const newIds = state().pasteSegments(
-      clipboardStore.getState().segments,
-      trackId(),
-      0,
-      2
-    );
+    state().pasteSegments(clipboardStore.getState().segments, trackId(), 2);
 
     ur.undo();
     expect(ur.current()?.bars[0].content[trackId()]!.chords.length).toBe(1);
@@ -161,12 +151,7 @@ describe('useSegmentCopyPaste', () => {
 
     renderHook(() => useSegmentCopyPaste());
 
-    state().pasteSegments(
-      clipboardStore.getState().segments,
-      trackId(),
-      0,
-      1
-    );
+    state().pasteSegments(clipboardStore.getState().segments, trackId(), 1);
 
     expect(editableBars()[0].content[PHRASE_TRACK_KEY]!.chords.length).toBeGreaterThan(chordCountBefore);
 
@@ -201,17 +186,91 @@ describe('useSegmentCopyPaste', () => {
     ruler.remove();
   });
 
+  /**
+   * The bug this rework fixes: a group pasted mid-bar came back re-spaced, split
+   * across bars or in reverse. Driven through the real key handler, because the
+   * anchor arithmetic the hook does is half of what went wrong.
+   */
+  it('Ctrl+V keeps a multi-block group in order and in step', () => {
+    // Four chords a beat apart, filling bar 0.
+    const roots = ['C', 'D', 'E', 'F'];
+    roots.forEach((root, i) => {
+      state().insertSegment(
+        editableBars()[0].id,
+        i,
+        {
+          id: `src-${i}`,
+          kind: 'chord',
+          root,
+          quality: 'major',
+          octave: 4,
+          duration: 1,
+        } as ChordSegment,
+        trackId()
+      );
+    });
+    selectionStore.getState().setSelectedSegments(roots.map((_, i) => `src-${i}`));
+    clipboardStore.getState().copySegments();
+
+    renderHook(() => useSegmentCopyPaste());
+
+    const ruler = document.createElement('div');
+    ruler.setAttribute('data-testid', 'timeline-ruler');
+    ruler.getBoundingClientRect = () =>
+      ({ left: 0, right: 10000, top: 0, bottom: 40, width: 10000, height: 40 }) as DOMRect;
+    document.body.appendChild(ruler);
+
+    // Beat 6: the middle of bar 1, so the group has to run across the bar line.
+    const { pixelsPerBeat } = editorStore.getState();
+    fireEvent.mouseMove(window, { clientX: 6 * pixelsPerBeat });
+    fireEvent.keyDown(window, { key: 'v', ctrlKey: true });
+
+    const pasted = editableBars().flatMap((bar, index) =>
+      (bar.content[PHRASE_TRACK_KEY]?.chords ?? [])
+        .filter(c => !c.id.startsWith('src-'))
+        .map(c => `${c.root}@${index * 4 + c.startBeat!}`)
+    );
+    expect(pasted).toEqual(['C@6', 'D@7', 'E@8', 'F@9']);
+
+    ruler.remove();
+  });
+
+  it('Ctrl+V brings a copy from a stacked lane back down to a free one', () => {
+    state().insertSegment(
+      editableBars()[0].id,
+      0,
+      { id: 'src-lane', kind: 'chord', root: 'C', quality: 'major', duration: 1, lane: 1 } as ChordSegment,
+      trackId()
+    );
+    selectionStore.getState().selectSegment('src-lane');
+    clipboardStore.getState().copySegments();
+
+    renderHook(() => useSegmentCopyPaste());
+
+    const ruler = document.createElement('div');
+    ruler.setAttribute('data-testid', 'timeline-ruler');
+    ruler.getBoundingClientRect = () =>
+      ({ left: 0, right: 10000, top: 0, bottom: 40, width: 10000, height: 40 }) as DOMRect;
+    document.body.appendChild(ruler);
+
+    fireEvent.mouseMove(window, { clientX: 2 * editorStore.getState().pixelsPerBeat });
+    fireEvent.keyDown(window, { key: 'v', ctrlKey: true });
+
+    const pasted = editableBars()[0]
+      .content[PHRASE_TRACK_KEY]!.chords.find(c => c.id !== 'src-lane')!;
+    expect(pasted.startBeat).toBe(2);
+    // Beat 2 is clear in lane 0, so the copy lands there rather than a lane up.
+    expect(pasted.lane ?? 0).toBe(0);
+
+    ruler.remove();
+  });
+
   it('multiple pastes each create one undo entry', () => {
     placeAndCopyChord();
     renderHook(() => useSegmentCopyPaste());
 
     // First paste
-    state().pasteSegments(
-      clipboardStore.getState().segments,
-      trackId(),
-      0,
-      1
-    );
+    state().pasteSegments(clipboardStore.getState().segments, trackId(), 1);
     expect(ur.canUndo()).toBe(true);
     // 1 original + 1 pasted = 2
     expect(ur.current()?.bars[0].content[trackId()]!.chords.length).toBe(2);
@@ -225,12 +284,7 @@ describe('useSegmentCopyPaste', () => {
     projectStore.setState({ project: ur.current()! });
 
     // Second paste — creates its own history entry on a clean slate
-    state().pasteSegments(
-      clipboardStore.getState().segments,
-      trackId(),
-      0,
-      2
-    );
+    state().pasteSegments(clipboardStore.getState().segments, trackId(), 2);
     expect(ur.canUndo()).toBe(true);
     // 1 original + 1 second-pasted = 2 (first paste's redo slot was cleared)
     expect(ur.current()?.bars[0].content[trackId()]!.chords.length).toBe(2);

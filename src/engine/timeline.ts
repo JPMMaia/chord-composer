@@ -142,7 +142,7 @@ function startOf(segment: ChordSegment, fallback: number): number {
  * Absent, negative or fractional all read as lane 0 — the single lane every project
  * written before sub-lanes had, and the only lane most material ever needs.
  */
-export function laneOf(segment: ChordSegment): number {
+export function laneOf(segment: Pick<ChordSegment, 'lane'>): number {
   const lane = segment.lane;
   return typeof lane === 'number' && Number.isFinite(lane) && lane > 0 ? Math.floor(lane) : 0;
 }
@@ -626,6 +626,84 @@ export function getBarStartBeat(
 /** Total length of the project in beats. */
 export function getTotalBeats(bars: Bar[], projectTs: TimeSignature): number {
   return bars.reduce((sum, bar) => sum + getBarBeats(bar, projectTs), 0);
+}
+
+/** A segment together with where it sits on the project's absolute beat line. */
+export interface SegmentSpan {
+  segment: ChordSegment;
+  /** Beats from the start of the project. */
+  startBeat: number;
+  /** Where the block stops sounding — `startBeat + duration`. */
+  endBeat: number;
+  lane: number;
+}
+
+/**
+ * One instrument's segments as absolute spans, in start order.
+ *
+ * Bars are a view of one continuous line, so any question about what occupies
+ * what — does this land on something? is this lane free here? — is easier to ask
+ * on the line than bar by bar. `refitTrackChords` does the same walk internally
+ * for the same reason.
+ */
+export function segmentSpans(
+  bars: Bar[],
+  projectTs: TimeSignature,
+  trackId: string
+): SegmentSpan[] {
+  const spans: SegmentSpan[] = [];
+  let barStart = 0;
+
+  for (const bar of bars) {
+    for (const segment of withStartBeats(barChords(bar, trackId))) {
+      const startBeat = barStart + startOf(segment, 0);
+      spans.push({
+        segment,
+        startBeat,
+        endBeat: startBeat + segment.duration,
+        lane: laneOf(segment),
+      });
+    }
+    barStart += getBarBeats(bar, projectTs);
+  }
+
+  return spans.sort((a, b) => a.startBeat - b.startBeat || a.lane - b.lane);
+}
+
+/** Half-open overlap: blocks that merely touch at an edge do not collide. */
+function spansOverlap(
+  a: { startBeat: number; endBeat: number },
+  b: { startBeat: number; endBeat: number }
+): boolean {
+  return a.startBeat < b.endBeat && b.startBeat < a.endBeat;
+}
+
+/**
+ * The smallest lane shift (>= 0) that clears `incoming` of everything in `existing`.
+ *
+ * The whole group moves together, so the shape a user copied arrives as the shape
+ * they copied — blocks stacked across two lanes stay two lanes apart. Lanes above
+ * the highest occupied one are empty by definition, so the search terminates.
+ */
+export function freeLaneShift(
+  existing: readonly { startBeat: number; endBeat: number; lane: number }[],
+  incoming: readonly { startBeat: number; endBeat: number; lane: number }[]
+): number {
+  if (incoming.length === 0) return 0;
+
+  // Past the highest occupied lane nothing can collide, so the search never needs
+  // to look further than one lane above it.
+  const ceiling = existing.reduce((max, span) => Math.max(max, span.lane), -1) + 1;
+
+  for (let shift = 0; shift < ceiling; shift++) {
+    const clear = incoming.every(
+      block =>
+        !existing.some(span => span.lane === block.lane + shift && spansOverlap(span, block))
+    );
+    if (clear) return shift;
+  }
+
+  return ceiling;
 }
 
 /**

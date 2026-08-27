@@ -2175,230 +2175,221 @@ describe('projectStore', () => {
   describe('pasteSegments', () => {
     const state = () => projectStore.getState();
 
+    /** A clipboard entry: what `clipboardStore` hands paste. */
+    const copied = (
+      offsetBeat: number,
+      overrides: Partial<ChordSegment> = {},
+      laneOffset = 0
+    ) => ({
+      segment: {
+        kind: 'chord' as const,
+        duration: 1,
+        root: 'C' as NoteName,
+        quality: 'major' as const,
+        ...overrides,
+      },
+      offsetBeat,
+      laneOffset,
+    });
+
+    /** Every segment on the edit surface as `root@absoluteBeat`, in timeline order. */
+    const timeline = (): string[] =>
+      editableBars().flatMap((bar, index) =>
+        barChords(bar, editKey(trackId())).map(
+          c => `${c.root}@${index * 4 + (c.startBeat ?? 0)}`
+        )
+      );
+
+    /** An empty phrase `bars` bars long, open in the editor. */
+    const emptyPhrase = (bars: number) => {
+      state().createProject();
+      for (let i = 0; i < bars; i++) addEditableBar();
+      openTestPhrase(trackId(), editableBars().length);
+    };
+
     it('returns null when no project exists', () => {
       state().resetProject();
-      const result = state().pasteSegments([], 'track-x', 0);
-      expect(result).toBeNull();
+      expect(state().pasteSegments([copied(0)], 'track-x', 0)).toBeNull();
     });
 
     it('returns null when segments list is empty', () => {
       state().createProject();
-      const result = state().pasteSegments([], trackId(), 0);
-      expect(result).toBeNull();
+      expect(state().pasteSegments([], trackId(), 0)).toBeNull();
     });
 
     it('returns null when target track does not exist', () => {
       state().createProject();
-      const result = state().pasteSegments(
-        [
-          {
-            segment: { kind: 'chord' as const, duration: 1, root: 'C', quality: 'major' as const },
-            startBeat: 0,
-            barIndex: 0,
-            baseStartBeat: 0,
-          },
-        ],
-        'nope',
-        0
-      );
-      expect(result).toBeNull();
+      expect(state().pasteSegments([copied(0)], 'nope', 0)).toBeNull();
     });
 
-    it('pastes a single segment into the target bar', () => {
-      state().createProject();
-      addEditableBar(); // bar 0 at index 0
-      openTestPhrase(trackId(), editableBars().length);
-      state().insertSegment(editableBars()[0].id, 0, chordSegment({ root: 'C', quality: 'major', duration: 1 }), trackId());
-      addEditableBar(); // bar 1 at index 1
+    it('returns null for an anchor that is not a beat', () => {
+      emptyPhrase(1);
+      expect(state().pasteSegments([copied(0)], trackId(), -1)).toBeNull();
+      expect(state().pasteSegments([copied(0)], trackId(), NaN)).toBeNull();
+    });
 
-      const before = editableBars().length;
+    it('pastes a single segment at the anchor beat', () => {
+      emptyPhrase(2);
+
       const ids = state().pasteSegments(
-        [
-          {
-            segment: { kind: 'chord', duration: 1, root: 'D', quality: 'minor' as const },
-            startBeat: 0,
-            barIndex: 0,
-            baseStartBeat: 0,
-          },
-        ],
+        [copied(0, { root: 'D', quality: 'minor', duration: 1 })],
         trackId(),
-        1
+        4
       );
 
-      expect(ids).not.toBeNull();
-      expect(ids!.length).toBe(1);
-
-      const bar = editableBars()[1];
-      const chords = barChords(bar, editKey(trackId()));
-      expect(chords.length).toBe(1);
+      expect(ids).toHaveLength(1);
+      const chords = barChords(editableBars()[1], editKey(trackId()));
+      expect(chords).toHaveLength(1);
       expect(chords[0].root).toBe('D');
       expect(chords[0].quality).toBe('minor');
       expect(chords[0].startBeat).toBe(0);
       expect(chords[0].duration).toBe(1);
-      // Pasted segments get a fresh id.
-      expect(chords[0].id).not.toBe('seg-paste-target');
-      expect(editableBars().length).toBe(before);
+      expect(editableBars()).toHaveLength(2);
     });
 
-    it('pastes a single segment at an offset within the target bar', () => {
-      state().createProject();
-      addEditableBar(); // bar 0
-      openTestPhrase(trackId(), editableBars().length);
-      state().insertSegment(editableBars()[0].id, 0, chordSegment({ duration: 1 }), trackId());
-      addEditableBar(); // bar 1
-
-      state().pasteSegments(
-        [
-          {
-            segment: { kind: 'chord', duration: 1, root: 'E', quality: 'major' as const },
-            startBeat: 2,
-            barIndex: 0,
-            baseStartBeat: 0,
-          },
-        ],
-        trackId(),
-        1
-      );
-
-      const bar = editableBars()[1];
-      const chords = barChords(bar, editKey(trackId()));
-      expect(chords.length).toBe(1);
-      expect(chords[0].startBeat).toBe(2);
+    it('pastes at an offset within the target bar', () => {
+      emptyPhrase(2);
+      state().pasteSegments([copied(0, { root: 'E' })], trackId(), 6);
+      expect(barChords(editableBars()[1], editKey(trackId()))[0].startBeat).toBe(2);
     });
 
-    it('offsets multiple segments so the first lands at the cursor', () => {
-      state().createProject();
-      addEditableBar(); // bar 0
-      addEditableBar(); // bar 1
-      openTestPhrase(trackId(), editableBars().length);
+    /**
+     * The regression this whole rework exists for: a group pasted mid-bar used to be
+     * clamped inside that bar, which stacked its members on the last legal beat and
+     * let the ripple reverse them.
+     */
+    it('keeps a group in order and evenly spaced when it crosses a bar line', () => {
+      emptyPhrase(2);
 
-      // Paste two segments: originally at startBeat 0 and 2 in bar 0,
-      // into bar 1 with baseStartBeat 0. The offset is 0, so positions stay.
-      state().pasteSegments(
-        [
-          {
-            segment: { kind: 'chord', duration: 1, root: 'C', quality: 'major' as const },
-            startBeat: 0,
-            barIndex: 0,
-            baseStartBeat: 0,
-          },
-          {
-            segment: { kind: 'chord', duration: 1, root: 'E', quality: 'major' as const },
-            startBeat: 2,
-            barIndex: 0,
-            baseStartBeat: 0,
-          },
-        ],
-        trackId(),
-        1
-      );
-
-      const bar = editableBars()[1];
-      const chords = barChords(bar, editKey(trackId()));
-      expect(chords.length).toBe(2);
-      expect(chords[0].startBeat).toBe(0);
-      expect(chords[1].startBeat).toBe(2);
-    });
-
-    it('shifts segments when baseStartBeat is non-zero', () => {
-      state().createProject();
-      addEditableBar(); // bar 0
-      addEditableBar(); // bar 1
-      openTestPhrase(trackId(), editableBars().length);
-
-      // Segments at startBeat 1 and 3, baseStartBeat 1.
-      // Paste target is bar 1 with offsetBarIndex 1.
-      // offset = startBeat - baseStartBeat = 0 for the first segment.
-      // So first segment lands at 0, second at 2.
-      state().pasteSegments(
-        [
-          {
-            segment: { kind: 'chord', duration: 1, root: 'A', quality: 'minor' as const },
-            startBeat: 1,
-            barIndex: 0,
-            baseStartBeat: 1,
-          },
-          {
-            segment: { kind: 'chord', duration: 1, root: 'B', quality: 'minor' as const },
-            startBeat: 3,
-            barIndex: 0,
-            baseStartBeat: 1,
-          },
-        ],
-        trackId(),
-        1
-      );
-
-      const bar = editableBars()[1];
-      const chords = barChords(bar, editKey(trackId()));
-      expect(chords.length).toBe(2);
-      // Offset: startBeat - baseStartBeat = 1 - 1 = 0 for first, 3 - 1 = 2 for second
-      expect(chords[0].startBeat).toBe(0);
-      expect(chords[1].startBeat).toBe(2);
-    });
-
-    it('appends bars when the paste destination exceeds existing bars', () => {
-      state().createProject();
-      addEditableBar();
-      openTestPhrase(trackId(), 1);
-
-      const before = editableBars().length;
       const ids = state().pasteSegments(
         [
-          {
-            segment: { kind: 'chord', duration: 1, root: 'X', quality: 'major' as const },
-            startBeat: 0,
-            barIndex: 2, // bar index 2 — needs bars 0, 1, 2
-            baseStartBeat: 0,
-          },
+          copied(0, { root: 'C' }),
+          copied(1, { root: 'D' }),
+          copied(2, { root: 'E' }),
+          copied(3, { root: 'F' }),
         ],
         trackId(),
-        1
+        2
       );
 
-      expect(ids).not.toBeNull();
-      // The phrase grew to reach the destination bar, rather than the paste being
-      // clamped back into the bar it already had.
-      expect(before).toBe(1);
-      expect(editableBars().length).toBe(2);
-      // The segment was at barIndex 2, offsetBarIndex 1, so target bar = 1 + (2 - 2) = 1
-      const targetBar = editableBars()[1];
-      const chords = barChords(targetBar, editKey(trackId()));
-      expect(chords.length).toBe(1);
-      expect(chords[0].root).toBe('X');
+      expect(ids).toHaveLength(4);
+      expect(timeline()).toEqual(['C@2', 'D@3', 'E@4', 'F@5']);
+      expect(
+        editableBars().flatMap(b => barChords(b, editKey(trackId())).map(c => c.duration))
+      ).toEqual([1, 1, 1, 1]);
+    });
+
+    it('translates a group copied across bars rigidly', () => {
+      emptyPhrase(4);
+
+      // Two blocks a bar and a half apart, pasted onto beat 1 of bar 1.
+      state().pasteSegments(
+        [copied(0, { root: 'A' }), copied(6, { root: 'B' })],
+        trackId(),
+        5
+      );
+
+      expect(timeline()).toEqual(['A@5', 'B@11']);
+    });
+
+    it('lengthens the phrase for an anchor past its end', () => {
+      emptyPhrase(1);
+
+      const ids = state().pasteSegments([copied(0, { root: 'X' })], trackId(), 9);
+
+      expect(ids).toHaveLength(1);
+      // Beat 9 is in bar 2, so the phrase grew from one bar to three.
+      expect(editableBars()).toHaveLength(3);
+      expect(timeline()).toEqual(['X@9']);
+    });
+
+    /**
+     * Pasting onto occupied space moves the *pasted* group up a lane. Nothing already
+     * on the timeline is overwritten, and nothing already on it moves.
+     */
+    it('stacks into a free lane rather than disturbing what is there', () => {
+      emptyPhrase(1);
+      state().insertSegment(
+        editableBars()[0].id,
+        0,
+        chordSegment({ id: 'sitting', root: 'C', duration: 4 }),
+        trackId()
+      );
+
+      const ids = state().pasteSegments([copied(0, { root: 'G', duration: 2 })], trackId(), 1);
+
+      expect(ids).toHaveLength(1);
+      const chords = barChords(editableBars()[0], editKey(trackId()));
+      const sitting = chords.find(c => c.id === 'sitting')!;
+      const pasted = chords.find(c => c.id === ids![0])!;
+
+      expect(sitting.startBeat).toBe(0);
+      expect(sitting.duration).toBe(4);
+      expect(pasted.startBeat).toBe(1);
+      expect(pasted.lane).toBe(1);
+      // The instrument grew a lane to show it.
+      expect(state().project!.tracks[0].laneCount).toBe(2);
+    });
+
+    it('keeps its own lane when the space is clear', () => {
+      emptyPhrase(2);
+      state().insertSegment(
+        editableBars()[0].id,
+        0,
+        chordSegment({ id: 'elsewhere', duration: 1 }),
+        trackId()
+      );
+
+      const ids = state().pasteSegments([copied(0, { root: 'G' })], trackId(), 4);
+
+      const pasted = barChords(editableBars()[1], editKey(trackId()))[0];
+      expect(pasted.id).toBe(ids![0]);
+      expect(pasted.lane ?? 0).toBe(0);
+    });
+
+    it('keeps the lane spacing of a multi-lane copy', () => {
+      emptyPhrase(1);
+      state().insertSegment(
+        editableBars()[0].id,
+        0,
+        chordSegment({ id: 'sitting', duration: 4 }),
+        trackId()
+      );
+
+      const ids = state().pasteSegments(
+        [copied(0, { root: 'G' }), copied(0, { root: 'B' }, 1)],
+        trackId(),
+        0
+      );
+
+      const chords = barChords(editableBars()[0], editKey(trackId()));
+      const lanes = ids!.map(id => chords.find(c => c.id === id)!.lane);
+      // Blocked in lane 0, so the pair moved up together and stayed one lane apart.
+      expect(lanes).toEqual([1, 2]);
+      expect(state().project!.tracks[0].laneCount).toBe(3);
     });
 
     it('preserves original segment properties (voicing, scale, etc.)', () => {
-      state().createProject();
-      addEditableBar(); // bar 0
-      addEditableBar(); // bar 1
-      openTestPhrase(trackId(), editableBars().length);
+      emptyPhrase(2);
 
       state().pasteSegments(
         [
-          {
-            segment: {
-              kind: 'chord',
-              duration: 2,
-              root: 'G',
-              quality: 'dominant7' as const,
-              inversion: 1,
-              octave: 5,
-              scale: { root: 'C' as NoteName, type: 'major' as ScaleType },
-              voicing: { spacing: 'open' as const },
-            },
-            startBeat: 0,
-            barIndex: 0,
-            baseStartBeat: 0,
-          },
+          copied(0, {
+            duration: 2,
+            root: 'G',
+            quality: 'dominant7',
+            inversion: 1,
+            octave: 5,
+            scale: { root: 'C' as NoteName, type: 'major' as ScaleType },
+            voicing: { spacing: 'open' as const },
+          }),
         ],
         trackId(),
-        1
+        4
       );
 
-      const bar = editableBars()[1];
-      const chords = barChords(bar, editKey(trackId()));
-      expect(chords.length).toBe(1);
+      const chords = barChords(editableBars()[1], editKey(trackId()));
+      expect(chords).toHaveLength(1);
       expect(chords[0].root).toBe('G');
       expect(chords[0].quality).toBe('dominant7');
       expect(chords[0].inversion).toBe(1);
@@ -2416,26 +2407,12 @@ describe('projectStore', () => {
       state().insertSegment(editableBars()[0].id, 0, chordSegment({ root: 'C' }), otherTrackId!);
       addEditableBar(); // bar 1
 
-      state().pasteSegments(
-        [
-          {
-            segment: { kind: 'chord', duration: 1, root: 'P', quality: 'major' as const },
-            startBeat: 0,
-            barIndex: 0,
-            baseStartBeat: 0,
-          },
-        ],
-        trackId(),
-        1
-      );
+      state().pasteSegments([copied(0, { root: 'P' })], trackId(), 4);
 
-      // Target track has the pasted segment in bar 1
       const targetBar = editableBars()[1];
-      expect(barChords(targetBar, editKey(trackId())).length).toBe(1);
+      expect(barChords(targetBar, editKey(trackId()))).toHaveLength(1);
       expect(barChords(targetBar, editKey(trackId()))[0].root).toBe('P');
-
-      // Other track is untouched
-      expect(barChords(targetBar, otherTrackId!).length).toBe(0);
+      expect(barChords(targetBar, otherTrackId!)).toHaveLength(0);
     });
   });
 

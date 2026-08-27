@@ -2,49 +2,41 @@ import { create } from 'zustand';
 import type { ChordSegment } from '@/types/music';
 import { editSurface, projectStore } from './projectStore';
 import { selectionStore } from './selectionStore';
-import { findSegment } from '@/engine/timeline';
+import { findSegment, getBarStartBeat, laneOf } from '@/engine/timeline';
 
 /**
- * A segment copied to the clipboard, carrying its position relative to its bar.
+ * A segment on the clipboard, held as an offset from the group rather than as a
+ * bar and a beat within it.
+ *
+ * Bar-relative coordinates were what made paste unpredictable: an offset only means
+ * the same thing when it is re-applied in a bar of the same length at the same
+ * point, which a paste somewhere else is precisely not. An offset along the
+ * timeline means one thing everywhere, so the group arrives as the shape it left.
  */
 export interface CopiedSegment {
-  /** Segment data minus `id` and `startBeat`, so paste always produces fresh
-      blocks and the dedicated `startBeat` field is the sole source of position.
-   */
-  segment: Omit<ChordSegment, 'id' | 'startBeat'>;
-  /** Start beat within the source bar. */
-  startBeat: number;
-  /** Which bar (0-indexed) this segment came from. */
-  barIndex: number;
-  /** The first segment's original startBeat, used to offset all segments during paste. */
-  baseStartBeat: number;
+  /** Segment data minus `id`, `startBeat` and `lane`, so paste always produces fresh
+      blocks whose position comes only from the offsets below. */
+  segment: Omit<ChordSegment, 'id' | 'startBeat' | 'lane'> & { lane?: number };
+  /** Beats from the group anchor — the earliest onset copied. Always >= 0. */
+  offsetBeat: number;
+  /** Lanes below the group's topmost lane. Always >= 0. */
+  laneOffset: number;
 }
 
 interface ClipboardState {
-  /** Segments copied, in project order. Empty when nothing is copied. */
+  /** Segments copied, in timeline order. Empty when nothing is copied. */
   segments: CopiedSegment[];
-  /** Bar index of the rightmost source segment — used as the paste anchor. */
-  sourceBarIndex: number;
   /** Track id of the source instrument. */
   sourceTrackId: string;
-  /** Rightmost bar of the most recent paste group, for cascade paste. */
-  lastPasteBarIndex: number | null;
-  /** Track id used for the most recent paste. */
-  lastPasteTrackId: string | null;
   /** Copy the currently selected segments. No-op when selection is empty. */
   copySegments: () => void;
-  /** Record the anchor after a successful paste so repeated Ctrl+V cascades. */
-  setPasteAnchor: (barIndex: number, trackId: string) => void;
   /** Clear the clipboard. */
   clear: () => void;
 }
 
 export const clipboardStore = create<ClipboardState>((set) => ({
   segments: [],
-  sourceBarIndex: 0,
   sourceTrackId: '',
-  lastPasteBarIndex: null,
-  lastPasteTrackId: null,
 
   copySegments: () => {
     const { selectedSegmentIds, selectedTrackId } = selectionStore.getState();
@@ -58,65 +50,49 @@ export const clipboardStore = create<ClipboardState>((set) => ({
     const surface = editSurface();
     if (!surface) return;
 
-    const copied: CopiedSegment[] = [];
-    let maxBarIndex = 0;
+    /** Each selected block on the phrase's absolute beat line. */
+    const picked: { segment: CopiedSegment['segment']; beat: number; lane: number }[] = [];
 
     for (const segmentId of selectedSegmentIds) {
       const loc = findSegment(surface.bars, segmentId);
       if (!loc) continue;
 
-      // Strip `id` so paste always produces fresh segments, and strip `startBeat`
-      // so the dedicated `CopiedSegment.startBeat` field is the sole source of
-      // truth for bar-relative position — the segment object must not carry a
-      // stale `startBeat` that would confuse paste offset math.
-      const { id: _id, startBeat: _startBeat, ...rest } = loc.segment;
-      const startBeat =
-        typeof _startBeat === 'number' ? _startBeat : 0;
-
-      copied.push({
+      // Strip `id` so paste always produces fresh segments, and `startBeat` and `lane`
+      // so the offsets computed below are the sole source of truth for position — a
+      // segment carrying its old coordinates would be a second opinion about where the
+      // copy goes, and paste would count the lane twice.
+      const { id: _id, startBeat, lane: _lane, ...rest } = loc.segment;
+      picked.push({
         segment: rest,
-        startBeat,
-        barIndex: loc.bar.barIndex,
-        baseStartBeat: 0, // filled in below
+        beat:
+          getBarStartBeat(surface.bars, loc.bar.barIndex, project.timeSignature) +
+          (typeof startBeat === 'number' ? startBeat : 0),
+        lane: laneOf(loc.segment),
       });
-
-      if (loc.bar.barIndex > maxBarIndex) {
-        maxBarIndex = loc.bar.barIndex;
-      }
     }
 
-    // Sort by project order (bar index then start beat) so the clipboard is
-    // deterministic regardless of selection order.
-    copied.sort((a, b) => a.barIndex - b.barIndex || a.startBeat - b.startBeat);
+    if (picked.length === 0) return;
 
-    if (copied.length === 0) return;
+    // The anchor is the earliest onset and the topmost lane, so the offsets are all
+    // non-negative and paste can hang the group off the cursor directly.
+    const anchorBeat = Math.min(...picked.map(p => p.beat));
+    const anchorLane = Math.min(...picked.map(p => p.lane));
 
-    // Anchor for offset: the first segment's original startBeat so paste
-    // can shift everything relative to where the cursor lands.
-    copied[0].baseStartBeat = copied[0].startBeat;
+    const copied: CopiedSegment[] = picked.map(p => ({
+      segment: p.segment,
+      offsetBeat: p.beat - anchorBeat,
+      laneOffset: p.lane - anchorLane,
+    }));
 
-    set({
-      segments: copied,
-      sourceBarIndex: maxBarIndex,
-      sourceTrackId: selectedTrackId,
-      // Reset paste anchor on new copy so first paste after copy lands adjacent
-      // to the source rather than chasing a stale anchor.
-      lastPasteBarIndex: null,
-      lastPasteTrackId: null,
-    });
-  },
+    // Sorted so the clipboard is deterministic regardless of the order blocks were
+    // selected in. Paste no longer depends on it, but a stable clipboard is easier
+    // to reason about and to test.
+    copied.sort((a, b) => a.offsetBeat - b.offsetBeat || a.laneOffset - b.laneOffset);
 
-  setPasteAnchor: (barIndex: number, trackId: string) => {
-    set({ lastPasteBarIndex: barIndex, lastPasteTrackId: trackId });
+    set({ segments: copied, sourceTrackId: selectedTrackId });
   },
 
   clear: () => {
-    set({
-      segments: [],
-      sourceBarIndex: 0,
-      sourceTrackId: '',
-      lastPasteBarIndex: null,
-      lastPasteTrackId: null,
-    });
+    set({ segments: [], sourceTrackId: '' });
   },
 }));

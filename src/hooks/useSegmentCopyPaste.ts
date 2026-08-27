@@ -1,8 +1,8 @@
 import { useEffect } from 'react';
 import { clipboardStore } from '@/store/clipboardStore';
-import { editSurface, projectStore } from '@/store/projectStore';
+import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
-import { getTotalBeats, resolveBeatPosition, snapBeat } from '@/engine/timeline';
+import { snapBeat } from '@/engine/timeline';
 import { editorStore } from '@/store/editorStore';
 import { isTextEntry } from '@/utils/keyboard';
 
@@ -16,9 +16,10 @@ const lastMouseX = { current: 0 };
  * Ctrl+C / Ctrl+V (Cmd+C / Cmd+V on Mac) to copy and paste selected segments.
  *
  * Copy captures every selected segment within the currently selected instrument.
- * Paste places a fresh copy of the segments at the position of the mouse cursor
- * on the timeline ruler, with the left edge of the first pasted segment anchored
- * to the cursor beat. The target instrument is the currently selected one.
+ * Paste places a fresh copy of the segments at the position of the mouse cursor on
+ * the timeline ruler, with the earliest copied block's left edge anchored to the
+ * cursor beat and the rest keeping the spacing they were copied with. The target
+ * instrument is the currently selected one.
  *
  * Each Ctrl+V reads the current mouse position — there is no cascade.
  *
@@ -77,44 +78,23 @@ export function useSegmentCopyPaste(): void {
 
         const rect = ruler.getBoundingClientRect();
         const mouseX = lastMouseX.current;
-        if (mouseX < rect.left || mouseX > rect.right) return;
+        // Only the left edge is a limit: a pointer left of the ruler names no beat.
+        // Past its right edge is a real position — the empty space after the phrase —
+        // and pasting there is how the phrase gets longer.
+        if (mouseX < rect.left) return;
 
         const { pixelsPerBeat, snapBeats } = editorStore.getState();
         const mouseBeat = (mouseX - rect.left) / pixelsPerBeat;
-        // Pull the anchor onto the editing grid before clamping, exactly like
-        // dragging does — a paste must land on the grid, not wherever the pixel
-        // under the cursor happened to fall. Relative spacing between the pasted
-        // segments is preserved by `pasteSegments`, so snapping the anchor snaps
-        // the whole group.
-        // The anchor is clamped to the *phrase*, which is what the ruler above the
-        // timeline measures — pasting past its end would land nowhere.
-        const surface = editSurface();
-        if (!surface) return;
-        const totalBeats = getTotalBeats(surface.bars, project.timeSignature);
-        const clampedBeat = Math.max(
-          0,
-          Math.min(snapBeat(mouseBeat, snapBeats), totalBeats)
-        );
+        // Pull the anchor onto the editing grid, exactly like dragging does — a paste
+        // must land on the grid, not wherever the pixel under the cursor happened to
+        // fall. Nothing else constrains it: the group keeps the spacing it was copied
+        // with, and an anchor past the end of the phrase lengthens the phrase rather
+        // than collapsing onto its last bar.
+        const anchorBeat = Math.max(0, snapBeat(mouseBeat, snapBeats));
 
-        const target = resolveBeatPosition(
-          clampedBeat,
-          surface.bars,
-          project.timeSignature
-        );
-        if (!target) return;
-
-        // Compute the offset bar index and start beat for pasteSegments.
-        // pasteSegments uses a base bar index and applies relative bar offsets
-        // per-segment, so we pass the target bar index as the base and the
-        // cursor's beat within that bar as the anchor point.
-        const offsetBarIndex = target.barIndex;
-
-        const newIds = projectStore.getState().pasteSegments(
-          segments,
-          trackId,
-          offsetBarIndex,
-          target.startBeat
-        );
+        const newIds = projectStore
+          .getState()
+          .pasteSegments(segments, trackId, anchorBeat);
         if (!newIds || newIds.length === 0) return;
 
         // Select the newly pasted segments so the user can immediately edit them.
@@ -122,8 +102,6 @@ export function useSegmentCopyPaste(): void {
 
         // Do not clear the clipboard — keep segments available so repeated
         // Ctrl+V can paste again at the current mouse position.
-        // lastPasteBarIndex / lastPasteTrackId are already null (copy resets them),
-        // and the paste logic no longer uses them for anchor computation.
 
         e.preventDefault();
         return;

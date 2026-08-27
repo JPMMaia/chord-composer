@@ -74,6 +74,7 @@ import {
   getBarBeats,
   getBarStartBeat,
   getTotalBeats,
+  freeLaneShift,
   isValidTimeSignature,
   mapBarChords,
   MIN_SEGMENT_BEATS,
@@ -83,6 +84,7 @@ import {
   removeSegmentById,
   resizeSegment,
   resolveBeatPosition,
+  segmentSpans,
   trackLaneCount,
   withStartBeats,
 } from '@/engine/timeline';
@@ -326,20 +328,19 @@ interface ProjectState {
   /** Move a whole group before another, or to the end when `beforeGroupId` is null. */
   moveTrackGroup: (groupId: string, beforeGroupId: string | null) => void;
   /**
-   * Paste clipboard segments into the project.
+   * Paste clipboard segments into the project, hung off one point on the timeline.
    *
-   * @param segments — the clipboard payload (from clipboardStore).
+   * @param segments — the clipboard payload (from clipboardStore), carrying each
+   *   block's offset from the group anchor.
    * @param trackId — the target instrument.
-   * @param offsetBarIndex — bar index to start pasting into.
-   * @param targetStartBeat — beat offset within the target bar where the
-   *   left edge of the first pasted segment should land (from the mouse cursor).
+   * @param anchorBeat — absolute beat the group's earliest block lands on. Bars are
+   *   appended when it sits past the end of the phrase.
    * @returns the ids of pasted segments, or null if nothing was pasted.
    */
   pasteSegments: (
     segments: CopiedSegment[],
     trackId: string,
-    offsetBarIndex: number,
-    targetStartBeat?: number
+    anchorBeat: number
   ) => string[] | null;
   toggleLoopEnabled: () => void;
   toggleMetronome: () => void;
@@ -2047,64 +2048,93 @@ export const projectStore = create<ProjectState>((set, get) => ({
     });
   },
 
-  /** Paste clipboard segments into the project at the given bar offset. */
-  pasteSegments: (segments, trackId, offsetBarIndex, targetStartBeat = 0) => {
+  /**
+   * Paste clipboard segments, hung off one point on the timeline.
+   *
+   * The work is done in absolute beats and the blocks are written where the
+   * arithmetic puts them — no bar clamp, no ripple against the group's own members.
+   * Both of those used to be applied per block as it went in, which is what made a
+   * paste come back re-spaced, split across bar lines, or in the reverse of the order
+   * it was copied in: a clamped block landed on top of the one before it, and the
+   * ripple then pushed *that* one later.
+   *
+   * Where the group lands on something already there, the whole group moves up into
+   * the first sub-lane that is clear over its span. Nothing is overwritten, and
+   * nothing already on the timeline moves — a paste answers for its own space.
+   */
+  pasteSegments: (segments, trackId, anchorBeat) => {
     const project = get().project;
     if (!project) return null;
     if (segments.length === 0) return null;
+    if (!Number.isFinite(anchorBeat) || anchorBeat < 0) return null;
     if (!project.tracks.some(t => t.id === trackId)) return null;
     const surface = surfaceOf(project, get().editingPhraseId);
     if (!surface) return null;
+    const ts = project.timeSignature;
 
-    // Ensure enough bars exist for the paste destination.
-    let bars = [...surface.bars];
-    const maxSourceBar = Math.max(...segments.map(s => s.barIndex));
-    const neededBars = offsetBarIndex + (maxSourceBar - segments[0].barIndex) + 1;
+    // The group as it wants to land: absolute beats, lanes relative to its own top.
+    const incoming = segments.map(copied => {
+      const startBeat = anchorBeat + copied.offsetBeat;
+      return {
+        segment: copied.segment,
+        startBeat,
+        endBeat: startBeat + copied.segment.duration,
+        lane: laneOf(copied.segment) + copied.laneOffset,
+      };
+    });
 
-    // Append bars if needed, inheriting meter from the last existing bar.
-    while (bars.length < neededBars) {
-      const index = bars.length;
-      const previous = bars[index - 1];
-      bars.push({
-        id: generateId(),
-        barIndex: index,
-        timeSignature: previous?.timeSignature,
-        content: {},
-      });
-    }
+    const shift = freeLaneShift(
+      segmentSpans(surface.bars, ts, PHRASE_TRACK_KEY),
+      incoming
+    );
 
-    // Group segments by their relative bar offset.
-    const baseBar = segments[0].barIndex;
-    // The first segment's original startBeat — used to offset all segments
-    // so that the left edge of the first pasted segment lands at the cursor.
-    const baseStartBeat = segments[0].baseStartBeat ?? segments[0].startBeat;
+    // Enough bars to hold every *onset*, so a paste past the end of the phrase
+    // lengthens it rather than piling up on the last bar. A block whose tail hangs
+    // off the end needs none of this: `refitBars` grows the phrase for overhang.
+    let bars = extendBarsToBeat(
+      surface.bars,
+      ts,
+      Math.max(...incoming.map(block => block.startBeat))
+    );
+
     const newSegmentIds: string[] = [];
 
-    for (const copied of segments) {
-      const targetBarRelative = copied.barIndex - baseBar;
-      const targetBarIndex = offsetBarIndex + targetBarRelative;
-      const targetBar = bars[targetBarIndex];
-      if (!targetBar) continue;
+    for (const block of incoming) {
+      const at = resolveBeatPosition(block.startBeat, bars, ts);
+      const targetBar = at ? bars[at.barIndex] : undefined;
+      if (!at || !targetBar) continue;
 
-      const capacity = getBarBeats(targetBar, project.timeSignature);
-      // Compute the adjusted startBeat: keep the original relative spacing
-      // between segments, then shift the whole group so the first segment
-      // lands at the mouse-cursor beat (targetStartBeat).
-      const adjustedStartBeat = copied.startBeat - baseStartBeat + targetStartBeat;
       const newSegment: ChordSegment = {
-        ...copied.segment,
+        ...block.segment,
         id: generateId(),
-        startBeat: adjustedStartBeat,
+        startBeat: at.startBeat,
+        lane: block.lane + shift,
       };
 
-      bars = mapBar(bars, targetBar.id, PHRASE_TRACK_KEY, chords =>
-        placedIn(chords, newSegment, adjustedStartBeat, capacity)
-      );
+      // Appended rather than placed: the refit sorts each bar by start beat, and
+      // finds nothing to push apart because the lane chosen above is clear.
+      bars = mapBar(bars, targetBar.id, PHRASE_TRACK_KEY, chords => [...chords, newSegment]);
       newSegmentIds.push(newSegment.id);
     }
 
-    set({ project: applyPhraseBars(project, surface.phrase.id, bars) });
-    return newSegmentIds.length > 0 ? newSegmentIds : null;
+    if (newSegmentIds.length === 0) return null;
+
+    // The instrument grows to hold the lane just written to, exactly as recording
+    // into a new lane grows it.
+    const track = project.tracks.find(t => t.id === trackId)!;
+    const highestLane = Math.max(...incoming.map(block => block.lane)) + shift;
+    const grown =
+      highestLane < trackLaneCount(track)
+        ? project
+        : {
+            ...project,
+            tracks: project.tracks.map(t =>
+              t.id === trackId ? { ...t, laneCount: highestLane + 1 } : t
+            ),
+          };
+
+    set({ project: applyPhraseBars(grown, surface.phrase.id, bars) });
+    return newSegmentIds;
   },
 
   // -------------------------------------------------------------------------

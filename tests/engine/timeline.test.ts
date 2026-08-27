@@ -16,6 +16,8 @@ import {
   refitBars,
   clearRange,
   extendBarsToBeat,
+  freeLaneShift,
+  segmentSpans,
   SNAP_OPTIONS,
   DEFAULT_SNAP_BEATS,
   MIN_SEGMENT_BEATS,
@@ -714,6 +716,74 @@ describe("timeline", () => {
         // The other instrument gains no content in the bar it did not overflow into.
         expect(barChords(result[1], OTHER_TRACK_ID)).toEqual([]);
       });
+    });
+  });
+
+  describe("segmentSpans", () => {
+    it("measures from the start of the project, not the bar", () => {
+      const bars = [
+        makeBar(0, [seg("a", 1, 0), seg("b", 1, 3)]),
+        makeBar(1, [seg("c", 2, 1)]),
+      ];
+
+      expect(segmentSpans(bars, TS_4_4, TEST_TRACK_ID).map(s => `${s.segment.id}@${s.startBeat}-${s.endBeat}`))
+        .toEqual(["a@0-1", "b@3-4", "c@5-7"]);
+    });
+
+    it("accumulates each bar's own meter", () => {
+      const bars = [makeBar(0, [seg("a", 1, 0)], TS_3_4), makeBar(1, [seg("b", 1, 0)])];
+
+      expect(segmentSpans(bars, TS_4_4, TEST_TRACK_ID).map(s => s.startBeat)).toEqual([0, 3]);
+    });
+
+    it("packs segments that carry no position, and reports their lane", () => {
+      const bars = [makeBar(0, [seg("a", 2), seg("b", 1), seg("c", 1, 0, 1)])];
+
+      expect(segmentSpans(bars, TS_4_4, TEST_TRACK_ID).map(s => `${s.segment.id}@${s.startBeat}/${s.lane}`))
+        .toEqual(["a@0/0", "c@0/1", "b@2/0"]);
+    });
+
+    it("ignores other instruments", () => {
+      const bars = [makeBar(0, [seg("a", 1, 0)])];
+
+      expect(segmentSpans(bars, TS_4_4, OTHER_TRACK_ID)).toEqual([]);
+    });
+  });
+
+  describe("freeLaneShift", () => {
+    /** A span, written the way the callers build them. */
+    const span = (startBeat: number, endBeat: number, lane = 0) => ({ startBeat, endBeat, lane });
+
+    it("does not move a group that lands on empty space", () => {
+      expect(freeLaneShift([span(0, 2)], [span(4, 6)])).toBe(0);
+      expect(freeLaneShift([], [span(0, 4)])).toBe(0);
+    });
+
+    it("moves up one lane when the space is taken", () => {
+      expect(freeLaneShift([span(0, 4)], [span(1, 3)])).toBe(1);
+    });
+
+    it("keeps climbing past every occupied lane", () => {
+      expect(freeLaneShift([span(0, 4, 0), span(0, 4, 1)], [span(1, 3)])).toBe(2);
+    });
+
+    it("takes a lane that is only partly used, as long as the group clears it", () => {
+      // Lane 0 is busy at the group's beats; lane 1 is busy, but elsewhere.
+      expect(freeLaneShift([span(0, 4, 0), span(8, 12, 1)], [span(1, 3)])).toBe(1);
+    });
+
+    it("moves the whole group together, keeping its lane spacing", () => {
+      // The lower half is blocked in lane 0, so both halves rise by one.
+      const shift = freeLaneShift([span(0, 4, 0)], [span(1, 3, 0), span(1, 3, 1)]);
+      expect(shift).toBe(1);
+    });
+
+    it("treats a touching edge as clear", () => {
+      expect(freeLaneShift([span(0, 4)], [span(4, 8)])).toBe(0);
+    });
+
+    it("has nothing to place for an empty group", () => {
+      expect(freeLaneShift([span(0, 4)], [])).toBe(0);
     });
   });
 

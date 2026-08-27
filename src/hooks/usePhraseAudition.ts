@@ -3,16 +3,22 @@ import type { PhraseClip } from '@/types/music';
 import { projectStore } from '@/store/projectStore';
 import { editorStore } from '@/store/editorStore';
 import { clipBeats, clipStartBeat, phraseById } from '@/engine/phrases';
+import { isTrackAudible } from '@/engine/instrumentPool';
 
 /**
- * What Play means while a phrase is open: that phrase, on its own instrument, over
+ * What Play means while a phrase is open: that phrase, in its place in the song, over
  * and over.
  *
  * Opening a phrase is a statement about what the user is listening to. The song is
  * still what actually gets scheduled — a phrase becomes sound only through
  * `compileBars`, which writes it into the song's bars at each placement — so the
  * audition is not a second playback engine but a *narrowing* of the one there is:
- * a play range around the placement, repeat forced on, and one instrument audible.
+ * a play range around the placement, and repeat forced on.
+ *
+ * How much of the band comes with it is `phraseContext`. On, which is where it starts,
+ * every other instrument sounds by its own mute and solo — the phrase is heard against
+ * what it is written against. Off, it is the edited instrument alone, which is what
+ * this hook has always done.
  *
  * Which placement matters, because a phrase played in three choruses is three
  * stretches of song. `editingClipId` remembers the block that was opened; a phrase
@@ -37,7 +43,15 @@ export interface PhraseAudition {
   /** The same stretch in absolute song beats, which is what the scheduler wants. */
   loopStart: number;
   loopEnd: number;
-  /** The only instrument that sounds: the row the placement sits on. */
+  /**
+   * The instruments that sound: the row the placement sits on, plus — while
+   * `phraseContext` is on — every other one that is not muted or soloed out.
+   *
+   * The edited row is in the list unconditionally, even when it is itself muted. That
+   * is the standing contract of `PlaybackConfig.audibleTrackIds`: the user opened this
+   * phrase to hear it, and a mute set while mixing the arrangement should not silence
+   * the thing they are working on.
+   */
   audibleTrackIds: string[];
 }
 
@@ -47,6 +61,7 @@ export function usePhraseAudition(): PhraseAudition | null {
   const editingClipId = projectStore(s => s.editingClipId);
   const view = editorStore(s => s.view);
   const phraseLoop = editorStore(s => s.phraseLoop);
+  const phraseContext = editorStore(s => s.phraseContext);
 
   return useMemo(() => {
     if (view !== 'phrase' || !project || !editingPhraseId) return null;
@@ -81,7 +96,18 @@ export function usePhraseAudition(): PhraseAudition | null {
       localEnd,
       loopStart: baseBeat + localStart,
       loopEnd: baseBeat + localEnd,
-      audibleTrackIds: [clip.trackId],
+      audibleTrackIds: [
+        clip.trackId,
+        ...(phraseContext
+          ? project.tracks
+              .filter(
+                t =>
+                  t.id !== clip.trackId &&
+                  isTrackAudible(t, project.tracks, project.trackGroups ?? [])
+              )
+              .map(t => t.id)
+          : []),
+      ],
     };
-  }, [view, project, editingPhraseId, editingClipId, phraseLoop]);
+  }, [view, project, editingPhraseId, editingClipId, phraseLoop, phraseContext]);
 }

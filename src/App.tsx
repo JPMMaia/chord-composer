@@ -19,7 +19,7 @@ import { HorizontalScrollbar } from '@/components/HorizontalScrollbar';
 import { SegmentInspector } from '@/components/SegmentInspector';
 import { ArrangementView } from '@/components/ArrangementView';
 import { PhraseInspector } from '@/components/PhraseInspector';
-import { phraseBarsAsTrack, phraseById } from '@/engine/phrases';
+import { phraseBarsAsTrack, phraseBarsWithContext, phraseById } from '@/engine/phrases';
 import { usePlayback } from '@/hooks/usePlayback';
 import { useSegmentShortcuts } from '@/hooks/useSegmentShortcuts';
 import { usePhraseEditorGuard } from '@/hooks/usePhraseEditorGuard';
@@ -90,6 +90,7 @@ function App() {
   const pixelsPerBeat = editorStore(s => s.pixelsPerBeat);
 
   const view = editorStore(s => s.view);
+  const phraseContext = editorStore(s => s.phraseContext);
   const editingPhraseId = projectStore(s => s.editingPhraseId);
 
   const recordArmed = editorStore(s => s.recordArmed);
@@ -131,16 +132,48 @@ function App() {
     project && editingPhraseId ? phraseById(project.phrases, editingPhraseId) : null;
 
   /**
+   * What Play means while a phrase is open, or null in the arrangement.
+   *
+   * The song is still what is scheduled; this only narrows it. See the hook.
+   *
+   * Read before the surface below rather than beside the playback config, because the
+   * surface needs the same answer it does: *which* placement is open. A phrase played
+   * in three choruses sits next to different music in each, and the roll drawing one
+   * of them while the speakers play another would be worse than showing nothing.
+   */
+  const audition = usePhraseAudition();
+
+  /**
+   * The instrument the open phrase counts as being played by.
+   *
+   * The placement's row, not the panel cursor. The two start out the same — `openClip`
+   * moves the cursor to the row it opened — but nothing holds them together afterwards,
+   * and clicking another instrument to reach its fader is an ordinary thing to do with
+   * a phrase open. Keying the surface on the cursor let that click file the phrase under
+   * an instrument that is not playing it, which both mislabelled the phrase and hid
+   * whatever really was on that row from the context.
+   *
+   * Falls back to the cursor for a phrase with no placement: nothing is playing it, so
+   * the selected instrument is the only answer there is.
+   */
+  const surfaceTrackId = audition?.clip.trackId ?? selectedTrackId;
+
+  /**
    * The bars the piano roll and the bar panel show: the open phrase's, filed under
    * the instrument playing it, or the compiled song when the arrangement is up.
+   *
+   * With context on, the other instruments' material over the same stretch of song
+   * comes with it — see `phraseBarsWithContext`. The roll needs no notion of phrases
+   * for that: it draws whatever rows the bars carry and dims the ones that are not
+   * being edited, and each instrument's eye in the panel decides which rows arrive.
    */
-  const surfaceBars = useMemo(
-    () =>
-      editingPhrase && selectedTrackId && project
-        ? phraseBarsAsTrack(editingPhrase, project, selectedTrackId)
-        : (project?.bars ?? []),
-    [editingPhrase, project, selectedTrackId]
-  );
+  const surfaceBars = useMemo(() => {
+    if (!editingPhrase || !surfaceTrackId || !project) return project?.bars ?? [];
+    const clip = audition?.clip ?? null;
+    return phraseContext
+      ? phraseBarsWithContext(editingPhrase, project, surfaceTrackId, clip)
+      : phraseBarsAsTrack(editingPhrase, project, surfaceTrackId, clip);
+  }, [editingPhrase, project, surfaceTrackId, phraseContext, audition]);
 
   const selectedBar = surfaceBars.find(b => b.id === selectedBarId);
 
@@ -185,16 +218,9 @@ function App() {
   }, [project, selectedTrackId, selectTrack]);
 
   const selectedBarContent =
-    selectedBar && selectedTrackId ? barContent(selectedBar, selectedTrackId) : null;
+    selectedBar && surfaceTrackId ? barContent(selectedBar, surfaceTrackId) : null;
   const selectedBarSegmentCount = selectedBarContent?.chords.length ?? 0;
   const selectedBarNoteCount = selectedBarContent?.notes.length ?? 0;
-
-  /**
-   * What Play means while a phrase is open, or null in the arrangement.
-   *
-   * The song is still what is scheduled; this only narrows it. See the hook.
-   */
-  const audition = usePhraseAudition();
 
   // Playback config. An audition overrides the project's own range and repeat rather
   // than editing them: the song's settings are untouched and come back the moment the
@@ -209,7 +235,17 @@ function App() {
         loopStart: audition ? audition.loopStart : (project.loopStart ?? null),
         loopEnd: audition ? audition.loopEnd : (project.loopEnd ?? null),
         loopEnabled: audition ? true : (project.loopEnabled ?? false),
-        audibleTrackIds: audition ? audition.audibleTrackIds : null,
+        // Sight and sound have to name the same instruments, or the editor plays
+        // music it refuses to draw. An audition answers for both. Without one — a
+        // phrase open with no placement — the roll has no position to borrow context
+        // from and draws the edited part alone, so that is what sounds too; falling
+        // through to the song here is what made an unplaced phrase play the whole
+        // arrangement while showing none of it.
+        audibleTrackIds: audition
+          ? audition.audibleTrackIds
+          : view === 'phrase' && surfaceTrackId
+            ? [surfaceTrackId]
+            : null,
       }
     : null;
 
@@ -240,10 +276,21 @@ function App() {
     ensureAudio,
   } = usePlayback(playbackConfig!, metronomeEnabled);
 
+  /**
+   * The absolute song beat the edited surface's own beat 0 sits on.
+   *
+   * Zero in the arrangement, which is measured from song 0 already; while auditioning
+   * it is where the open placement begins. Everything the phrase editor *draws* is
+   * measured from here — and so is everything recorded into it, which is why the
+   * recorders below are handed the same number the playhead is. They used to be given
+   * nothing, and a take played over a placement at bar 8 landed eight bars into the
+   * phrase, or off the end of it entirely.
+   */
+  const surfaceOriginBeat = audition?.baseBeat ?? 0;
+
   // Absolute song beats — except while auditioning, where everything drawn is
   // measured from the phrase's own bar 0 and the playhead has to be too.
-  const playheadBeat =
-    songTimeToBeat(currentTime, project?.bpm ?? 120) - (audition?.baseBeat ?? 0);
+  const playheadBeat = songTimeToBeat(currentTime, project?.bpm ?? 120) - surfaceOriginBeat;
 
   // Handlers
   const handlePlay = useCallback(() => {
@@ -331,7 +378,13 @@ function App() {
   );
 
   // 1–7 play the palette's degrees, and record them while armed. `r` arms.
-  useRecordShortcuts({ isPlaying, getSongTime, getPool, record: recordGated });
+  useRecordShortcuts({
+    isPlaying,
+    getSongTime,
+    getPool,
+    originBeat: surfaceOriginBeat,
+    record: recordGated,
+  });
 
   // A MIDI keyboard plays the selected instrument, and records one note block per
   // key while armed. Same gating as above.
@@ -340,6 +393,7 @@ function App() {
     getSongTime,
     getPool,
     ensureAudio,
+    originBeat: surfaceOriginBeat,
     record: recordGated,
   });
 
@@ -347,7 +401,13 @@ function App() {
   // the gesture into that controller's lane while armed. Mounted here rather than in
   // the strip that shows it because it listens on the document and owns a flush timer:
   // two of it would sample one gesture twice.
-  const touchpad = useTouchpadExpression({ isPlaying, getSongTime, getPool, ensureAudio });
+  const touchpad = useTouchpadExpression({
+    isPlaying,
+    getSongTime,
+    getPool,
+    ensureAudio,
+    originBeat: surfaceOriginBeat,
+  });
 
   // Armed and rolling is one take, and one undo step: Ctrl+Z during it scraps the
   // whole take rather than the last block of it.
@@ -515,7 +575,7 @@ function App() {
                 bars={surfaceBars}
                 selectedBarId={selectedBar.id}
                 tracks={project.tracks}
-                selectedTrackId={selectedTrackId}
+                selectedTrackId={surfaceTrackId}
                 playheadBeat={playheadBeat}
                 pixelsPerBeat={pixelsPerBeat}
                 pixelsPerOctave={120}

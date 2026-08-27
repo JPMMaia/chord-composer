@@ -42,7 +42,7 @@ function keyIdOf(e: KeyboardEvent): string {
 interface OpenTake {
   /** The block on the timeline, or the one merely being previewed. */
   segment: ChordSegment;
-  /** Where it was committed, in absolute beats. Null when only auditioning. */
+  /** Where it was committed, in the surface's own beats. Null when only auditioning. */
   pressBeat: number | null;
   /** The instrument it was committed to, captured so a mid-take switch cannot strand it. */
   trackId: string;
@@ -55,6 +55,11 @@ interface UseRecordShortcutsProps {
   /** Live song position in seconds, straight off the audio clock. */
   getSongTime: () => number;
   getPool: () => InstrumentPool | null;
+  /**
+   * The absolute song beat the edited surface's own beat 0 sits on — see `recordBeat`.
+   * Omitted is the arrangement's own frame, where the two coincide.
+   */
+  originBeat?: number;
   /** Writes a block to the timeline without creating a history entry of its own.
       The whole recording pass is one undo step — see `useRecordSession`. */
   record: (trackId: string, startBeat: number, segment: ChordSegment) => void;
@@ -85,21 +90,34 @@ export function useRecordShortcuts({
   isPlaying,
   getSongTime,
   getPool,
+  originBeat = 0,
   record,
 }: UseRecordShortcutsProps): void {
   /** Keys held down, by `e.key`. Outlives renders, so a re-render cannot drop a take. */
   const heldRef = useRef(new Map<string, OpenTake>());
   const isPlayingRef = useRef(isPlaying);
   isPlayingRef.current = isPlaying;
+  /**
+   * Read through a ref rather than depended on: opening a different placement changes
+   * it, and re-running the effect would tear the listeners down mid-take — losing the
+   * keyup that gives the block its length.
+   */
+  const originBeatRef = useRef(originBeat);
+  originBeatRef.current = originBeat;
 
   useEffect(() => {
     const held = heldRef.current;
 
-    /** Where the playhead is now, in absolute beats, snapped as the user asked. */
+    /** Where the playhead is now, in the edited surface's own beats, snapped as asked. */
     const beatNow = (): number => {
       const project = projectStore.getState().project;
       const { recordQuantize, snapBeats } = editorStore.getState();
-      return recordBeat(getSongTime(), project?.bpm ?? 120, { recordQuantize, snapBeats });
+      return recordBeat(
+        getSongTime(),
+        project?.bpm ?? 120,
+        { recordQuantize, snapBeats },
+        originBeatRef.current
+      );
     };
 
     /**

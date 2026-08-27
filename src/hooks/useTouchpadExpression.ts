@@ -76,6 +76,11 @@ interface UseTouchpadExpressionProps {
   getPool: () => InstrumentPool | null;
   /** Brings the audio graph up, so a gesture before the first Play still reaches the plugin. */
   ensureAudio: () => Promise<InstrumentPool>;
+  /**
+   * The absolute song beat the edited surface's own beat 0 sits on — see `recordBeat`.
+   * Omitted is the arrangement's own frame, where the two coincide.
+   */
+  originBeat?: number;
 }
 
 /** What a lane the touchpad opens calls itself, worded as the CC strip words one. */
@@ -88,6 +93,7 @@ export function useTouchpadExpression({
   getSongTime,
   getPool,
   ensureAudio,
+  originBeat = 0,
 }: UseTouchpadExpressionProps): TouchpadExpression {
   const [performing, setPerforming] = useState(false);
   const [controllerValue, setControllerValue] = useState(toControllerValue(INITIAL_VALUE));
@@ -111,8 +117,8 @@ export function useTouchpadExpression({
   const isPlayingRef = useRef(isPlaying);
   isPlayingRef.current = isPlaying;
 
-  const propsRef = useRef({ getSongTime, getPool, ensureAudio });
-  propsRef.current = { getSongTime, getPool, ensureAudio };
+  const propsRef = useRef({ getSongTime, getPool, ensureAudio, originBeat });
+  propsRef.current = { getSongTime, getPool, ensureAudio, originBeat };
 
   /**
    * The selected instrument's touchpad assignment.
@@ -184,7 +190,11 @@ export function useTouchpadExpression({
       // up to a scheduling pass (50 ms) stale — a tenth of a beat at 120 BPM, and plainly
       // audible in the result. Unsnapped, unlike a recorded note: a curve quantised to
       // the grid is not the gesture that was played.
-      const beat = songTimeToBeat(propsRef.current.getSongTime(), project.bpm);
+      // The clock speaks in song beats; the phrase is written in its own. `originBeat`
+      // is where the placement being heard begins, so the subtraction is what makes the
+      // two the same reading — the one the playhead is drawn at.
+      const beat =
+        songTimeToBeat(propsRef.current.getSongTime(), project.bpm) - propsRef.current.originBeat;
 
       // Bounded by the phrase, exactly as `recordSegment` is: a gesture held past the
       // last bar must not lengthen the phrase, because bars are added deliberately.

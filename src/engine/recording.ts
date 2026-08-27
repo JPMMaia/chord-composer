@@ -28,16 +28,28 @@ export function recordFloor({ recordQuantize, snapBeats }: RecordQuantization): 
 }
 
 /**
- * Where the playhead is, in absolute beats, snapped as the user asked.
+ * Where the playhead is, in the edited surface's own beats, snapped as the user asked.
  *
  * The song time must come from the live audio clock rather than from the playhead
  * React renders, which is up to a scheduling pass (50 ms) stale — a tenth of a beat
  * at 120 BPM, and plainly audible in the result.
+ *
+ * @param originBeat - The absolute song beat that the edited surface's own beat 0 sits
+ *   on: `audition.baseBeat` while a phrase is open, 0 in the arrangement. The clock
+ *   speaks in song beats and `recordSegment` writes into the phrase's own bar grid, so
+ *   the two frames have to be reconciled somewhere; here is that somewhere, and it is
+ *   the same subtraction the drawn playhead makes. Stated rather than defaulted, so a
+ *   caller has to say which frame it is in.
+ *
+ *   A position before the surface begins reads as its opening rather than as a negative
+ *   beat — `snapBeat` clamps at 0. Nothing should reach that: an audition's play range
+ *   is confined to the placement being heard.
  */
 export function recordBeat(
   songTime: number,
   bpm: number,
-  quantization: RecordQuantization
+  quantization: RecordQuantization,
+  originBeat: number
 ): number {
-  return snapBeat(songTimeToBeat(songTime, bpm), recordFloor(quantization));
+  return snapBeat(songTimeToBeat(songTime, bpm) - originBeat, recordFloor(quantization));
 }

@@ -16,7 +16,9 @@ import {
   insertPhraseBars,
   nextPhraseName,
   normalizeClips,
+  phraseBarsAsTrack,
   phraseBarsForDisplay,
+  phraseBarsWithContext,
   phraseLengthBars,
   placementCount,
   removePhraseBar,
@@ -26,7 +28,7 @@ import {
   uniquePhraseName,
   unplacedPhrases,
 } from '@/engine/phrases';
-import { barChords } from '@/engine/timeline';
+import { barChords, barNotes } from '@/engine/timeline';
 import { laneKey } from '@/engine/parameterAutomation';
 
 const TS = { beatsPerMeasure: 4, beatUnit: 4 };
@@ -358,6 +360,190 @@ describe('phraseBarsForDisplay', () => {
   it('leaves an unplaced phrase on the project metre', () => {
     const shown = phraseBarsForDisplay(p, { bars: songBars(4), clips: [], timeSignature: TS });
     expect(shown).toBe(p.bars);
+  });
+
+  // Which placement matters as soon as there are two: the editor is looking at one of
+  // them, and the audition is playing that same one.
+  it('borrows the metre of the placement it is given, not the first one', () => {
+    const bars = songBars(6);
+    bars[4] = { ...bars[4], timeSignature: { beatsPerMeasure: 5, beatUnit: 4 } };
+    const second = clip('c2', 'p', 't', 4);
+    const shown = phraseBarsForDisplay(
+      p,
+      { bars, clips: [clip('c1', 'p', 't', 0), second], timeSignature: TS },
+      second
+    );
+
+    expect(shown[0].timeSignature).toEqual({ beatsPerMeasure: 5, beatUnit: 4 });
+  });
+});
+
+/**
+ * The phrase editor's surface with the rest of the band laid alongside it.
+ *
+ * Every case here is about the *union*: what comes across from the song, what stays
+ * the phrase's own, and what happens where there is no song to borrow from.
+ */
+describe('phraseBarsWithContext', () => {
+  const edited = phrase('p', 'Verse', 2);
+  const other = phrase('q', 'Pad', 2);
+
+  /** The song `edited` sits on row `t` of, with `other` playing on row `u` alongside. */
+  function song(editedStart = 0, otherStart = 0) {
+    const clips = [
+      clip('c-edited', 'p', 't', editedStart),
+      clip('c-other', 'q', 'u', otherStart),
+    ];
+    return {
+      bars: compileBars(songBars(6), [edited, other], clips),
+      clips,
+      timeSignature: TS,
+    };
+  }
+
+  it('lays the other instruments of the arrangement beside the phrase', () => {
+    const project = song();
+    const shown = phraseBarsWithContext(edited, project, 't', project.clips[0]);
+
+    expect(Object.keys(shown[0].content).sort()).toEqual(['t', 'u']);
+    expect(barNotes(shown[0], 'u').map(n => n.pitch)).toEqual([60]);
+  });
+
+  // The block lanes draw one instrument and never the others, so a compiled segment on
+  // a context row would be an id nothing on this surface could use.
+  it('brings notes across but no blocks', () => {
+    const project = song();
+    const shown = phraseBarsWithContext(edited, project, 't', project.clips[0]);
+
+    expect(barChords(shown[0], 'u')).toEqual([]);
+    expect(barNotes(shown[0], 'u')).toHaveLength(1);
+  });
+
+  /**
+   * A note is filed in the bar it *starts* in and may sound long past it — a ten-bar
+   * drone is one held note in bar 0. A placement starting later shares those beats and
+   * has to be able to see it, or it is written against silence it can plainly hear.
+   */
+  describe('a held note that began before this placement', () => {
+    /** One instrument holding a single note across `beats`, from song bar 0. */
+    function droneSong(beats: number) {
+      const drone: Phrase = {
+        id: 'd',
+        name: 'Drone',
+        bars: [
+          {
+            id: 'd-bar-0',
+            barIndex: 0,
+            content: {
+              [PHRASE_TRACK_KEY]: {
+                chords: [segment('d-seg', 0, beats)],
+                notes: [{ id: 'd-note', pitch: 50, startBeat: 0, duration: beats, velocity: 100 }],
+              },
+            },
+          },
+          ...phrase('dd', 'pad', 3).bars.map((b, i) => ({ ...b, id: `d-bar-${i + 1}`, barIndex: i + 1, content: {} })),
+        ],
+      };
+      const clips = [clip('c-drone', 'd', 'u', 0), clip('c-edited', 'p', 't', 2)];
+      return {
+        drone,
+        project: {
+          bars: compileBars(songBars(8), [drone, edited], clips),
+          clips,
+          timeSignature: TS,
+        },
+      };
+    }
+
+    it('reaches a phrase that starts after it', () => {
+      const { project } = droneSong(16);
+      const shown = phraseBarsWithContext(edited, project, 't', project.clips[1]);
+
+      expect(barNotes(shown[0], 'u').map(n => n.pitch)).toEqual([50]);
+    });
+
+    // It genuinely started earlier, so it is placed earlier — the roll clips at the
+    // keyboard and draws the stretch that actually sounds here.
+    it('is re-based to where it began, before the phrase', () => {
+      const { project } = droneSong(16);
+      const shown = phraseBarsWithContext(edited, project, 't', project.clips[1]);
+
+      expect(barNotes(shown[0], 'u')[0].startBeat).toBe(-8);
+    });
+
+    it('is left out once it has stopped sounding by the time the phrase starts', () => {
+      // Four beats from bar 0 ends at song beat 4; the phrase starts at beat 8.
+      const { project } = droneSong(4);
+      const shown = phraseBarsWithContext(edited, project, 't', project.clips[1]);
+
+      expect(shown.every(b => b.content['u'] === undefined)).toBe(true);
+    });
+  });
+
+  // The song's copy of this phrase carries `clipId::segmentId` ids, and the segment
+  // actions only accept the phrase's own. Drawing the compiled copy would give the
+  // user blocks that refused to be dragged.
+  it('keeps the edited row authored, not the compiled copy the song holds', () => {
+    const project = song();
+    const shown = phraseBarsWithContext(edited, project, 't', project.clips[0]);
+
+    expect(barChords(shown[0], 't').map(c => c.id)).toEqual(['p-seg-0']);
+  });
+
+  it('borrows only the bars this placement actually covers', () => {
+    // `other` plays at bar 0, `edited` at bar 2 — they never sound together.
+    const project = song(2, 0);
+    const shown = phraseBarsWithContext(edited, project, 't', project.clips[0]);
+
+    expect(Object.keys(shown[0].content)).toEqual(['t']);
+    expect(Object.keys(shown[1].content)).toEqual(['t']);
+  });
+
+  // The bar cursor, Add Bar and Remove Bar all address phrase bars by their own ids.
+  it('leaves the bars of the phrase carrying their own identity', () => {
+    const project = song();
+    const shown = phraseBarsWithContext(edited, project, 't', project.clips[0]);
+
+    expect(shown.map(b => b.id)).toEqual(['p-bar-0', 'p-bar-1']);
+    expect(shown.map(b => b.barIndex)).toEqual([0, 1]);
+  });
+
+  // The caller pairs a track id with a clip, and the two can disagree — the phrase
+  // editor files the phrase under the panel's selected instrument, which drifts. Only
+  // excluding the id it was filed under would then draw this phrase twice, once
+  // authored and once compiled, and hide the row that actually disagreed.
+  it('never draws the compiled copy of the phrase being edited', () => {
+    const project = song();
+    // Filed under the *strings* row, though the clip is played by the piano.
+    const shown = phraseBarsWithContext(edited, project, 'u', project.clips[0]);
+
+    expect(barChords(shown[0], 'u').map(c => c.id)).toEqual(['p-seg-0']);
+    expect(shown[0].content['t']).toBeUndefined();
+  });
+
+  it('has nothing to borrow for a phrase that sits nowhere in the song', () => {
+    const project = { bars: songBars(4), clips: [], timeSignature: TS };
+
+    expect(phraseBarsWithContext(edited, project, 't', null)).toEqual(
+      phraseBarsAsTrack(edited, project, 't')
+    );
+  });
+
+  // A phrase played in two choruses sits next to different music in each.
+  it('takes its context from the placement it is given', () => {
+    const clips = [
+      clip('c-first', 'p', 't', 0),
+      clip('c-second', 'p', 't', 2),
+      clip('c-other', 'q', 'u', 2),
+    ];
+    const project = { bars: compileBars(songBars(6), [edited, other], clips), clips, timeSignature: TS };
+
+    expect(Object.keys(phraseBarsWithContext(edited, project, 't', clips[0])[0].content)).toEqual([
+      't',
+    ]);
+    expect(
+      Object.keys(phraseBarsWithContext(edited, project, 't', clips[1])[0].content).sort()
+    ).toEqual(['t', 'u']);
   });
 });
 

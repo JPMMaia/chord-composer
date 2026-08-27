@@ -2,6 +2,7 @@ import type {
   AutomationPoint,
   Bar,
   ParameterAutomation,
+  Note,
   Phrase,
   PhraseClip,
   Project,
@@ -10,6 +11,7 @@ import type {
   TrackContent,
 } from '@/types/music';
 import {
+  allBarNotes,
   getBarBeats,
   getBarStartBeat,
   getTotalBeats,
@@ -763,21 +765,27 @@ export function compileProject(project: Project): Project {
 /**
  * The metre a phrase's bars should be shown in while it is edited.
  *
- * A phrase carries no metre of its own, so it borrows the one from the song bars its
- * first placement covers, and falls back to the project's own when it is unplaced.
- * That makes the phrase editor show the bar the user will actually hear — right in the
- * ordinary case of a phrase placed once, and honest about being a guess only when the
- * same phrase straddles a metre change, which nothing could get right.
+ * A phrase carries no metre of its own, so it borrows the one from the song bars the
+ * placement being edited covers, and falls back to the project's own when it is
+ * unplaced. That makes the phrase editor show the bar the user will actually hear —
+ * right in the ordinary case of a phrase placed once, and honest about being a guess
+ * only when the same phrase straddles a metre change, which nothing could get right.
+ *
+ * `clip` names *which* placement, and matters as soon as a phrase is placed twice: the
+ * editor is looking at one of them, and the audition is playing that same one. Omitting
+ * it falls back to the first placement, which is what every caller with no placement in
+ * hand means.
  */
 export function phraseBarsForDisplay(
   phrase: Phrase,
-  project: Pick<Project, 'bars' | 'clips' | 'timeSignature'>
+  project: Pick<Project, 'bars' | 'clips' | 'timeSignature'>,
+  clip?: PhraseClip | null
 ): Bar[] {
-  const clip = project.clips.find(c => c.phraseId === phrase.id);
-  if (!clip) return phrase.bars;
+  const placement = clip ?? project.clips.find(c => c.phraseId === phrase.id);
+  if (!placement) return phrase.bars;
 
   return phrase.bars.map((bar, i) => {
-    const songBar = project.bars[clip.startBar + i];
+    const songBar = project.bars[placement.startBar + i];
     return songBar?.timeSignature === bar.timeSignature
       ? bar
       : { ...bar, timeSignature: songBar?.timeSignature };
@@ -799,11 +807,109 @@ export function phraseBarsForDisplay(
 export function phraseBarsAsTrack(
   phrase: Phrase,
   project: Pick<Project, 'bars' | 'clips' | 'timeSignature'>,
-  trackId: string
+  trackId: string,
+  clip?: PhraseClip | null
 ): Bar[] {
-  return phraseBarsForDisplay(phrase, project).map(bar => {
+  return phraseBarsForDisplay(phrase, project, clip).map(bar => {
     const content = bar.content[PHRASE_TRACK_KEY];
     return content ? { ...bar, content: { [trackId]: content } } : { ...bar, content: {} };
+  });
+}
+
+/**
+ * The same bars, with the rest of the arrangement laid alongside them.
+ *
+ * What the phrase editor draws when it is showing context: the phrase on its own row,
+ * plus whatever every *other* instrument sounds over the bars this placement occupies.
+ * The piano roll needs no notion of phrases for that — it reads `bar.content` by track
+ * id and dims the rows that are not the selected one, exactly as it does in the
+ * arrangement — so the whole feature is a question of what is put on the surface.
+ *
+ * Gathered by *beat* rather than bar by bar, which is the only way to get a held note
+ * right. A note is stored in the bar it **starts** in and may sound arbitrarily far past
+ * it: a ten-bar drone is one forty-beat note filed in bar 0. Copying the content of the
+ * bars this placement covers finds nothing on that row, so every phrase starting later
+ * than the drone would be written against silence it can plainly hear. So the search is
+ * over the whole song, and the test is whether a note's *span* reaches this placement.
+ *
+ * Such a note is re-based onto the phrase's own beat axis, which lands it at a negative
+ * offset in local bar 0 — honestly, since it did begin before this phrase did. The roll
+ * clips at the keyboard, so what draws is the part that actually sounds here.
+ *
+ * Only notes come across; the context rows carry no `chords`. The block lanes show one
+ * instrument and never draw the others, so a compiled segment would be an id nothing on
+ * this surface could use, on a row nothing on this surface can edit.
+ *
+ * Two rows are deliberately left out, and they are usually the same one. `trackId` is
+ * where the phrase has just been filed, and `clip.trackId` is the row the song compiled
+ * it onto: both hold this same phrase, whose compiled copy carries `compiledSegmentId`
+ * ids — `clipId::segmentId` — while this is the surface being *edited*, and a block the
+ * roll draws has to be one the segment actions will accept. They come apart when the
+ * caller files the phrase under something other than the row it is played on, and
+ * excluding only one would then draw the phrase twice — once authored, once compiled —
+ * while hiding whatever really plays on the other row.
+ *
+ * A null `clip` is an unplaced phrase: it sits nowhere in the song, so there is no
+ * stretch of arrangement to borrow, and this is just `phraseBarsAsTrack`.
+ */
+export function phraseBarsWithContext(
+  phrase: Phrase,
+  project: Pick<Project, 'bars' | 'clips' | 'timeSignature'>,
+  trackId: string,
+  clip: PhraseClip | null
+): Bar[] {
+  const bars = phraseBarsAsTrack(phrase, project, trackId, clip);
+  if (!clip || bars.length === 0) return bars;
+
+  const projectTs = project.timeSignature;
+  const clipStart = clipStartBeat(clip, project.bars, projectTs);
+
+  // The phrase's own beat axis: where each local bar starts, and how long the whole
+  // placement is. Accumulated rather than multiplied, since bars may each carry a metre.
+  const localStarts: number[] = [];
+  let spanBeats = 0;
+  for (const bar of bars) {
+    localStarts.push(spanBeats);
+    spanBeats += getBarBeats(bar, projectTs);
+  }
+
+  // Collected per local bar so the bars can be rebuilt in one pass below.
+  const context = new Map<number, Map<string, Note[]>>();
+  let songBeat = 0;
+  for (const songBar of project.bars) {
+    for (const { note, trackId: id } of allBarNotes(songBar)) {
+      if (id === trackId || id === clip.trackId) continue;
+
+      // Where the note sits on the phrase's own axis. Negative means it began before
+      // this placement did, which a held note legitimately can.
+      const start = songBeat + note.startBeat - clipStart;
+      if (start + note.duration <= 0 || start >= spanBeats) continue;
+
+      // The bar it starts in — or the first, for one that started before them all.
+      let target = 0;
+      for (let i = localStarts.length - 1; i >= 0; i--) {
+        if (start >= localStarts[i]) { target = i; break; }
+      }
+
+      const rows = context.get(target) ?? new Map<string, Note[]>();
+      const notes = rows.get(id) ?? [];
+      notes.push({ ...note, startBeat: start - localStarts[target] });
+      rows.set(id, notes);
+      context.set(target, rows);
+    }
+    songBeat += getBarBeats(songBar, projectTs);
+  }
+
+  if (context.size === 0) return bars;
+
+  return bars.map((bar, i) => {
+    const rows = context.get(i);
+    if (!rows) return bar;
+    const added = Object.fromEntries(
+      [...rows].map(([id, notes]) => [id, { chords: [], notes }])
+    );
+    // The phrase's own row is spread last so it always wins the merge.
+    return { ...bar, content: { ...added, ...bar.content } };
   });
 }
 

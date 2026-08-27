@@ -11,26 +11,27 @@ import { openTestPhrase } from '../helpers/phrases';
  *
  * There is no second playback engine: a phrase is heard through the song it is
  * compiled into, so an audition is only a narrowing of the one range the scheduler
- * already honours — the placement's beats, repeat forced on, one instrument audible.
- * Every case here is about *which* beats and *which* instrument, because that is all
- * the hook decides.
+ * already honours — the placement's beats, repeat forced on, and some subset of the
+ * band. Every case here is about *which* beats and *which* instruments, because that
+ * is all the hook decides.
  */
 
 const state = () => projectStore.getState();
 const trackId = () => state().project!.tracks[0].id;
 const audition = () => renderHook(() => usePhraseAudition()).result.current;
 
-/** A second instrument, so "only the one the phrase is on" can mean something. */
-function secondTrack(): string {
-  state().addTrack('Lead');
-  return state().project!.tracks[1].id;
+/** Another instrument, so "the rest of the arrangement" can mean something. */
+function addTrack(name: string): string {
+  state().addTrack(name);
+  const tracks = state().project!.tracks;
+  return tracks[tracks.length - 1].id;
 }
 
 beforeEach(() => {
   state().resetProject();
   state().createProject();
   selectionStore.getState().clearSelection();
-  editorStore.setState({ view: 'arrangement', phraseLoop: null });
+  editorStore.setState({ view: 'arrangement', phraseLoop: null, phraseContext: true });
   selectionStore.getState().selectTrack(trackId());
 });
 
@@ -73,21 +74,54 @@ describe('usePhraseAudition', () => {
     expect(audition()!.baseBeat).toBe(0);
   });
 
-  it('sounds only the instrument the placement is on', () => {
-    const lead = secondTrack();
-    openTestPhrase(trackId(), 1);
+  // A phrase is written *against* something, so the band it sits in comes with it.
+  describe('which instruments sound', () => {
+    it('plays the rest of the arrangement alongside the open phrase', () => {
+      const lead = addTrack('Lead');
+      openTestPhrase(trackId(), 1);
 
-    expect(audition()!.audibleTrackIds).toEqual([trackId()]);
-    expect(audition()!.audibleTrackIds).not.toContain(lead);
-  });
+      expect(audition()!.audibleTrackIds).toEqual([trackId(), lead]);
+    });
 
-  // The user opened this phrase to hear it. Honouring a mute set while working on the
-  // arrangement would answer them with silence and no way to tell why.
-  it('names the instrument even when it is muted', () => {
-    openTestPhrase(trackId(), 1);
-    state().toggleTrackMute(trackId());
+    // Mute is what "do not play this one" already means everywhere else in the app,
+    // which is why the phrase editor grows no second control for it.
+    it('leaves out an instrument that is muted', () => {
+      const lead = addTrack('Lead');
+      state().toggleTrackMute(lead);
+      openTestPhrase(trackId(), 1);
 
-    expect(audition()!.audibleTrackIds).toEqual([trackId()]);
+      expect(audition()!.audibleTrackIds).not.toContain(lead);
+      expect(audition()!.audibleTrackIds).toContain(trackId());
+    });
+
+    it('leaves out an instrument another one is soloed over', () => {
+      const lead = addTrack('Lead');
+      const pad = addTrack('Pad');
+      state().toggleTrackSolo(pad);
+      openTestPhrase(trackId(), 1);
+
+      expect(audition()!.audibleTrackIds).toEqual([trackId(), pad]);
+    });
+
+    // The user opened this phrase to hear it. Honouring a mute set while working on
+    // the arrangement would answer them with silence and no way to tell why — so the
+    // edited row is the one instrument its own flags cannot switch off.
+    it('names the instrument the phrase is on even when it is muted', () => {
+      const lead = addTrack('Lead');
+      openTestPhrase(trackId(), 1);
+      state().toggleTrackMute(trackId());
+
+      expect(audition()!.audibleTrackIds).toEqual([trackId(), lead]);
+    });
+
+    it('is that instrument alone once the arrangement is switched off', () => {
+      const lead = addTrack('Lead');
+      openTestPhrase(trackId(), 1);
+      editorStore.getState().setPhraseContext(false);
+
+      expect(audition()!.audibleTrackIds).toEqual([trackId()]);
+      expect(audition()!.audibleTrackIds).not.toContain(lead);
+    });
   });
 
   describe('the loop drawn on the phrase ruler', () => {

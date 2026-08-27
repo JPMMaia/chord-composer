@@ -52,6 +52,23 @@ interface EditorState {
   setShowAutomation: (shown: boolean) => void;
 
   /**
+   * Whether the phrase editor shows and sounds the rest of the arrangement.
+   *
+   * A phrase is written *against* something — a bass line under a chord part — and the
+   * placement being edited already says which stretch of song that something is, so
+   * this starts on. It is the coarse switch only: which instruments come through is
+   * each instrument's own eye and mute in the panel, which already mean exactly
+   * "drawn" and "heard" everywhere else in the app.
+   *
+   * A view setting rather than part of the piece, like `showAutomation` above: it is
+   * never written to the project file and never reaches the undo stack, so turning the
+   * rest of the band off to concentrate cannot be undone out from under the user along
+   * with the edit they actually made.
+   */
+  phraseContext: boolean;
+  setPhraseContext: (on: boolean) => void;
+
+  /**
    * The stretch of the open phrase that Play repeats, in the phrase's own beats.
    *
    * Null means the whole phrase, which is what every phrase opens at. A way of
@@ -203,6 +220,12 @@ export const editorStore = create<EditorState>((set, get) => ({
 
   setShowAutomation: (shown: boolean) => {
     set({ showAutomation: shown });
+  },
+
+  phraseContext: true,
+
+  setPhraseContext: (on: boolean) => {
+    set({ phraseContext: on });
   },
 
   phraseLoop: null,

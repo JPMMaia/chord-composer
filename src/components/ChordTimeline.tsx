@@ -234,6 +234,8 @@ export const ChordTimeline: React.FC = () => {
   const setPixelsPerBeat = editorStore(s => s.setPixelsPerBeat);
   const showAutomation = editorStore(s => s.showAutomation);
   const setShowAutomation = editorStore(s => s.setShowAutomation);
+  const phraseContext = editorStore(s => s.phraseContext);
+  const setPhraseContext = editorStore(s => s.setPhraseContext);
   const paletteScale = editorStore(s => s.paletteScale);
   const paletteOctave = editorStore(s => s.paletteOctave);
   const formulaStartDegree = editorStore(s => s.formulaStartDegree);
@@ -819,6 +821,34 @@ export const ChordTimeline: React.FC = () => {
             · {placements} placements
           </span>
         )}
+
+        {/* The coarse switch over how much of the band is heard and drawn under this
+            phrase. Which instruments in particular is not repeated here — that is the
+            eye and the mute already sitting beside each one in the panel — so this is
+            one button rather than a list that would go stale the moment an instrument
+            was added.
+
+            Called "Context" rather than "Arrangement" only because the way back to the
+            arrangement is already the first button in this strip, and two buttons a few
+            centimetres apart under one word would read as one control drawn twice. */}
+        <button
+          type="button"
+          data-testid="phrase-context-toggle"
+          aria-pressed={phraseContext}
+          onClick={() => setPhraseContext(!phraseContext)}
+          title={
+            phraseContext
+              ? 'Showing and playing the rest of the arrangement over these bars — hide or mute an instrument in the panel to leave it out'
+              : 'Show and play the rest of the arrangement over these bars'
+          }
+          className={`px-1.5 rounded border ${
+            phraseContext
+              ? 'bg-indigo-600 border-indigo-500 text-white'
+              : 'bg-gray-700 border-gray-600 text-gray-400 hover:bg-gray-600'
+          }`}
+        >
+          Context
+        </button>
 
         {/* How many bars the phrase is, and the way to make it more.
             A phrase is not tied to the song grid — its bars are its own — so the

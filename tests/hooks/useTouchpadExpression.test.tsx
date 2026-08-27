@@ -79,7 +79,7 @@ const beatsIn = (beats: number) => {
 let livePool: InstrumentPool | null = pool;
 const ensureAudio = vi.fn(async () => pool);
 
-function mount(isPlaying = true) {
+function mount(isPlaying = true, originBeat = 0) {
   return renderHook(
     ({ playing }: { playing: boolean }) =>
       useTouchpadExpression({
@@ -87,6 +87,7 @@ function mount(isPlaying = true) {
         getSongTime: () => songTime,
         getPool: () => livePool,
         ensureAudio,
+        originBeat,
       }),
     { initialProps: { playing: isPlaying } }
   );
@@ -354,5 +355,39 @@ describe('recording', () => {
     act(() => rerender({ playing: false }));
 
     expect(result.current.performing).toBe(false);
+  });
+
+  // A phrase placed at the top of the song hides the difference between the two frames
+  // the gesture stands between: the clock counts song beats, and a curve is written into
+  // the phrase's own. Move the placement and they come apart.
+  it('writes the curve in the beats of the phrase, not those of the song', () => {
+    const state = projectStore.getState();
+    // Eight bars, so a two-bar placement at bar 2 has room.
+    for (let i = 0; i < 7; i++) state.addBar();
+
+    const clipId = projectStore.getState().addPhraseClip(trackId(), 2, 2);
+    if (!clipId) throw new Error('could not place the phrase');
+    projectStore.getState().openClip(clipId);
+    const phraseId = projectStore.getState().editingPhraseId!;
+
+    projectStore.getState().setTrackTouchpadTarget(trackId(), CC11);
+    // Re-armed after the clip is open: leaving the phrase view disarms recording.
+    editorStore.setState({ recordArmed: true });
+
+    /** The clip opens at bar 2, so its own beat 0 is eight song beats in at 4/4. */
+    const ORIGIN = 8;
+    const { result } = mount(true, ORIGIN);
+
+    act(() => result.current.begin());
+    beatsIn(ORIGIN);
+    move(-FULL_THROW_PX / 4);
+    beatsIn(ORIGIN + 1);
+    move(-FULL_THROW_PX / 4);
+    flush();
+
+    expect(recorded(phraseId)).toEqual([
+      { beat: 0, value: 0.75 },
+      { beat: 1, value: 1 },
+    ]);
   });
 });

@@ -198,6 +198,7 @@ describe('ChordTimeline', () => {
       maxScrollX: 0,
       viewportWidth: 0,
       showAutomation: true,
+      phraseContext: true,
       paletteScale: { root: 'C', type: 'major' },
       paletteOctave: 4,
       formulaStartDegree: 0,
@@ -1402,6 +1403,40 @@ describe('ChordTimeline', () => {
     expect(screen.getByTestId('automation-lane')).toBeInTheDocument();
     expect(screen.getByLabelText('Automation lanes')).toBeInTheDocument();
   });
+  /**
+   * The coarse switch over how much of the band the phrase is written against.
+   *
+   * Only the switch is tested here — what it *does* belongs to the piano roll, which
+   * draws whatever rows the surface carries, and to `usePhraseAudition`, which decides
+   * what sounds. This button owns nothing but the flag.
+   */
+  describe('arrangement context', () => {
+    it('starts on, because a phrase is written against something', () => {
+      render(<ChordTimeline />);
+
+      expect(screen.getByTestId('phrase-context-toggle')).toHaveAttribute(
+        'aria-pressed',
+        'true'
+      );
+    });
+
+    it('switches the rest of the arrangement off, and back on', () => {
+      render(<ChordTimeline />);
+      const toggle = screen.getByTestId('phrase-context-toggle');
+
+      act(() => {
+        fireEvent.click(toggle);
+      });
+      expect(editorStore.getState().phraseContext).toBe(false);
+      expect(toggle).toHaveAttribute('aria-pressed', 'false');
+
+      act(() => {
+        fireEvent.click(toggle);
+      });
+      expect(editorStore.getState().phraseContext).toBe(true);
+    });
+  });
+
   /**
    * A phrase's bars are its own, so the song's "add bar" cannot reach them. Without a
    * control here the length a phrase was drawn at in the arrangement would be the

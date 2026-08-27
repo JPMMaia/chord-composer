@@ -28,12 +28,14 @@ export interface PlaybackConfig {
   groups?: TrackGroup[];
   /**
    * The only instruments that sound, when something is auditioning rather than
-   * playing the song — the phrase editor, hearing one placement on its own.
+   * playing the song — the phrase editor, hearing one placement in its place.
    *
    * It *replaces* mute and solo rather than narrowing them: the user opened this
-   * phrase to hear it, so an instrument they had muted while working on the
-   * arrangement still sounds here. Absent or null is the song, where mute and solo
-   * are the whole answer.
+   * phrase to hear it, so the instrument playing it still sounds even if they had
+   * muted it while working on the arrangement. The rest of the band is a decision
+   * made where the list is built — `usePhraseAudition` applies each instrument's own
+   * mute and solo to it — rather than one taken here. Absent or null is the song,
+   * where mute and solo are the whole answer.
    */
   audibleTrackIds?: string[] | null;
   /** Play range bounds, in beats. Null means "the whole project". */

@@ -21,7 +21,7 @@ interface HeldKey {
 /** The block one held key is writing. */
 interface OpenNote {
   segment: ChordSegment;
-  /** Where it began, in absolute beats. */
+  /** Where it began, in the surface's own beats. */
   startBeat: number;
   /** The instrument it is being written to, captured so a mid-take switch cannot strand it. */
   trackId: string;
@@ -36,6 +36,11 @@ interface UseMidiInputProps {
   getPool: () => InstrumentPool | null;
   /** Brings the audio graph up, so a key pressed before the first Play still sounds. */
   ensureAudio: () => Promise<InstrumentPool>;
+  /**
+   * The absolute song beat the edited surface's own beat 0 sits on — see `recordBeat`.
+   * Omitted is the arrangement's own frame, where the two coincide.
+   */
+  originBeat?: number;
   /**
    * Writes a block to the timeline without creating a history entry of its own.
    * The whole recording pass is one undo step — see `useRecordSession` — so no
@@ -66,6 +71,7 @@ export function useMidiInput({
   getSongTime,
   getPool,
   ensureAudio,
+  originBeat = 0,
   record,
 }: UseMidiInputProps): MidiInputStatus {
   const [status, setStatus] = useState<MidiInputStatus>({ support: 'ok', inputs: [] });
@@ -83,20 +89,22 @@ export function useMidiInput({
    * function would re-render, re-run the effect, and request MIDI access again —
    * forever. Ports are opened once per mount, which is also simply what they are.
    */
-  const propsRef = useRef({ getSongTime, getPool, ensureAudio, record });
-  propsRef.current = { getSongTime, getPool, ensureAudio, record };
+  const propsRef = useRef({ getSongTime, getPool, ensureAudio, originBeat, record });
+  propsRef.current = { getSongTime, getPool, ensureAudio, originBeat, record };
 
   useEffect(() => {
     const held = heldRef.current;
 
-    /** Where the playhead is now, in absolute beats, snapped as the user asked. */
+    /** Where the playhead is now, in the edited surface's own beats, snapped as asked. */
     const beatNow = (): number => {
       const project = projectStore.getState().project;
       const { recordQuantize, snapBeats } = editorStore.getState();
-      return recordBeat(propsRef.current.getSongTime(), project?.bpm ?? 120, {
-        recordQuantize,
-        snapBeats,
-      });
+      return recordBeat(
+        propsRef.current.getSongTime(),
+        project?.bpm ?? 120,
+        { recordQuantize, snapBeats },
+        propsRef.current.originBeat
+      );
     };
 
     const floorNow = (): number => {

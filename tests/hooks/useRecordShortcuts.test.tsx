@@ -4,7 +4,7 @@ import { useRecordShortcuts } from '@/hooks/useRecordShortcuts';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { editorStore } from '@/store/editorStore';
-import { editableBars, openTestPhrase } from '../helpers/phrases';
+import { editableBars, editedChords, openTestPhrase } from '../helpers/phrases';
 import { PHRASE_TRACK_KEY } from '@/engine/phrases';
 import { barChords } from '@/engine/timeline';
 import type { InstrumentPool } from '@/engine/instrumentPool';
@@ -55,13 +55,14 @@ const beatsIn = (beats: number) => {
   songTime = beats / 2;
 };
 
-function mount(isPlaying = true) {
+function mount(isPlaying = true, originBeat = 0) {
   return renderHook(
     ({ playing }: { playing: boolean }) =>
       useRecordShortcuts({
         isPlaying: playing,
         getSongTime: () => songTime,
         getPool: () => pool,
+        originBeat,
         record: (tId: string, pressBeat: number, seg: import('@/types/music').ChordSegment) => {
           // Gated commit: writes the segment but silences the undo middleware.
           // In the real App this is withRecording(() => recordSegment(...)).
@@ -293,5 +294,60 @@ describe('useRecordShortcuts', () => {
     release(1);
 
     expect(takes()).toEqual(['C@0+1']);
+  });
+
+  // A phrase placed at the top of the song hides the difference between the two frames
+  // the recorder stands between: the clock counts song beats, and a take is written into
+  // the phrase's own bars. Move the placement and they come apart — which is the bug
+  // `originBeat` closes.
+  describe('a placement later in the song', () => {
+    /** The clip opens at bar 2, so its own beat 0 is eight song beats in at 4/4. */
+    const ORIGIN = 8;
+
+    beforeEach(() => {
+      state().resetProject();
+      state().createProject();
+      // Eight bars, so a four-bar placement at bar 2 has room.
+      for (let i = 0; i < 7; i++) state().addBar();
+
+      selectionStore.getState().clearSelection();
+      selectionStore.getState().selectTrack(trackId());
+
+      const clipId = state().addPhraseClip(trackId(), 2, 4);
+      if (!clipId) throw new Error('could not place the phrase');
+      state().openClip(clipId);
+
+      // Re-armed after the clip is open, not before: leaving the phrase view — which
+      // `resetProject` does — disarms recording.
+      editorStore.setState({ recordArmed: true });
+
+      songTime = 0;
+    });
+
+    /** The open phrase's bar, as `symbol@beatInBar+length`. */
+    const phraseBar = (index: number) =>
+      editedChords(index).map(c => `${c.chordSymbol}@${c.startBeat}+${c.duration}`);
+
+    it('writes the take where the playhead is in the phrase, not where the phrase is in the song', () => {
+      mount(true, ORIGIN);
+      // One bar into the placement: song beat 12, phrase beat 4.
+      beatsIn(ORIGIN + 4);
+      press(2);
+      beatsIn(ORIGIN + 6);
+      release(2);
+
+      expect(phraseBar(1)).toEqual(['Dm@0+2']);
+      expect(phraseBar(3)).toEqual([]);
+    });
+
+    it('measures the take at the top of the placement against the phrase, not the song', () => {
+      mount(true, ORIGIN);
+      beatsIn(ORIGIN);
+      press(1);
+      beatsIn(ORIGIN + 1);
+      release(1);
+
+      expect(phraseBar(0)).toEqual(['C@0+1']);
+    });
   });
 });

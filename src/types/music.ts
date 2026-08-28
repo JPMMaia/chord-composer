@@ -368,6 +368,24 @@ export interface Track {
   touchpadTarget?: AutomationTarget;
   pan: number;
   /**
+   * Nudge this instrument off the beat, in milliseconds. Negative sounds it
+   * earlier, positive later. Absent reads as 0, which is where every instrument
+   * sat before offsets existed.
+   *
+   * The cure for an instrument that does not sound when it is told to. A plugin
+   * with a slow sampled attack, a legato patch, or one running its own lookahead
+   * arrives late by an amount it never declares, and a hosted VST3 is late again by
+   * the difference in output buffering between its stream and the webview's — see
+   * the header of `src-tauri/src/vst3/clock.rs`. None of that is measurable from
+   * here, so the number is set by ear, exactly as a DAW's track delay is.
+   *
+   * Authored rather than derived, like `touchpadTarget` above: a property of the
+   * sound this instrument makes, not something compiled out of the placed phrases.
+   * It moves when the notes sound, never where they are written — the roll, the
+   * playhead and the exported beat positions all stay put.
+   */
+  timeOffsetMs?: number;
+  /**
    * Temporarily silenced. Its notes still draw in the piano roll — muting is
    * about what you hear, `visible` is about what you see.
    */

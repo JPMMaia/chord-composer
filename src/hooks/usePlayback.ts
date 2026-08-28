@@ -9,8 +9,10 @@ import {
   beatToSongTime,
   cycleWindows,
   notesInWindow,
+  preRollSeconds,
   songTimeToBeat,
   toClockTime,
+  trackOffsets,
 } from '@/engine/scheduler';
 import type { CycleWindow } from '@/engine/scheduler';
 import { firstPointAtOrAfter, valueAtBeat } from '@/engine/volumeAutomation';
@@ -502,7 +504,15 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
 
     /** Song time at which playback ends or wraps. */
     const endSong = loopFrom + loopDuration;
-    const horizonClock = now + LOOKAHEAD_SECONDS;
+    // Widened by the deepest early nudge in the project. A note is *selected* by
+    // its song time but *sounds* its instrument's nudge earlier, so on an early
+    // instrument the two are not the same instant: leaving the horizon at the bare
+    // look-ahead would pick the note up only once its sounding moment had already
+    // passed — by the whole nudge, so a nudge deeper than the look-ahead would
+    // arrive later than it does with no nudge at all, which is the opposite of what
+    // it is for. Widening it here restores the full look-ahead of lead on every
+    // instrument, nudged or not. Zero when nothing is nudged early.
+    const horizonClock = now + LOOKAHEAD_SECONDS + preRollSeconds(cfg.tracks);
 
     /**
      * The look-ahead window, cut at the seam.
@@ -531,6 +541,9 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
       cfg.audibleTrackIds ??
         cfg.tracks.filter(t => isTrackAudible(t, cfg.tracks, cfg.groups ?? [])).map(t => t.id)
     );
+
+    // Each instrument's nudge off the beat, read here for the same reason.
+    const offsets = trackOffsets(cfg.tracks);
   
     for (const slice of slices) {
       const due = notesInWindow({
@@ -545,7 +558,12 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
         pool.get(note.trackId)?.schedule({
           midiNote: note.midiNote,
           velocity: note.velocity,
-          when: toClockTime(note.startTime, slice.songStartClockTime),
+          // The instrument's nudge moves when it *sounds*, and nothing else: the
+          // window it was selected by, the playhead and the automation cursors all
+          // stay on the beat. Read per pass rather than baked into `timings`, like
+          // mute and solo above, so dragging the control mid-run is heard on the
+          // next tick. Room to be early was bought at Play by the pre-roll.
+          when: toClockTime(note.startTime, slice.songStartClockTime) + (offsets.get(note.trackId) ?? 0),
           duration: note.duration,
         });
       }
@@ -699,7 +717,14 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
 
       // Anchoring the reference *behind* `now` by the resume offset is what makes a
       // paused project pick up where it left off with the same arithmetic.
-      songStartClockRef.current = pool.now() - resumeFrom;
+      //
+      // The pre-roll pushes it the other way, by the deepest negative nudge in the
+      // project, so an instrument asked to sound early has somewhere to be early
+      // *to*. Everything is expressed against this one reference — notes,
+      // automation, the click queue and the playhead — so they all shift together
+      // and the arrangement is unmoved relative to itself. Zero unless something is
+      // actually nudged early, which leaves Play as immediate as it ever was.
+      songStartClockRef.current = pool.now() + preRollSeconds(configRef.current.tracks) - resumeFrom;
       scheduledUpToClockRef.current = songStartClockRef.current + resumeFrom;
 
       setIsPlaying(true);

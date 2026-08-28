@@ -40,9 +40,10 @@ function fileWithTrackField(value: unknown): string {
 }
 
 describe('the touchpad assignment in the project file', () => {
-  it('states the version that introduced it', () => {
-    expect(SCHEMA_VERSION).toBe('1.19');
-  });
+  // What version introduced the touchpad is history, and pinning `SCHEMA_VERSION`
+  // to it here only broke the moment the schema moved on for an unrelated reason.
+  // The current version is asserted once, in `fileIO.test.ts`; what matters here is
+  // that the assignment still survives a round trip.
 
   it('round-trips a controller assignment', () => {
     const saved = roundTrip(withTouchpad({ kind: 'cc', controller: 11 }));

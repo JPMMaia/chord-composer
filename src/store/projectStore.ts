@@ -115,6 +115,7 @@ import {
   trackColorAt,
 } from '@/utils/constants';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
+import { MAX_TIME_OFFSET_MS } from '@/engine/scheduler';
 import type { TemplateInstrument } from '@/engine/instrumentTemplate';
 
 /** Gate set by App.tsx to silence middleware pushState during recording takes. */
@@ -245,6 +246,12 @@ interface ProjectState {
    */
   recordLanePoints: (phraseId: string, target: AutomationTarget, name: string, points: AutomationPoint[]) => void;
   setTrackPan: (trackId: string, pan: number) => void;
+  /**
+   * Nudge an instrument off the beat, in milliseconds — negative sounds it earlier.
+   * Clamped to +/-`MAX_TIME_OFFSET_MS` rather than rejected: this comes from a
+   * slider, where running into the end is the gesture and not a bad argument.
+   */
+  setTrackTimeOffset: (trackId: string, timeOffsetMs: number) => void;
   toggleTrackMute: (trackId: string) => void;
   toggleTrackSolo: (trackId: string) => void;
   toggleTrackVisible: (trackId: string) => void;
@@ -1798,6 +1805,15 @@ export const projectStore = create<ProjectState>((set, get) => ({
       throw new Error('Pan must be between -1 and 1');
     }
     updateTrack(get, set, trackId, () => ({ pan }));
+  },
+
+  setTrackTimeOffset: (trackId: string, timeOffsetMs: number) => {
+    if (!Number.isFinite(timeOffsetMs)) return;
+    const clamped = Math.max(
+      -MAX_TIME_OFFSET_MS,
+      Math.min(MAX_TIME_OFFSET_MS, Math.round(timeOffsetMs))
+    );
+    updateTrack(get, set, trackId, () => ({ timeOffsetMs: clamped }));
   },
 
   addVolumePoint: (phraseId: string, beat: number, value: number) => {

@@ -45,6 +45,7 @@ pub fn run() {
             vst3::vst3_peak_level,
             vst3::vst3_get_state,
             vst3::vst3_set_state,
+            vst3::vst3_latency,
             vst3::vst3_has_editor,
             vst3::vst3_open_editor,
             vst3::vst3_close_editor,

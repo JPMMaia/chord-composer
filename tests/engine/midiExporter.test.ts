@@ -3,6 +3,7 @@ import { projectToMidi, midiToProject } from '@/engine/midiExporter';
 import { Project, Bar, Track, Note, ChordSegment } from '@/types/music';
 import { generateId } from '@/utils/id';
 import { OTHER_TRACK_ID, soloContent, TEST_TRACK_ID } from '../helpers/tracks';
+import { allBarNotes, getBarStartBeat } from '@/engine/timeline';
 
 function createTestProject(overrides?: Partial<Project>): Project {
   const now = new Date('2024-01-01T00:00:00.000Z');
@@ -730,3 +731,74 @@ function createMinimalMidiFile(
 
   return Uint8Array.from([headerData, ...chunks].flat());
 }
+
+/**
+ * An instrument's nudge is authored in milliseconds, but a MIDI file has no seconds
+ * — only ticks against the tempo it carries. So the export converts once, at the
+ * project tempo, and the note positions in the file are what a re-import reads back.
+ */
+describe('exporting an instrument that is nudged off the beat', () => {
+  /** Every note's start beat on the exported instrument, after a round trip. */
+  function exportedStarts(timeOffsetMs: number, bpm = 120): number[] {
+    const base = createTestProject({ bpm });
+    const project: Project = {
+      ...base,
+      tracks: [{ ...base.tracks[0], timeOffsetMs }],
+    };
+
+    return noteStarts(midiToProject(projectToMidi(project)));
+  }
+
+  /** Every note in a project, by start beat, in order. */
+  function noteStarts(p: Project): number[] {
+    return p.bars
+      .flatMap((bar, i) =>
+        allBarNotes(bar).map(({ note }) => getBarStartBeat(p.bars, i, p.timeSignature) + note.startBeat)
+      )
+      .sort((a, b) => a - b);
+  }
+
+  // At 120 BPM a beat is half a second, so 250ms is exactly half a beat — a figure
+  // the 96-tick grid can hold without rounding, which keeps this about the offset
+  // rather than about tick arithmetic.
+  it('moves every note later by a late nudge', () => {
+    // Written at beats 0, 1 and 2.
+    expect(exportedStarts(250)).toEqual([0.5, 1.5, 2.5]);
+  });
+
+  it('moves every note earlier by an early nudge', () => {
+    expect(exportedStarts(-250)).toEqual([0, 0.5, 1.5]);
+  });
+
+  it('leaves an un-nudged instrument exactly where it was written', () => {
+    expect(exportedStarts(0)).toEqual([0, 1, 2]);
+  });
+
+  // The first note above kept none of its nudge: SMF has no tick before 0. The pair
+  // moves together, so what is lost is the note's position and never its length.
+  it('keeps a note its full length when the nudge runs out of room', () => {
+    const base = createTestProject({ bpm: 120 });
+    const nudged: Project = {
+      ...base,
+      tracks: [{ ...base.tracks[0], timeOffsetMs: -250 }],
+    };
+
+    const plain = midiToProject(projectToMidi(base));
+    const shifted = midiToProject(projectToMidi(nudged));
+
+    const durations = (p: Project) =>
+      p.bars
+        .flatMap(bar => allBarNotes(bar).map(({ note }) => note.duration))
+        .sort((a, b) => a - b);
+
+    expect(durations(shifted)).toEqual(durations(plain));
+  });
+
+  // The nudge is a duration, so the same milliseconds are fewer beats at a slower
+  // tempo. Ticks can only express the musical position, so the conversion is made
+  // against the tempo the file itself carries.
+  it('converts against the project tempo rather than a fixed one', () => {
+    // At 60 BPM a beat is a whole second, so 250ms is a quarter of one.
+    expect(exportedStarts(250, 60)).toEqual([0.25, 1.25, 2.25]);
+  });
+});

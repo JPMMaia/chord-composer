@@ -338,6 +338,33 @@ impl Engine {
             .map(|c| c.0.clone())
     }
 
+    /// What `track_id`'s plugin says its own latency is, in milliseconds.
+    ///
+    /// `None` when the track hosts no plugin, or when the plugin offers no
+    /// `IAudioProcessor` — the same cast `Plugin::load` makes, done here from the
+    /// control side against the component reference kept for state. It is a plain
+    /// read of a value the plugin already holds, so it needs no trip through the
+    /// audio thread.
+    ///
+    /// Reported only. Nothing compensates for it: most instrument plugins answer 0
+    /// whatever they actually do, which is exactly why the manual per-instrument
+    /// offset exists, and showing the two side by side is what makes that visible.
+    pub fn latency_ms(&self, track_id: &str) -> Option<f64> {
+        use vst3::Steinberg::Vst::IAudioProcessorTrait;
+
+        let components = self.components.lock().unwrap();
+        let processor = components
+            .get(track_id)?
+            .0
+            .cast::<vst3::Steinberg::Vst::IAudioProcessor>()?;
+
+        // SAFETY: the component reference is alive for as long as the entry is, and
+        // the processor was queried from it just now.
+        let samples = unsafe { processor.getLatencySamples() };
+
+        Some(f64::from(samples) / self.sample_rate * 1000.0)
+    }
+
     pub fn unload(&self, track_id: &str) -> Result<(), String> {
         self.components.lock().unwrap().remove(track_id);
         self.controllers.lock().unwrap().remove(track_id);

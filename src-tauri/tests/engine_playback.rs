@@ -272,3 +272,48 @@ fn state_for_a_track_with_no_plugin_is_an_error_rather_than_a_panic() {
     assert!(engine.get_state("no-such-track").is_err());
     assert!(engine.set_state("no-such-track", vec![1]).is_err());
 }
+
+/// The reported-latency read, which is a control-side query rather than an
+/// audio-thread one: it casts the component reference the engine already keeps for
+/// state, exactly as `Plugin::load` does to get its processor.
+///
+/// The figure itself is informational — nothing in the app compensates for it — so
+/// what matters is that asking is safe and that the answer is in milliseconds.
+#[test]
+fn a_loaded_plugin_reports_its_own_latency_in_milliseconds() {
+    let Some(engine) = engine() else { return };
+
+    let path = fixture();
+    let cid = class_id(&path);
+    engine.load(TRACK, &path, &cid).expect("plugin loads");
+
+    let ms = engine.latency_ms(TRACK).expect("a loaded plugin answers");
+
+    // The fixture declares no latency, like most instrument plugins — which is
+    // precisely why the manual per-instrument offset exists beside this number.
+    assert_eq!(ms, 0.0, "the test synth declares no latency");
+}
+
+/// Asked about a track hosting nothing, so the panel can offer the offset control
+/// on every instrument and simply omit the reported figure where there is none.
+#[test]
+fn a_track_with_no_plugin_reports_no_latency() {
+    let Some(engine) = engine() else { return };
+
+    assert!(engine.latency_ms("never-loaded").is_none());
+}
+
+/// Unloading takes the component reference with it, so the query must go back to
+/// answering nothing rather than reading through a stale pointer.
+#[test]
+fn latency_stops_being_reported_once_the_plugin_is_unloaded() {
+    let Some(engine) = engine() else { return };
+
+    let path = fixture();
+    let cid = class_id(&path);
+    engine.load(TRACK, &path, &cid).expect("plugin loads");
+    assert!(engine.latency_ms(TRACK).is_some());
+
+    engine.unload(TRACK).expect("unloads");
+    assert!(engine.latency_ms(TRACK).is_none());
+}

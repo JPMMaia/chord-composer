@@ -7,6 +7,8 @@ import { gmInstrumentsByFamily } from '@/engine/instrumentCatalog';
 import { vst3Option } from '@/engine/vst3Catalog';
 import { sfzNameFor, sfzOption } from '@/engine/sfzCatalog';
 import { isSfzRef, isVst3Ref, parseInstrumentRef } from '@/engine/instrumentRef';
+import { MAX_TIME_OFFSET_MS } from '@/engine/scheduler';
+import { vst3Latency } from '@/engine/vst3Editor';
 import { openVst3Editor } from '@/engine/vst3Editor';
 import { isTauri } from '@/engine/platform';
 import { useVst3Plugins, type Vst3PluginsState } from '@/hooks/useVst3Plugins';
@@ -492,6 +494,7 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
   const renameTrack = projectStore(s => s.renameTrack);
   const setTrackInstrument = projectStore(s => s.setTrackInstrument);
   const setTrackVolume = projectStore(s => s.setTrackVolume);
+  const setTrackTimeOffset = projectStore(s => s.setTrackTimeOffset);
   const toggleTrackMute = projectStore(s => s.toggleTrackMute);
   const toggleTrackVisible = projectStore(s => s.toggleTrackVisible);
 
@@ -531,6 +534,39 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
   const color = track.color ?? trackColorAt(index);
   /** Whether a phrase placed on this instrument shapes its volume over time. */
   const automated = (track.volumeAutomation?.length ?? 0) > 0;
+
+  /**
+   * What this track's plugin declares its latency to be, in ms — or null for an
+   * instrument that is not a plugin, or one that has not answered yet.
+   *
+   * Asked once per plugin instance rather than kept in the project: it is a fact
+   * about the plugin on this machine, not about the music, and it can change when
+   * the plugin is reconfigured. Purely a label; nothing compensates for it.
+   */
+  const [reportedLatency, setReportedLatency] = useState<number | null>(null);
+  const isPlugin = isVst3Ref(track.instrument);
+
+  React.useEffect(() => {
+    if (!isPlugin) {
+      setReportedLatency(null);
+      return;
+    }
+
+    let live = true;
+    vst3Latency(track.id).then(
+      ms => {
+        if (live) setReportedLatency(ms);
+      },
+      // A plugin that has not loaded yet simply has nothing to report; the offset
+      // control is what matters here and it must not disappear over a failed query.
+      () => {}
+    );
+    return () => {
+      live = false;
+    };
+  }, [isPlugin, track.id, track.instrument]);
+
+  const offsetMs = track.timeOffsetMs ?? 0;
 
   const vst3Options = vst3.plugins.map(vst3Option);
   const sfzOptions = sfz.instruments.map(sfzOption);
@@ -862,6 +898,47 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
         />
         <span className="text-[10px] text-gray-500 w-7 text-right shrink-0 tabular-nums">
           {Math.round(track.volume * 100)}
+        </span>
+      </div>
+
+      {/* When this instrument sounds, relative to the beat everything else keeps.
+          For latency an instrument never declares — a slow sampled attack, a
+          plugin's own lookahead, the buffering under a plugin's own audio stream —
+          none of which is measurable from here, so it is set by ear. It moves only
+          the sound: the notes stay written where they are. */}
+      <div className="mt-1 flex items-center gap-1.5">
+        <span className="text-[10px] text-gray-500 w-6 shrink-0">Nudge</span>
+        <input
+          type="range"
+          min={-MAX_TIME_OFFSET_MS}
+          max={MAX_TIME_OFFSET_MS}
+          step={1}
+          value={offsetMs}
+          aria-label={`Time offset ${track.name}`}
+          title={
+            `Timing nudge — negative sounds this instrument earlier, positive later. ` +
+            `Double-click to reset.` +
+            (isPlugin
+              ? reportedLatency === null
+                ? ''
+                : `
+Plugin reports ${Math.round(reportedLatency)} ms of latency` +
+                  (reportedLatency === 0 ? ', which is why this is set by ear.' : '.')
+              : '')
+          }
+          onPointerDown={e => e.stopPropagation()}
+          onDoubleClick={() => setTrackTimeOffset(track.id, 0)}
+          onChange={e => setTrackTimeOffset(track.id, Number(e.target.value))}
+          className="flex-1 h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed"
+        />
+        {/* Fixed width and tabular figures so the slider does not jump as the
+            readout grows a sign or a digit under the cursor. */}
+        <span
+          className={`text-[10px] w-7 text-right shrink-0 tabular-nums ${
+            offsetMs === 0 ? 'text-gray-500' : 'text-indigo-400'
+          }`}
+        >
+          {offsetMs === 0 ? '0' : `${offsetMs > 0 ? '+' : ''}${offsetMs}`}
         </span>
       </div>
     </div>

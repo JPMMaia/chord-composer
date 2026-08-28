@@ -44,6 +44,7 @@ import { normalizeSections } from '@/engine/sections';
 import { normalizeTrackOrder } from '@/engine/trackGroups';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
 import { trackColorAt } from '@/utils/constants';
+import { MAX_TIME_OFFSET_MS } from '@/engine/scheduler';
 
 /**
  * Track id given to the piano synthesised for a pre-1.5 file that listed no tracks.
@@ -211,8 +212,21 @@ const LEGACY_TRACK_ID = 'track-legacy';
  * An instrument with none serialises byte for byte as it did under 1.18, and a
  * pre-1.19 file reads back with nothing assigned, which is what every project was
  * before the touchpad could be performed on.
+ *
+ * 1.20 let an instrument be nudged off the beat: each gained an optional
+ * `timeOffsetMs`, negative to sound earlier and positive later. It is authored,
+ * like `touchpadTarget` before it — a property of the sound rather than of the
+ * music — and it moves only when the instrument sounds. Where its notes are
+ * written is untouched, so the roll, the playhead and the beats in this file all
+ * mean exactly what they did.
+ *
+ * It exists because latency an instrument does not declare cannot be measured from
+ * here: a plugin with a slow sampled attack or its own lookahead arrives late by an
+ * amount only the ear can find. Written only when non-zero, so an un-nudged
+ * instrument serialises byte for byte as it did under 1.19, and a pre-1.20 file
+ * reads back unnudged — which is what every project was before this.
  */
-export const SCHEMA_VERSION = '1.19';
+export const SCHEMA_VERSION = '1.20';
 
 /**
  * Validation error returned by validateProject.
@@ -373,6 +387,8 @@ export function serializeProject(project: Project): string {
       // Absent on every instrument nobody has pointed the touchpad at, which is what
       // every instrument was before 1.19.
       touchpadTarget: t.touchpadTarget,
+      // Absent means on the beat, which is where every instrument sat before 1.20.
+      timeOffsetMs: t.timeOffsetMs ? t.timeOffsetMs : undefined,
     })),
     // Phrases are where all music lives from 1.17 on. Their bars are local, numbered
     // from zero, and carry no metre of their own — the song's bars own that.
@@ -618,6 +634,20 @@ function readTouchpadTarget(raw: unknown): AutomationTarget | undefined {
 }
 
 /**
+ * Read an instrument's nudge off the beat, in milliseconds.
+ *
+ * Absent for anything that is not a usable number, which is what a pre-1.20 file and
+ * an un-nudged instrument both say. A number out of range is clamped rather than
+ * dropped: it still states which way and roughly how far the instrument was moved,
+ * and playback would have clamped it identically anyway — see `trackOffsetSeconds`.
+ */
+function readTimeOffset(raw: unknown): number | undefined {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw === 0) return undefined;
+
+  return Math.max(-MAX_TIME_OFFSET_MS, Math.min(MAX_TIME_OFFSET_MS, Math.round(raw)));
+}
+
+/**
  * Read the project's sections off a file.
  *
  * Absent when there is nothing usable, rather than an empty array: absent is what a
@@ -813,6 +843,10 @@ export function deserializeProject(json: string): Project {
         // fail the load over — and no target the app could invent that would not be
         // driving something the author never chose.
         touchpadTarget: readTouchpadTarget(t.touchpadTarget),
+        // Clamped rather than dropped: a nudge past the range still says which way
+        // and roughly how far the author wanted the instrument moved, and the ear
+        // that set it was hearing the clamped value anyway.
+        timeOffsetMs: readTimeOffset(t.timeOffsetMs),
       }))
     : [];
 
@@ -1281,6 +1315,17 @@ export function validateProject(project: Project): ValidationResult {
     }
     if (typeof t.pan !== 'number' || t.pan < -1 || t.pan > 1) {
       errors.push(`Track ${i}: pan must be between -1 and 1.`);
+    }
+    // Absent is the ordinary state — an instrument that sounds on the beat.
+    if (
+      t.timeOffsetMs !== undefined &&
+      (typeof t.timeOffsetMs !== 'number' ||
+        !Number.isFinite(t.timeOffsetMs) ||
+        Math.abs(t.timeOffsetMs) > MAX_TIME_OFFSET_MS)
+    ) {
+      errors.push(
+        `Track ${i}: time offset must be between -${MAX_TIME_OFFSET_MS} and ${MAX_TIME_OFFSET_MS} ms.`
+      );
     }
     // Having none is the ordinary state; naming something unsendable is not. Same
     // predicate the lanes are checked against below, so a touchpad assignment can

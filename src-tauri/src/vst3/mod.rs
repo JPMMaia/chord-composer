@@ -449,6 +449,17 @@ pub fn vst3_has_editor(state: tauri::State<'_, Vst3State>, track_id: String) -> 
         .is_some_and(|e| e.controller(&track_id).is_some())
 }
 
+/// What a track's plugin reports its own latency to be, in milliseconds.
+///
+/// Null when the track hosts no plugin. Informational: nothing in the app
+/// compensates for it, and an instrument plugin answering 0 while plainly sounding
+/// late is the ordinary case — which is what the per-instrument offset is for.
+#[tauri::command]
+pub fn vst3_latency(state: tauri::State<'_, Vst3State>, track_id: String) -> Option<f64> {
+    let guard = state.engine.lock().unwrap();
+    guard.as_ref()?.latency_ms(&track_id)
+}
+
 /// A track's plugin state, base64'd for the project file.
 ///
 /// Returns null when the track has no plugin — saving a project must not fail

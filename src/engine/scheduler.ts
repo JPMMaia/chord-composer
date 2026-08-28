@@ -1,4 +1,5 @@
 import type { NoteTiming } from '@/engine/playback';
+import type { Track } from '@/types/music';
 
 /**
  * Look-ahead scheduling arithmetic, kept free of React and Web Audio so it can be
@@ -145,4 +146,52 @@ export function songTimeToBeat(songTime: number, bpm: number): number {
 export function beatToSongTime(beat: number, bpm: number): number {
   if (!Number.isFinite(beat) || !Number.isFinite(bpm) || bpm <= 0) return 0;
   return Math.max(0, beat) * (60 / bpm);
+}
+
+/**
+ * Widest nudge an instrument may be given, in milliseconds either way.
+ *
+ * Half a second is far past any plugin's undeclared latency and still short enough
+ * that the pre-roll it forces on Play is not mistaken for the transport hanging.
+ */
+export const MAX_TIME_OFFSET_MS = 500;
+
+/**
+ * One instrument's nudge, in seconds, ready to be added to a note's `when`.
+ *
+ * Negative sounds it earlier. Absent, non-finite and out-of-range values all read as
+ * 0 rather than throwing: this is applied on every scheduling pass, and a bad number
+ * arriving from an old file should cost the instrument its nudge, not its notes.
+ */
+export function trackOffsetSeconds(track: Pick<Track, 'timeOffsetMs'>): number {
+  const ms = track.timeOffsetMs;
+  if (typeof ms !== 'number' || !Number.isFinite(ms)) return 0;
+  return Math.max(-MAX_TIME_OFFSET_MS, Math.min(MAX_TIME_OFFSET_MS, ms)) / 1000;
+}
+
+/** Every instrument's nudge by id, for a scheduling pass to look up per note. */
+export function trackOffsets(tracks: readonly Track[]): Map<string, number> {
+  return new Map(tracks.map(t => [t.id, trackOffsetSeconds(t)]));
+}
+
+/**
+ * How long Play must wait before song position 0 is reached, in seconds.
+ *
+ * The deepest negative nudge in the project, or 0 when nothing is nudged early.
+ * A note at the top of the range asked to sound 150ms before Play was pressed
+ * cannot be placed there: Web Audio would sound it immediately and the VST3
+ * scheduler clamps a late event to the start of its block, which is precisely the
+ * lateness the nudge exists to remove — and only at the top, so it would read as
+ * the first bar being wrong rather than as the setting not working.
+ *
+ * Delaying the whole transport instead buys every instrument the room to be early.
+ * It costs a fraction of a second before sound starts, which is what a DAW does
+ * with the same problem and for the same reason.
+ */
+export function preRollSeconds(tracks: readonly Track[]): number {
+  let deepest = 0;
+  for (const track of tracks) deepest = Math.min(deepest, trackOffsetSeconds(track));
+  // Guarded rather than negated outright, so a project with nothing early returns a
+  // plain 0 instead of -0 — which compares equal but reads as a bug at a call site.
+  return deepest < 0 ? -deepest : 0;
 }

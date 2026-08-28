@@ -10,6 +10,7 @@ import {
 import { gmInstrumentId, gmProgramNumber } from '@/engine/instrumentCatalog';
 import { normalizePoints } from '@/engine/volumeAutomation';
 import { trackColorAt } from '@/utils/constants';
+import { trackOffsetSeconds } from '@/engine/scheduler';
 
 // ---------------------------------------------------------------------------
 // MIDI constants
@@ -191,7 +192,14 @@ export function projectToMidi(project: Project): Uint8Array<ArrayBuffer> {
       events.push(...volumeEvents(track, ppq, channel));
 
       events.push(
-        ...noteEvents(project.bars, project.timeSignature, ppq, channel, track.id)
+        ...noteEvents(
+          project.bars,
+          project.timeSignature,
+          ppq,
+          channel,
+          track.id,
+          offsetTicks(track, project.bpm, ppq)
+        )
       );
     }
 
@@ -316,13 +324,30 @@ function volumeEvents(track: Track, ppq: number, channel: number): AbsoluteEvent
   return events;
 }
 
+/**
+ * An instrument's nudge off the beat, in ticks.
+ *
+ * The offset is authored in milliseconds because that is what the ear and the plugin
+ * both speak, but a MIDI file has no seconds — only ticks against the tempo it
+ * carries. So it is converted once, here, at the project tempo written into the file.
+ * A file re-read at another tempo therefore keeps the nudge's *musical* position
+ * rather than its duration, which is the only thing ticks can express.
+ */
+function offsetTicks(track: Track, bpm: number, ppq: number): number {
+  const seconds = trackOffsetSeconds(track);
+  if (seconds === 0 || !Number.isFinite(bpm) || bpm <= 0) return 0;
+
+  return Math.round(seconds * (bpm / 60) * ppq);
+}
+
 /** Build note-on/note-off events for one instrument's notes across every bar. */
 function noteEvents(
   bars: Bar[],
   projectTs: TimeSignature,
   ppq: number,
   channel: number,
-  trackId: string
+  trackId: string,
+  offset: number
 ): AbsoluteEvent[] {
   const events: AbsoluteEvent[] = [];
 
@@ -331,7 +356,13 @@ function noteEvents(
     // Bars may each be in their own metre, so accumulate rather than multiply.
     const barStartTick = Math.round(getBarStartBeat(bars, i, projectTs) * ppq);
     for (const note of barNotes(bar, trackId)) {
-      const startTick = barStartTick + Math.round(note.startBeat * ppq);
+      // A nudge moves the pair, never just its front: shortening the note instead
+      // would export something the project never played. A negative nudge on a note
+      // near the top of the song runs out of room — SMF has no tick before 0 — so it
+      // keeps less than the full offset there, and only there. That is the format's
+      // limit rather than a choice, and it matches what playback does with the same
+      // note once the pre-roll is spent.
+      const startTick = Math.max(0, barStartTick + Math.round(note.startBeat * ppq) + offset);
       // Zero-length notes would produce a note-off before the note-on is heard.
       const durationTicks = Math.max(1, Math.round(note.duration * ppq));
 

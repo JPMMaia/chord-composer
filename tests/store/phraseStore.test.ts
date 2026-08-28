@@ -634,3 +634,58 @@ describe('instruments', () => {
     expect(songChords(0, copyId)).toHaveLength(1);
   });
 });
+
+describe('transposing inside a phrase whose bars are not the project metre', () => {
+  /** The open phrase's derived notes in one of its local bars. */
+  function phraseNotes(phraseId: string, barIndex: number) {
+    const phrase = phraseById(projectStore.getState().project!.phrases, phraseId)!;
+    return phrase.bars[barIndex].content[PHRASE_TRACK_KEY].notes;
+  }
+
+  /** A clip on `count` bars of `beatsPerMeasure`/4, opened, with its phrase id. */
+  function openClipOnMetre(beatsPerMeasure: number, count: number) {
+    const [track] = trackIds();
+    for (const bar of projectStore.getState().project!.bars.slice(0, count)) {
+      projectStore.getState().setBarTimeSignature(bar.id, { beatsPerMeasure, beatUnit: 4 });
+    }
+    const clipId = projectStore.getState().addPhraseClip(track, 0, count)!;
+    projectStore.getState().openClip(clipId);
+    return { track, phraseId: projectStore.getState().editingPhraseId! };
+  }
+
+  // The bar a phrase is shown in is the song bar its placement covers, and that bar's
+  // metre is its capacity. Regenerating the notes against the *project* metre instead
+  // read a 5/4 bar as four beats, so a block on the fifth beat produced no notes at
+  // all: still drawn in the chord timeline, gone from the roll and silent in playback.
+  it('keeps the notes of a block past the project bar line', () => {
+    const { track, phraseId } = openClipOnMetre(5, 2);
+    const bar = phraseById(projectStore.getState().project!.phrases, phraseId)!.bars[0];
+    projectStore.getState().insertSegment(bar.id, 0, segment('early'), track);
+    projectStore.getState().insertSegment(bar.id, 4, segment('late'), track);
+
+    projectStore.getState().stepSegmentsPitch(['early'], -1);
+
+    expect(phraseChords(phraseId, 0).map(c => c.id)).toEqual(['early', 'late']);
+    expect(phraseNotes(phraseId, 0).some(n => n.startBeat === 4)).toBe(true);
+    // …and the scheduler reads the compiled song, so check there too.
+    expect(
+      projectStore.getState().project!.bars[0].content[track].notes.some(n => n.startBeat === 4)
+    ).toBe(true);
+  });
+
+  it('leaves every block where it was in a plain 4/4 phrase', () => {
+    const { track, phraseId } = openClipOnMetre(4, 2);
+    const bar = phraseById(projectStore.getState().project!.phrases, phraseId)!.bars[0];
+    projectStore.getState().insertSegment(bar.id, 0, segment('a', 0, 2), track);
+    projectStore.getState().insertSegment(bar.id, 2, segment('b', 2, 2), track);
+    const before = phraseNotes(phraseId, 0).map(n => n.startBeat).sort();
+
+    projectStore.getState().stepSegmentsPitch(['a'], 1);
+
+    expect(phraseChords(phraseId, 0).map(c => [c.id, c.startBeat, c.duration])).toEqual([
+      ['a', 0, 2],
+      ['b', 2, 2],
+    ]);
+    expect(phraseNotes(phraseId, 0).map(n => n.startBeat).sort()).toEqual(before);
+  });
+});

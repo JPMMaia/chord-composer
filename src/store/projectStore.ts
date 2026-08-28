@@ -612,9 +612,16 @@ function placedIn(
  *
  * Each transform is handed the key that segment is written in, which is what lets
  * "the next note of the scale" mean the right thing when a multi-selection spans
- * blocks in different keys. Only the derived notes are
- * resynced: none of these edits moves a block along the timeline, so unlike
- * `applyBars` there is nothing here for `refitBars` to refit.
+ * blocks in different keys.
+ *
+ * The bars come from the caller's `surfaceOf`, carrying the borrowed display metre,
+ * and the result leaves through `applyPhraseBars` like every other segment mutation.
+ * Neither is optional just because nothing moves here: a bar's metre is its capacity,
+ * and note generation drops any segment whose onset sits past it. Regenerating a 5/4
+ * phrase's notes against metre-less bars — which read as the project's 4/4 — silently
+ * unsounded every block starting on the fifth beat, leaving it drawn in the timeline
+ * but absent from the roll and from playback. The refit that comes with the shared
+ * exit is a no-op for these transforms, none of which moves a block.
  *
  * The whole selection is rewritten in one pass so a keypress is one visual step
  * and one history entry rather than one per block.
@@ -625,6 +632,7 @@ function placedIn(
 function withTransformedSegments(
   project: Project,
   phrase: Phrase,
+  surfaceBars: Bar[],
   segmentIds: string[],
   transform: (segment: ChordSegment, scale: Scale) => ChordSegment
 ): Project | null {
@@ -632,7 +640,7 @@ function withTransformedSegments(
   if (targets.size === 0) return null;
 
   let matched = false;
-  const bars = phrase.bars.map(bar => {
+  const bars = surfaceBars.map(bar => {
     const content = Object.entries(bar.content);
     if (!content.some(([, c]) => c.chords.some(s => targets.has(s.id)))) return bar;
     matched = true;
@@ -654,12 +662,7 @@ function withTransformedSegments(
 
   if (!matched) return null;
 
-  const phrases = project.phrases.map(p =>
-    p.id === phrase.id
-      ? { ...p, bars: withGeneratedNotes(bars, project.timeSignature, keyScale(project)) }
-      : p
-  );
-  return recompiled({ ...project, phrases });
+  return applyPhraseBars(project, phrase.id, bars);
 }
 
 /**
@@ -678,7 +681,7 @@ function transformSelection(
   if (!project) return null;
   const surface = surfaceOf(project, state.editingPhraseId);
   if (!surface) return null;
-  return withTransformedSegments(project, surface.phrase, segmentIds, transform);
+  return withTransformedSegments(project, surface.phrase, surface.bars, segmentIds, transform);
 }
 
 /**

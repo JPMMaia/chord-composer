@@ -17,14 +17,25 @@
  * Where a library *goes* is not decided here; see `projectFile.ts`, which knows about
  * paths, file handles and downloads, exactly as it does for the project itself.
  */
-import type { FormulaGroup, FormulaStep, MelodicFormula } from '@/engine/formulas';
+import type { ChordQuality, ScaleType } from '@/types/music';
+import type { FormulaGroup, FormulaScaleRef, FormulaStep, MelodicFormula } from '@/engine/formulas';
 import type { FileFilter } from '@/engine/projectFile';
+import { CHORD_INTERVALS } from '@/engine/chords';
+import { SCALE_INTERVALS } from '@/engine/scales';
+import { readVoicing } from '@/engine/voicing';
 
 /**
- * Version 1.0 — the first. Every field is written, so there is nothing yet for a
- * reader to infer from absence; the field exists so a later change can.
+ * Version 1.1 — a step may now name its own key and may be a chord: `scale`, `kind`,
+ * `quality`, `inversion`, `voicing` and `velocity`; and a formula may name the mode it
+ * was written in, as `homeType`.
+ *
+ * Every one of them is omitted when it says nothing, so a library of single-key
+ * melodic formulas — which is every library written under 1.0 — serialises to exactly
+ * the text it did before, and a 1.0 reader would still understand a 1.1 file's shapes.
+ * Nothing is read differently on the strength of the version; the field is here so
+ * that a change which *cannot* degrade so quietly has somewhere to announce itself.
  */
-export const FORMULA_LIBRARY_VERSION = '1.0';
+export const FORMULA_LIBRARY_VERSION = '1.1';
 
 /** The Open/Save dialog filter. JSON contents, but a name and a suffix of its own. */
 export const FORMULA_LIBRARY_FILTER: FileFilter = {
@@ -69,6 +80,24 @@ export function serializeLibrary(library: FormulaLibrary): string {
   return JSON.stringify(library, null, 2);
 }
 
+/**
+ * Read a step's key, or undefined when it names none — which reads as the home key.
+ *
+ * A reference the reader cannot resolve is dropped rather than guessed at: the degree
+ * still names a note in the home key, which is a better answer than a scale invented
+ * out of a misspelling.
+ */
+function readScaleRef(raw: unknown): FormulaScaleRef | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.type !== 'string' || !(r.type in SCALE_INTERVALS)) return undefined;
+  const offset =
+    typeof r.rootOffset === 'number' && Number.isFinite(r.rootOffset)
+      ? (((Math.round(r.rootOffset) % 12) + 12) % 12)
+      : 0;
+  return { rootOffset: offset, type: r.type as ScaleType };
+}
+
 /** Read one step, or null when it describes no note. */
 function readStep(raw: unknown): FormulaStep | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -91,8 +120,39 @@ function readStep(raw: unknown): FormulaStep | null {
     typeof s.gapBeats === 'number' && Number.isFinite(s.gapBeats) && s.gapBeats > 0
       ? s.gapBeats
       : undefined;
+  const velocity =
+    typeof s.velocity === 'number' && Number.isFinite(s.velocity)
+      ? Math.max(0, Math.min(127, Math.round(s.velocity)))
+      : undefined;
 
-  return { degree, alter, beats: s.beats, gapBeats };
+  // Anything but the word 'chord' is a note, which is what a step said before it
+  // could say anything.
+  const isChord = s.kind === 'chord';
+  // The chord fields say nothing on a note, so they are not carried on one: a step
+  // that round-trips through here comes back the shape it claims to be.
+  const quality =
+    isChord && typeof s.quality === 'string' && s.quality in CHORD_INTERVALS
+      ? (s.quality as ChordQuality)
+      : undefined;
+  const inversion =
+    isChord && typeof s.inversion === 'number' && Number.isFinite(s.inversion)
+      ? Math.max(0, Math.min(3, Math.round(s.inversion))) || undefined
+      : undefined;
+
+  return {
+    kind: isChord ? 'chord' : undefined,
+    degree,
+    alter,
+    scale: readScaleRef(s.scale),
+    quality,
+    inversion,
+    // The same reader a project file's voicing goes through, so the two documents
+    // cannot come to disagree about what a hand-edited one means.
+    voicing: isChord ? readVoicing(s.voicing) : undefined,
+    velocity,
+    beats: s.beats,
+    gapBeats,
+  };
 }
 
 /** Read one formula, or null when nothing playable survives. */
@@ -110,6 +170,12 @@ function readFormula(raw: unknown, index: number): MelodicFormula | null {
     id: typeof f.id === 'string' && f.id ? f.id : newId('formula'),
     name: typeof f.name === 'string' && f.name ? f.name : `Formula ${index + 1}`,
     description: typeof f.description === 'string' ? f.description : undefined,
+    // A mode the reader cannot name is no mode, which hands the formula back to the
+    // palette — the same answer every file written before this gives.
+    homeType:
+      typeof f.homeType === 'string' && f.homeType in SCALE_INTERVALS
+        ? (f.homeType as ScaleType)
+        : undefined,
     steps,
   };
 }

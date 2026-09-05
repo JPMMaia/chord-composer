@@ -57,7 +57,7 @@ export const PALETTE_VELOCITY = 50;
 const DEFAULT_OCTAVE = 4;
 
 /** Chord-symbol suffix per quality. */
-const QUALITY_SUFFIX: Record<ChordQuality, string> = {
+export const QUALITY_SUFFIX: Record<ChordQuality, string> = {
   major: '',
   minor: 'm',
   diminished: '°',
@@ -94,8 +94,11 @@ export function formatChordSymbol(root: NoteName, quality: ChordQuality): string
  * Builds the roman numeral for a seventh chord from its triad numeral, so that a
  * dominant on the fifth degree reads 'V7' and the half-diminished leading-tone
  * chord reads 'viiø7' rather than 'vii°ø7'.
+ *
+ * Exported so a chord realized from a formula is named exactly as the palette block
+ * it stands for would be.
  */
-function seventhNumeral(triadNumeral: string, quality: ChordQuality): string {
+export function seventhNumeral(triadNumeral: string, quality: ChordQuality): string {
   const base = triadNumeral.replace(/[°+]/g, '');
   return `${base}${NUMERAL_SEVENTH_SUFFIX[quality] ?? '7'}`;
 }

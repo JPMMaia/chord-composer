@@ -481,6 +481,49 @@ describe('ChordTimeline', () => {
       expect(phrase()).toEqual(['60@0:0', '62@0:1', '60@0:2']);
     });
 
+    it('drops a chord step as a chord block, voiced as it was captured', () => {
+      const cadence: MelodicFormula = {
+        id: 'cadence',
+        name: 'Cadence',
+        steps: [
+          { kind: 'chord', degree: 0, beats: 1 },
+          { kind: 'chord', degree: 4, quality: 'dominant7', inversion: 2, beats: 1 },
+        ],
+      };
+      render(<ChordTimeline />);
+      dropFormulaAt(bars()[0].id, cadence, 0);
+
+      expect(segments().map(s => [s.kind, s.root, s.quality, s.inversion])).toEqual([
+        // No quality of its own, so it takes the one C major spells for the tonic.
+        ['chord', 'C', 'major', undefined],
+        ['chord', 'G', 'dominant7', 2],
+      ]);
+      expect(segments().map(s => s.chordSymbol)).toEqual(['C', 'G7']);
+      expect(segments().map(s => s.romanNumeral)).toEqual(['I', 'V7']);
+    });
+
+    it('carries a step’s own key through the drop, transposed with the rest', () => {
+      const shift: MelodicFormula = {
+        id: 'shift',
+        name: 'Shift',
+        steps: [
+          { degree: 0, beats: 1 },
+          { degree: 1, scale: { rootOffset: 2, type: 'naturalMinor' }, beats: 1 },
+        ],
+      };
+      editorStore.setState({ paletteScale: { root: 'G', type: 'major' } });
+      render(<ChordTimeline />);
+      dropFormulaAt(bars()[0].id, shift, 0);
+
+      // G major then A natural minor: the borrowed key keeps its distance from the
+      // home key rather than staying in the one it was captured in.
+      expect(segments().map(s => s.pitch)).toEqual([67, 69]);
+      expect(segments().map(s => s.scale)).toEqual([
+        { root: 'G', type: 'major' },
+        { root: 'A', type: 'naturalMinor' },
+      ]);
+    });
+
     it('realizes the phrase in the palette’s key and register', () => {
       editorStore.setState({
         paletteScale: { root: 'A', type: 'naturalMinor' },

@@ -183,3 +183,221 @@ describe('newId', () => {
     expect(ids.size).toBe(50);
   });
 });
+
+describe('a step that names its own key or a chord', () => {
+  const modulating: FormulaLibrary = {
+    ...emptyLibrary('Modal'),
+    groups: [
+      {
+        id: 'g1',
+        name: 'Shifts',
+        formulas: [
+          {
+            id: 'shift',
+            name: 'Shift',
+            steps: [
+              { degree: 0, beats: 1 },
+              {
+                kind: 'chord',
+                degree: 1,
+                scale: { rootOffset: 2, type: 'naturalMinor' },
+                quality: 'dominant7',
+                inversion: 2,
+                voicing: { spacing: 'drop2' },
+                velocity: 72,
+                beats: 2,
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+
+  it('round-trips every field a step can carry', () => {
+    const read = deserializeLibrary(serializeLibrary(modulating));
+    expect(read.groups[0].formulas[0].steps).toEqual(modulating.groups[0].formulas[0].steps);
+  });
+
+  it('writes nothing new for a formula that names one key and no chords', () => {
+    // A library of plain melodic shapes must serialise exactly as it did before a
+    // step could say any of this, or every saved file would churn on open.
+    const text = serializeLibrary(library());
+    expect(text).not.toContain('"scale"');
+    expect(text).not.toContain('"kind"');
+    expect(text).not.toContain('"quality"');
+  });
+
+  it('drops a key it cannot resolve rather than the step that names it', () => {
+    const read = deserializeLibrary(
+      JSON.stringify({
+        groups: [
+          {
+            id: 'g',
+            name: 'G',
+            formulas: [
+              {
+                id: 'f',
+                name: 'F',
+                steps: [{ degree: 2, beats: 1, scale: { rootOffset: 3, type: 'wobbly' } }],
+              },
+            ],
+          },
+        ],
+      })
+    );
+    // The degree still names a note in the home key, which is a better answer than
+    // a scale invented out of a misspelling.
+    expect(read.groups[0].formulas[0].steps).toEqual([
+      { degree: 2, beats: 1, scale: undefined },
+    ]);
+  });
+
+  it('normalises a root offset that runs off either end of the octave', () => {
+    const step = (rootOffset: number) =>
+      deserializeLibrary(
+        JSON.stringify({
+          groups: [
+            {
+              id: 'g',
+              name: 'G',
+              formulas: [
+                { id: 'f', name: 'F', steps: [{ degree: 0, beats: 1, scale: { rootOffset, type: 'dorian' } }] },
+              ],
+            },
+          ],
+        })
+      ).groups[0].formulas[0].steps[0].scale;
+
+    expect(step(14)).toEqual({ rootOffset: 2, type: 'dorian' });
+    expect(step(-1)).toEqual({ rootOffset: 11, type: 'dorian' });
+  });
+
+  it('ignores chord fields on a step that is not a chord', () => {
+    const read = deserializeLibrary(
+      JSON.stringify({
+        groups: [
+          {
+            id: 'g',
+            name: 'G',
+            formulas: [
+              {
+                id: 'f',
+                name: 'F',
+                steps: [
+                  { degree: 0, beats: 1, quality: 'minor', inversion: 2, voicing: { spacing: 'open' } },
+                ],
+              },
+            ],
+          },
+        ],
+      })
+    );
+    expect(read.groups[0].formulas[0].steps[0]).toEqual({
+      kind: undefined,
+      degree: 0,
+      alter: undefined,
+      scale: undefined,
+      quality: undefined,
+      inversion: undefined,
+      voicing: undefined,
+      velocity: undefined,
+      beats: 1,
+      gapBeats: undefined,
+    });
+  });
+
+  it('keeps a chord step whose quality, inversion or velocity make no sense', () => {
+    const read = deserializeLibrary(
+      JSON.stringify({
+        groups: [
+          {
+            id: 'g',
+            name: 'G',
+            formulas: [
+              {
+                id: 'f',
+                name: 'F',
+                steps: [
+                  {
+                    kind: 'chord',
+                    degree: 0,
+                    beats: 1,
+                    quality: 'sparkly',
+                    inversion: -3,
+                    velocity: 900,
+                    voicing: 'nonsense',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      })
+    );
+    // A chord with no quality is the one its scale spells, which is a real answer.
+    expect(read.groups[0].formulas[0].steps[0]).toMatchObject({
+      kind: 'chord',
+      degree: 0,
+      beats: 1,
+      quality: undefined,
+      inversion: undefined,
+      velocity: 127,
+      voicing: undefined,
+    });
+  });
+});
+
+describe('the mode a formula is written in', () => {
+  const minor: FormulaLibrary = {
+    ...emptyLibrary('Modal'),
+    groups: [
+      {
+        id: 'g1',
+        name: 'Cadences',
+        formulas: [
+          {
+            id: 'i-VI',
+            name: 'i-VI',
+            homeType: 'naturalMinor',
+            steps: [
+              { kind: 'chord', degree: 0, beats: 1 },
+              { kind: 'chord', degree: 5, beats: 1 },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+
+  it('round-trips through a file', () => {
+    const read = deserializeLibrary(serializeLibrary(minor));
+    expect(read.groups[0].formulas[0].homeType).toBe('naturalMinor');
+  });
+
+  it('hands a mode it cannot name back to the palette', () => {
+    const read = deserializeLibrary(
+      JSON.stringify({
+        groups: [
+          {
+            id: 'g',
+            name: 'G',
+            formulas: [{ id: 'f', name: 'F', homeType: 'wobbly', steps: [{ degree: 0, beats: 1 }] }],
+          },
+        ],
+      })
+    );
+    expect(read.groups[0].formulas[0].homeType).toBeUndefined();
+  });
+
+  it('writes nothing for a formula that follows the palette', () => {
+    expect(serializeLibrary(library())).not.toContain('homeType');
+  });
+});
+
+describe('the library version', () => {
+  it('is written on everything this app saves', () => {
+    expect(emptyLibrary('x').version).toBe(FORMULA_LIBRARY_VERSION);
+    expect(FORMULA_LIBRARY_VERSION).toBe('1.1');
+  });
+});

@@ -47,9 +47,13 @@ const FLAT_TO_SEMITONE: Record<string, number> = {
 };
 
 /**
- * Resolves a root note string (including flat notation like 'Eb') to a semitone offset.
+ * The semitone a root note stands on, 0-11 (C=0), including flat spellings like 'Eb'.
+ *
+ * Exported because degree arithmetic outside this file needs it too: transposing a
+ * formula's scale reference by a root offset asks exactly this question, and a second
+ * copy of the table would be a second thing to keep in step.
  */
-function resolveRootSemitone(root: string): number {
+export function rootSemitone(root: string): number {
   const sharp = NOTE_TO_SEMITONE[root as NoteName];
   if (sharp !== undefined) return sharp;
   const flat = FLAT_TO_SEMITONE[root];
@@ -78,9 +82,9 @@ export function getScaleIntervals(type: ScaleType): number[] {
  * @returns Array of pitch classes in the scale.
  */
 export function getScalePitches(root: NoteName, type: ScaleType): number[] {
-  const rootSemitone = resolveRootSemitone(root);
+  const tonic = rootSemitone(root);
   const intervals = getScaleIntervals(type);
-  return intervals.map(interval => (rootSemitone + interval) % 12);
+  return intervals.map(interval => (tonic + interval) % 12);
 }
 
 /**
@@ -93,7 +97,7 @@ export function getScalePitches(root: NoteName, type: ScaleType): number[] {
  * @param pitchClass - The pitch class to measure (0=C, 1=C#, ..., 11=B).
  */
 export function degreeOffsetFromTonic(scale: Scale, pitchClass: number): number {
-  const tonic = resolveRootSemitone(scale.root);
+  const tonic = rootSemitone(scale.root);
   return (((pitchClass - tonic) % 12) + 12) % 12;
 }
 
@@ -106,7 +110,7 @@ export function degreeOffsetFromTonic(scale: Scale, pitchClass: number): number 
  * scale, so stepping and dropping land in the same place.
  */
 export function degreeRegisterShift(scale: Scale, pitchClass: number): 0 | 1 {
-  const tonic = resolveRootSemitone(scale.root);
+  const tonic = rootSemitone(scale.root);
   return tonic + degreeOffsetFromTonic(scale, pitchClass) >= 12 ? 1 : 0;
 }
 
@@ -215,7 +219,7 @@ export function segmentScale(segment: { scale?: Scale }, fallback: Scale): Scale
 /**
  * Formats a scale type enum into a human-readable label.
  */
-function formatScaleType(type: ScaleType): string {
+export function formatScaleType(type: ScaleType): string {
   const labels: Record<ScaleType, string> = {
     major: 'Major',
     naturalMinor: 'Minor',

@@ -9,6 +9,10 @@ import { formulaLibraryStore, type LoadedLibrary } from '@/store/formulaLibraryS
 import { FormulaLibraryProvider } from '@/context/formulaLibraryContext';
 import type { UseFormulaLibrariesResult } from '@/hooks/useFormulaLibraries';
 import { selectionStore } from '@/store/selectionStore';
+import { projectStore } from '@/store/projectStore';
+import { openTestPhrase, editedBars } from '../helpers/phrases';
+import { PHRASE_TRACK_KEY } from '@/engine/phrases';
+import type { ChordSegment } from '@/types/music';
 
 vi.mock('@/engine/refStorage', () => ({
   storeLibraryRefs: vi.fn(async () => {}),
@@ -209,6 +213,98 @@ describe('FormulaPalette', () => {
     selectionStore.setState({ selectedSegmentIds: ['a'] });
     renderPalette();
     expect(screen.getAllByTestId('formula-capture').at(-1)).toBeEnabled();
+  });
+
+  /** Put the given blocks in the open phrase's first bar and select them all. */
+  function selectBlocks(blocks: ChordSegment[]): void {
+    projectStore.getState().createProject();
+    const trackId = projectStore.getState().project!.tracks[0].id;
+    selectionStore.getState().selectTrack(trackId);
+    openTestPhrase(trackId);
+    const bars = editedBars();
+    bars[0].content[PHRASE_TRACK_KEY] = { chords: blocks, notes: [] };
+    selectionStore.setState({ selectedSegmentIds: blocks.map(b => b.id) });
+  }
+
+  it('captures blocks written in different keys, each in its own', () => {
+    // C4 in C major and D4 in D natural minor: the second names a key of its own,
+    // and a capture that read both in C major would lose the modulation.
+    selectBlocks([
+      {
+        id: 'a',
+        kind: 'note',
+        pitch: 60,
+        startBeat: 0,
+        duration: 1,
+        scale: { root: 'C', type: 'major' },
+      },
+      {
+        id: 'b',
+        kind: 'note',
+        pitch: 62,
+        startBeat: 1,
+        duration: 1,
+        scale: { root: 'D', type: 'naturalMinor' },
+      },
+    ]);
+    renderPalette();
+    fireEvent.click(screen.getByTestId('formula-capture'));
+
+    expect(screen.getByTestId('formula-editor')).toBeInTheDocument();
+    expect(screen.getByLabelText('Step 1 scale')).toHaveValue('');
+    expect(screen.getByLabelText('Step 2 scale')).toHaveValue('naturalMinor');
+    expect(screen.getByLabelText('Step 2 scale root')).toHaveValue('2');
+  });
+
+  it('captures a chord rather than reporting it as skipped', () => {
+    selectBlocks([
+      {
+        id: 'a',
+        kind: 'chord',
+        root: 'D',
+        quality: 'minor',
+        octave: 4,
+        startBeat: 0,
+        duration: 1,
+        scale: { root: 'C', type: 'major' },
+      },
+    ]);
+    renderPalette();
+    fireEvent.click(screen.getByTestId('formula-capture'));
+
+    expect(screen.getByLabelText('Step 1 kind')).toHaveValue('chord');
+    // A diatonic ii says nothing about its quality, so the key it lands in decides.
+    expect(screen.getByLabelText('Step 1 quality')).toHaveValue('');
+    expect(screen.queryByTestId('formula-editor-notice')).not.toBeInTheDocument();
+  });
+
+  it('marks a chord and a borrowed key on the chip', () => {
+    formulaLibraryStore.setState({ libraries: [], selectedLibraryId: null, selectedGroupId: null });
+    formulaLibraryStore.getState().addLibrary(
+      loadedLibrary('l1', 'Classic', 'g1', [
+        {
+          id: 'shift',
+          name: 'Shift',
+          steps: [
+            { degree: 0, beats: 1 },
+            {
+              kind: 'chord',
+              degree: 1,
+              quality: 'minor',
+              scale: { rootOffset: 2, type: 'naturalMinor' },
+              beats: 1,
+            },
+          ],
+        },
+      ])
+    );
+    renderPalette();
+
+    const chip = screen.getByTestId('formula-item-shift');
+    expect(chip).toHaveTextContent('0 [+1m]*');
+    // The keys it runs through, as they would read if it were dropped where the
+    // palette is standing.
+    expect(chip).toHaveAttribute('title', expect.stringContaining('D Minor'));
   });
 
   it('folds away, leaving only its toggle', () => {

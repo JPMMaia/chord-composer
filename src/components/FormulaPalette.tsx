@@ -1,13 +1,18 @@
 import React, { useMemo, useState } from 'react';
+import type { Scale } from '@/types/music';
 import {
   FORMULA_DRAG_TYPE,
   accidentalLabel,
   captureFormula,
+  formulaHomeScale,
   formulaLengthBeats,
+  resolveScaleRef,
   type MelodicFormula,
 } from '@/engine/formulas';
 import { newId } from '@/engine/formulaLibrary';
 import { getDiatonicChords } from '@/engine/chords';
+import { QUALITY_SUFFIX } from '@/engine/palette';
+import { getScaleName } from '@/engine/scales';
 import { editorStore } from '@/store/editorStore';
 import { formulaLibraryStore } from '@/store/formulaLibraryStore';
 import { editSurface, projectStore } from '@/store/projectStore';
@@ -16,16 +21,42 @@ import { useFormulaLibraryState } from '@/context/formulaLibraryContext';
 import { FormulaEditor } from '@/components/FormulaEditor';
 import { FormulaLibraryDialog } from '@/components/FormulaLibraryDialog';
 
-/** How a formula's shape reads under its name, e.g. '0 +1 +2♯ +1 0'. */
+/** How a formula's shape reads under its name, e.g. '0 +1 [+2♯m] +1* 0'. */
 function shapeLabel(formula: MelodicFormula): string {
   return formula.steps
     .map(step => {
       const degree = step.degree > 0 ? `+${step.degree}` : String(step.degree);
       // The accidental follows the degree so the numbers stay in one column and an
       // altered step is still recognisable at a glance.
-      return degree + accidentalLabel(step.alter ?? 0);
+      const named = degree + accidentalLabel(step.alter ?? 0);
+      // A chord is bracketed and a step in another key starred, so a progression and
+      // a modulation are both visible on the chip. Neither is spelled out: which
+      // chord and which key they come to is not known until the formula is dropped.
+      const shown =
+        step.kind === 'chord'
+          ? `[${named}${step.quality ? QUALITY_SUFFIX[step.quality] : ''}]`
+          : named;
+      return step.scale ? `${shown}*` : shown;
     })
     .join(' ');
+}
+
+/**
+ * The keys a formula would run through if it were dropped where the palette stands.
+ *
+ * Null when it stays in one *and* takes that one from the palette — a formula with
+ * nothing to explain. A formula that pins its own mode always says so, since that is
+ * the thing the palette's key no longer tells you.
+ */
+function scaleSummary(formula: MelodicFormula, palette: Scale): string | null {
+  const home = formulaHomeScale(formula, palette);
+  const named = new Map<string, string>();
+  for (const step of formula.steps) {
+    const scale = resolveScaleRef(home, step.scale);
+    named.set(`${scale.root}|${scale.type}`, getScaleName(scale.root, scale.type));
+  }
+  if (named.size > 1) return [...named.values()].join(' → ');
+  return formula.homeType ? [...named.values()][0] ?? null : null;
 }
 
 /** The strip's group select carries both ids, since group ids are unique per library. */
@@ -122,7 +153,7 @@ export const FormulaPalette: React.FC = () => {
       formula: captured.formula,
       notice:
         captured.skipped > 0
-          ? `${captured.skipped} chord ${captured.skipped === 1 ? 'block' : 'blocks'} skipped — a formula is one line at a time.`
+          ? `${captured.skipped} ${captured.skipped === 1 ? 'block' : 'blocks'} skipped — they name no pitch to write down.`
           : undefined,
     });
   };
@@ -252,7 +283,11 @@ export const FormulaPalette: React.FC = () => {
                   key={formula.id}
                   draggable
                   data-testid={`formula-item-${formula.id}`}
-                  title={formula.description}
+                  title={
+                    [formula.description, scaleSummary(formula, scale)]
+                      .filter(Boolean)
+                      .join(' · ') || undefined
+                  }
                   onDragStart={e => handleDragStart(e, formula)}
                   onDragEnd={() => setDraggingFormulaId(null)}
                   className="px-3 py-1 rounded-md text-sm cursor-grab active:cursor-grabbing select-none border transition-colors bg-purple-900/60 border-purple-700 text-purple-100 hover:bg-purple-800"

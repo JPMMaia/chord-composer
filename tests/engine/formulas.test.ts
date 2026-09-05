@@ -6,15 +6,29 @@ import {
   pitchDegree,
   pitchDegreeAlteration,
   realizeFormula,
+  resolveScaleRef,
+  scaleRefFrom,
+  segmentAnchorPitch,
   type MelodicFormula,
 } from '@/engine/formulas';
-import type { Bar, ChordSegment, Project, Scale, TimeSignature } from '@/types/music';
+import type {
+  Bar,
+  ChordQuality,
+  ChordSegment,
+  NoteName,
+  Project,
+  Scale,
+  TimeSignature,
+} from '@/types/music';
 import { soloContent, TEST_TRACK_ID } from '../helpers/tracks';
 
 const C_MAJOR: Scale = { root: 'C', type: 'major' };
 const A_MINOR: Scale = { root: 'A', type: 'naturalMinor' };
 const C_PENT: Scale = { root: 'C', type: 'pentatonicMajor' };
 const D_DORIAN: Scale = { root: 'D', type: 'dorian' };
+const D_MINOR: Scale = { root: 'D', type: 'naturalMinor' };
+const A_MINOR_SCALE: Scale = { root: 'A', type: 'naturalMinor' };
+const G_MAJOR: Scale = { root: 'G', type: 'major' };
 const TS_4_4: TimeSignature = { beatsPerMeasure: 4, beatUnit: 4 };
 
 /** Built here rather than fetched from a catalog: there is no catalog any more. */
@@ -343,7 +357,7 @@ describe('captureFormula', () => {
     expect(captured!.formula.steps.map(s => s.degree)).toEqual([0, 1]);
   });
 
-  it('skips chord blocks and says how many', () => {
+  it('skips a block that names no pitch at all, and says how many', () => {
     const chord: ChordSegment = {
       id: 'c',
       kind: 'chord',
@@ -417,5 +431,298 @@ describe('captureFormula', () => {
   it('answers null when the selection holds no notes at all', () => {
     const project = makeProject([bar(0, [])]);
     expect(captureFormula(project, project.bars, ['nope'], C_MAJOR, 'Empty', 'f')).toBeNull();
+  });
+});
+
+const chord = (
+  id: string,
+  root: NoteName,
+  quality: ChordQuality,
+  startBeat: number,
+  extra: Partial<ChordSegment> = {}
+): ChordSegment => ({
+  id,
+  kind: 'chord',
+  root,
+  quality,
+  octave: 4,
+  startBeat,
+  duration: 1,
+  scale: C_MAJOR,
+  ...extra,
+});
+
+// ---------------------------------------------------------------------------
+// The mode a formula is written in
+// ---------------------------------------------------------------------------
+
+const C_MINOR: Scale = { root: 'C', type: 'naturalMinor' };
+
+describe('the home mode', () => {
+  /** i, ♭VI (first inversion) and the IV of the major a fourth up — a real capture. */
+  const progression = (): ChordSegment[] => [
+    chord('a', 'C', 'minor', 0, { scale: C_MINOR, romanNumeral: 'i' }),
+    chord('b', 'G#', 'major', 1, { scale: C_MINOR, inversion: 1, romanNumeral: 'VI' }),
+    chord('c', 'F', 'major', 2, { scale: { root: 'F', type: 'major' }, inversion: 2 }),
+  ];
+
+  it('keeps a captured progression’s chords whatever mode the palette is in', () => {
+    // The bug this guards: the mode a formula was written in used to be thrown away,
+    // so a minor progression dropped with the palette on major came back as I-vi-IV
+    // with nothing to say it had changed.
+    const project = makeProject([bar(0, progression())]);
+    const captured = captureFormula(project, project.bars, ['a', 'b', 'c'], C_MAJOR, 'i-VI', 'f')!;
+    expect(captured.formula.homeType).toBe('naturalMinor');
+
+    const placed = realizeFormula(captured.formula, C_MAJOR, 4, 0);
+    expect(placed.map(s => `${s.segment.chordSymbol}/${s.segment.inversion ?? 0}`)).toEqual([
+      'Cm/0',
+      'G#/1',
+      'F/2',
+    ]);
+  });
+
+  it('transposes such a progression as one thing, mode and all', () => {
+    const project = makeProject([bar(0, progression())]);
+    const captured = captureFormula(project, project.bars, ['a', 'b', 'c'], C_MAJOR, 'i-VI', 'f')!;
+
+    // Dropped on F: the same shape a fourth up, still minor, still with its borrowed
+    // major a fourth above *that*.
+    const placed = realizeFormula(captured.formula, { root: 'F', type: 'major' }, 4, 0);
+    expect(placed.map(s => `${s.segment.chordSymbol}/${s.segment.inversion ?? 0}`)).toEqual([
+      'Fm/0',
+      'C#/1',
+      'A#/2',
+    ]);
+  });
+
+  it('leaves a plain melodic run free to retune to the palette', () => {
+    // Bare degrees mean the same steps of whatever scale they land in, so pinning a
+    // mode here would take away most of what a formula is for.
+    const project = makeProject([
+      bar(0, [note('a', 60, 0, 1, C_MAJOR), note('b', 64, 1, 1, C_MAJOR)]),
+    ]);
+    const captured = captureFormula(project, project.bars, ['a', 'b'], C_MAJOR, 'Third', 'f')!;
+    expect(captured.formula.homeType).toBeUndefined();
+    // Dropped on D dorian it is that scale's own third, exactly as it always was.
+    expect(realizeFormula(captured.formula, D_DORIAN, 4, 0).map(s => s.segment.pitch)).toEqual([
+      62, 65,
+    ]);
+  });
+
+  it('pins the mode for a modulating melody too, since its second key hangs off it', () => {
+    const project = makeProject([
+      bar(0, [note('a', 60, 0, 1, C_MAJOR), note('b', 62, 1, 1, D_MINOR)]),
+    ]);
+    const captured = captureFormula(project, project.bars, ['a', 'b'], C_MAJOR, 'Shift', 'f')!;
+    expect(captured.formula.homeType).toBe('major');
+  });
+
+  it('uses the palette’s root even when the mode is pinned', () => {
+    const project = makeProject([bar(0, progression())]);
+    const captured = captureFormula(project, project.bars, ['a', 'b', 'c'], C_MAJOR, 'i-VI', 'f')!;
+    // Only the mode is the formula's; the root is always the palette's choice.
+    expect(realizeFormula(captured.formula, G_MAJOR, 4, 0)[0].segment.chordSymbol).toBe('Gm');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Several keys in one formula
+// ---------------------------------------------------------------------------
+
+describe('scale references', () => {
+  it('resolves and names a scale as inverses of each other', () => {
+    for (let rootOffset = 0; rootOffset < 12; rootOffset++) {
+      const scale = resolveScaleRef(C_MAJOR, { rootOffset, type: 'naturalMinor' });
+      expect(scaleRefFrom(C_MAJOR, scale)).toEqual({ rootOffset, type: 'naturalMinor' });
+    }
+  });
+
+  it('names the home key as no reference at all, so nothing is written down', () => {
+    expect(scaleRefFrom(C_MAJOR, { root: 'C', type: 'major' })).toBeUndefined();
+    // Same root, different mode: still a key of its own.
+    expect(scaleRefFrom(C_MAJOR, { root: 'C', type: 'dorian' })).toEqual({
+      rootOffset: 0,
+      type: 'dorian',
+    });
+    expect(resolveScaleRef(C_MAJOR, undefined)).toEqual(C_MAJOR);
+  });
+});
+
+describe('capturing across keys', () => {
+  it('reads each block in its own key rather than flattening them onto the first', () => {
+    // C4 written in C major, D4 written in D natural minor: both are the tonic of
+    // the key they were written in, and a capture that read them both in C major
+    // would call the second one a plain second degree.
+    const project = makeProject([
+      bar(0, [note('a', 60, 0, 1, C_MAJOR), note('b', 62, 1, 1, D_MINOR)]),
+    ]);
+    const captured = captureFormula(project, project.bars, ['a', 'b'], C_MAJOR, 'Shift', 'f');
+
+    expect(captured!.formula.steps[0].scale).toBeUndefined();
+    expect(captured!.formula.steps[1].scale).toEqual({ rootOffset: 2, type: 'naturalMinor' });
+    // Dropped back where it came from, it is the same two pitches.
+    expect(realizeFormula(captured!.formula, C_MAJOR, 4, 0).map(s => s.segment.pitch)).toEqual([
+      60, 62,
+    ]);
+  });
+
+  it('transposes the whole shape, keys and all, when it is dropped elsewhere', () => {
+    const project = makeProject([
+      bar(0, [note('a', 60, 0, 1, C_MAJOR), note('b', 62, 1, 1, D_MINOR)]),
+    ]);
+    const captured = captureFormula(project, project.bars, ['a', 'b'], C_MAJOR, 'Shift', 'f');
+
+    // C major + D natural minor, dropped on G major, is G major + A natural minor:
+    // the second key keeps its distance from the first rather than staying put.
+    const placed = realizeFormula(captured!.formula, G_MAJOR, 4, 0);
+    expect(placed.map(s => s.segment.pitch)).toEqual([67, 69]);
+    expect(placed[0].segment.scale).toEqual(G_MAJOR);
+    expect(placed[1].segment.scale).toEqual(A_MINOR_SCALE);
+  });
+
+  it('stamps each block with the key it actually names, so a re-capture reads it back', () => {
+    const project = makeProject([
+      bar(0, [note('a', 60, 0, 1, C_MAJOR), note('b', 62, 1, 1, D_MINOR)]),
+    ]);
+    const first = captureFormula(project, project.bars, ['a', 'b'], C_MAJOR, 'Shift', 'f')!;
+
+    const placed = realizeFormula(first.formula, C_MAJOR, 4, 0);
+    const again = makeProject([
+      bar(
+        0,
+        placed.map((step, i) => ({
+          ...(step.segment as ChordSegment),
+          id: `r${i}`,
+          startBeat: step.offsetBeats,
+        }))
+      ),
+    ]);
+    const second = captureFormula(again, again.bars, ['r0', 'r1'], C_MAJOR, 'Shift', 'f')!;
+    expect(second.formula.steps).toEqual(first.formula.steps);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Chords
+// ---------------------------------------------------------------------------
+
+describe('capturing chords', () => {
+  it('reads a chord onto the same degree axis as a note', () => {
+    expect(segmentAnchorPitch(note('a', 60, 0))).toBe(60);
+    // A chord's root is its pitch: D4, the same note the palette voices a ii from.
+    expect(segmentAnchorPitch(chord('c', 'D', 'minor', 0))).toBe(62);
+    expect(segmentAnchorPitch({ id: 'x', kind: 'chord', duration: 1 })).toBeNull();
+  });
+
+  it('leaves a diatonic quality unwritten, so the chords follow the key they land in', () => {
+    const project = makeProject([
+      bar(0, [chord('a', 'C', 'major', 0), chord('b', 'D', 'minor', 1)]),
+    ]);
+    const captured = captureFormula(project, project.bars, ['a', 'b'], C_MAJOR, 'I-ii', 'f')!;
+    expect(captured.skipped).toBe(0);
+    expect(captured.formula.steps.map(s => s.quality)).toEqual([undefined, undefined]);
+
+    // I-ii in C major becomes I-ii in G major, not G-D.
+    const placed = realizeFormula(captured.formula, G_MAJOR, 4, 0);
+    expect(placed.map(s => [s.segment.root, s.segment.quality])).toEqual([
+      ['G', 'major'],
+      ['A', 'minor'],
+    ]);
+    expect(placed.map(s => s.segment.chordSymbol)).toEqual(['G', 'Am']);
+    expect(placed.map(s => s.segment.romanNumeral)).toEqual(['I', 'ii']);
+  });
+
+  it('writes a borrowed quality down, so it stays borrowed wherever it is dropped', () => {
+    // A major chord on the second degree of C major is not what the key spells.
+    const project = makeProject([
+      bar(0, [chord('a', 'C', 'major', 0), chord('b', 'D', 'major', 1)]),
+    ]);
+    const captured = captureFormula(project, project.bars, ['a', 'b'], C_MAJOR, 'V/V', 'f')!;
+    expect(captured.formula.steps.map(s => s.quality)).toEqual([undefined, 'major']);
+
+    const placed = realizeFormula(captured.formula, G_MAJOR, 4, 0);
+    expect(placed.map(s => [s.segment.root, s.segment.quality])).toEqual([
+      ['G', 'major'],
+      ['A', 'major'],
+    ]);
+  });
+
+  it('carries inversion, voicing and velocity through unchanged', () => {
+    const voicing = {
+      spacing: 'drop2' as const,
+      break: { mode: 'strum' as const, spreadBeats: 0.1, direction: 'up' as const },
+    };
+    const project = makeProject([
+      bar(0, [
+        chord('a', 'C', 'major', 0),
+        chord('b', 'G', 'dominant7', 1, { inversion: 2, voicing, velocity: 72 }),
+      ]),
+    ]);
+    const captured = captureFormula(project, project.bars, ['a', 'b'], C_MAJOR, 'Cadence', 'f')!;
+    expect(captured.formula.steps[1]).toMatchObject({
+      kind: 'chord',
+      degree: 4,
+      // A seventh is never the diatonic triad, so it is always written down.
+      quality: 'dominant7',
+      inversion: 2,
+      voicing,
+      velocity: 72,
+    });
+
+    const placed = realizeFormula(captured.formula, C_MAJOR, 4, 0);
+    expect(placed[1].segment).toMatchObject({
+      kind: 'chord',
+      root: 'G',
+      quality: 'dominant7',
+      inversion: 2,
+      octave: 4,
+      voicing,
+      velocity: 72,
+      chordSymbol: 'G7',
+      romanNumeral: 'V7',
+    });
+  });
+
+  it('captures notes and chords together, keeping their order and rhythm', () => {
+    const project = makeProject([
+      bar(0, [
+        note('n1', 60, 0, 0.5),
+        chord('c1', 'F', 'major', 1),
+        note('n2', 64, 2.5, 0.5),
+      ]),
+    ]);
+    const captured = captureFormula(project, project.bars, ['c1', 'n2', 'n1'], C_MAJOR, 'Mix', 'f')!;
+    expect(captured.formula.steps.map(s => [s.kind, s.degree, s.beats, s.gapBeats])).toEqual([
+      [undefined, 0, 0.5, 0.5],
+      ['chord', 3, 1, 0.5],
+      [undefined, 2, 0.5, undefined],
+    ]);
+    // And back where it came from, it is the same three blocks again.
+    const placed = realizeFormula(captured.formula, C_MAJOR, 4, 0);
+    expect(placed.map(s => [s.segment.kind, s.segment.pitch ?? s.segment.root])).toEqual([
+      ['note', 60],
+      ['chord', 'F'],
+      ['note', 64],
+    ]);
+  });
+
+  it('reads a chord in the key its own block was written in', () => {
+    const project = makeProject([
+      bar(0, [
+        chord('a', 'C', 'major', 0),
+        chord('b', 'D', 'minor', 1, { scale: D_MINOR }),
+      ]),
+    ]);
+    const captured = captureFormula(project, project.bars, ['a', 'b'], C_MAJOR, 'Shift', 'f')!;
+    expect(captured.formula.steps[1].scale).toEqual({ rootOffset: 2, type: 'naturalMinor' });
+    // D minor's own tonic triad is minor, so there is nothing to write down for it.
+    expect(captured.formula.steps[1].quality).toBeUndefined();
+    expect(
+      realizeFormula(captured.formula, C_MAJOR, 4, 0).map(s => [s.segment.root, s.segment.quality])
+    ).toEqual([
+      ['C', 'major'],
+      ['D', 'minor'],
+    ]);
   });
 });

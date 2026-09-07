@@ -29,6 +29,7 @@ import { usePlaybackShortcuts } from '@/hooks/usePlaybackShortcuts';
 import { useRecordShortcuts } from '@/hooks/useRecordShortcuts';
 import { useMidiInput } from '@/hooks/useMidiInput';
 import { useTouchpadExpression } from '@/hooks/useTouchpadExpression';
+import { useRecordExtend } from '@/hooks/useRecordExtend';
 import { useRecordSession } from '@/hooks/useRecordSession';
 import { useFollowPlayhead } from '@/hooks/useFollowPlayhead';
 import { useFileIO } from '@/hooks/useFileIO';
@@ -408,6 +409,12 @@ function App() {
     ensureAudio,
     originBeat: surfaceOriginBeat,
   });
+
+  // Reaching the end of the phrase while recording lengthens it rather than looping
+  // back to the top. Declared *above* the record session on purpose: effect cleanups
+  // run in that order, so the bars an abandoned take reached for are given back while
+  // the pass is still open, and go with it under one Ctrl+Z.
+  useRecordExtend(recordArmed && isPlaying, playheadBeat);
 
   // Armed and rolling is one take, and one undo step: Ctrl+Z during it scraps the
   // whole take rather than the last block of it.

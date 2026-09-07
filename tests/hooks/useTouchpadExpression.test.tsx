@@ -70,6 +70,23 @@ function move(movementY: number) {
   });
 }
 
+/**
+ * Tap the perform key, on the window as a shortcut with no focus arrives.
+ *
+ * `on` is for the one case that has to come from somewhere else: a key typed into a
+ * field, which reaches the window by bubbling and must be ignored there.
+ */
+const press = (init: KeyboardEventInit = {}, on: EventTarget = window) =>
+  act(() => {
+    on.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', bubbles: true, ...init }));
+  });
+
+/** Let the key up. Nothing should come of it — the gesture latches. */
+const release = () =>
+  act(() => {
+    window.dispatchEvent(new KeyboardEvent('keyup', { key: 'g', bubbles: true }));
+  });
+
 /** Song position in seconds, driven by the test. 120 BPM, so a beat is half a second. */
 let songTime = 0;
 const beatsIn = (beats: number) => {
@@ -131,7 +148,7 @@ describe('performing', () => {
     expect(sent).toEqual([]);
   });
 
-  it('drives the assigned controller while the gesture is held', () => {
+  it('drives the assigned controller while the gesture is running', () => {
     projectStore.getState().setTrackTouchpadTarget(trackId(), CC11);
     const { result } = mount();
 
@@ -204,6 +221,100 @@ describe('performing', () => {
 
     expect(ensureAudio).toHaveBeenCalled();
     expect(sent).toEqual([]);
+  });
+});
+
+describe('the perform key', () => {
+  beforeEach(() => {
+    projectStore.getState().setTrackTouchpadTarget(trackId(), CC11);
+  });
+
+  it('enters the gesture on a tap', () => {
+    const { result } = mount();
+
+    press();
+    expect(result.current.performing).toBe(true);
+
+    move(-FULL_THROW_PX / 2);
+    expect(sent).toEqual([{ target: CC11, value: 1 }]);
+  });
+
+  it('stays in it once the key is let go — the point of the latch', () => {
+    const { result } = mount();
+
+    press();
+    release();
+
+    expect(result.current.performing).toBe(true);
+    move(-FULL_THROW_PX / 2);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('leaves on the next tap, writing what was played', () => {
+    const { phraseId } = openTestPhrase(trackId(), 2);
+    projectStore.getState().setTrackTouchpadTarget(trackId(), CC11);
+    editorStore.setState({ recordArmed: true });
+    const { result } = mount();
+
+    press();
+    beatsIn(0.5);
+    move(-40);
+    press();
+
+    expect(result.current.performing).toBe(false);
+    expect(recorded(phraseId).map(p => p.beat)).toEqual([0.5]);
+  });
+
+  it('ignores the auto-repeat of a key held down', () => {
+    // Or the OS would toggle the lock at the repeat rate for as long as `G` is down.
+    const { result } = mount();
+
+    press();
+    press({ repeat: true });
+    press({ repeat: true });
+
+    expect(result.current.performing).toBe(true);
+  });
+
+  it('leaves it alone when the key is typed into a field', () => {
+    const { result } = mount();
+    const field = document.createElement('input');
+    document.body.appendChild(field);
+
+    press({}, field);
+    expect(result.current.performing).toBe(false);
+
+    field.remove();
+  });
+
+  it('leaves it alone when the key is part of a shortcut', () => {
+    const { result } = mount();
+
+    press({ ctrlKey: true });
+    press({ metaKey: true });
+    press({ altKey: true });
+
+    expect(result.current.performing).toBe(false);
+  });
+
+  it('does not enter for an instrument with nothing assigned', () => {
+    projectStore.getState().setTrackTouchpadTarget(trackId(), null);
+    const { result } = mount();
+
+    press();
+    expect(result.current.performing).toBe(false);
+  });
+
+  it('still leaves when the assignment is taken away mid-gesture', () => {
+    // Leaving must not depend on the assignment, or unassigning the controller would
+    // strand a locked cursor with no key left to release it.
+    const { result } = mount();
+
+    press();
+    act(() => projectStore.getState().setTrackTouchpadTarget(trackId(), null));
+    press();
+
+    expect(result.current.performing).toBe(false);
   });
 });
 
@@ -321,22 +432,9 @@ describe('recording', () => {
     expect(recorded(phraseId).map(p => p.beat)).toEqual([0.5]);
   });
 
-  it('ends a gesture begun on the button when the pointer comes up anywhere', () => {
-    // The press is swallowed by the lock, so the release lands on the locked element
-    // rather than on the button that started it.
-    projectStore.getState().setTrackTouchpadTarget(trackId(), CC11);
-    const { result } = mount();
-
-    act(() => result.current.begin(true));
-    expect(result.current.performing).toBe(true);
-
-    act(() => {
-      document.body.dispatchEvent(new MouseEvent('pointerup', { bubbles: true }));
-    });
-    expect(result.current.performing).toBe(false);
-  });
-
-  it('leaves a gesture begun from the keyboard alone on a pointer release', () => {
+  it('survives the pointer release that started it, however it was begun', () => {
+    // The press on the button is swallowed by the lock, so its release lands on the
+    // locked element. The gesture latches, so that release means nothing to it.
     projectStore.getState().setTrackTouchpadTarget(trackId(), CC11);
     const { result } = mount();
 

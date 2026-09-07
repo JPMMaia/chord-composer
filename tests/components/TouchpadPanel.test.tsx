@@ -122,21 +122,30 @@ describe('TouchpadPanel', () => {
     expect((performButton() as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it('enters the gesture when Perform is held, and leaves the release to the hook', () => {
-    // Once the lock is taken every mouse event targets the locked element, so this
-    // button never sees the `pointerup` — `begin(true)` is what says so.
+  it('starts the gesture when Perform is pressed', () => {
     projectStore.getState().setTrackTouchpadTarget(trackId(), { kind: 'cc', controller: 11 });
     const touchpad = gesture();
     show({ touchpad });
 
     fireEvent.pointerDown(performButton());
-    expect(touchpad.begin).toHaveBeenCalledWith(true);
+    expect(touchpad.begin).toHaveBeenCalledWith();
+  });
+
+  it('reports the latch, and says how to get back out of it', () => {
+    // Once the lock is taken every mouse event targets the locked element, so this
+    // button is unreachable by mouse until the gesture ends — the label is the only
+    // place the way out can be said.
+    projectStore.getState().setTrackTouchpadTarget(trackId(), { kind: 'cc', controller: 11 });
+    show({ touchpad: gesture({ performing: true, controllerValue: 118 }) });
+
+    expect(performButton().getAttribute('aria-pressed')).toBe('true');
+    expect(performButton().textContent).toContain('G to stop');
   });
 
   it('shows the live value while performing, since the cursor is gone', () => {
     projectStore.getState().setTrackTouchpadTarget(trackId(), { kind: 'cc', controller: 11 });
     show({ touchpad: gesture({ performing: true, controllerValue: 118 }) });
 
-    expect(performButton().textContent).toBe('Perform 118');
+    expect(performButton().textContent).toContain('118');
   });
 });

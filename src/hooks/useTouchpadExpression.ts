@@ -19,7 +19,7 @@ import type { AutomationPoint, AutomationTarget } from '@/types/music';
  * widget the finger has to stay inside, and what stops the cursor sailing onto another
  * monitor halfway through a glissando.
  *
- * Like the MIDI keyboard, holding the gesture always *sounds*: stopped or playing,
+ * Like the MIDI keyboard, the gesture always *sounds*: stopped or playing,
  * armed or not, because trying a control out is how it gets set up. Arming decides only
  * whether what is played is also written — into an ordinary automation lane on the open
  * phrase, named by the same target the finger is driving.
@@ -43,11 +43,14 @@ const DISPLAY_MS = 50;
  */
 const INITIAL_VALUE = 0.5;
 
-/** The key held to perform. `Space` is play/stop, `r` arms, `1`-`9` are the palette. */
+/**
+ * The key that toggles performing. `Space` is play/stop, `r` arms, `1`-`9` are the
+ * palette.
+ */
 const PERFORM_KEY = 'g';
 
 export interface TouchpadExpression {
-  /** Whether the gesture is being held right now — the cursor is locked and hidden. */
+  /** Whether the gesture is running right now — the cursor is locked and hidden. */
   performing: boolean;
   /** What the finger is currently saying, 0-127, for display while the cursor is gone. */
   controllerValue: number;
@@ -57,14 +60,13 @@ export interface TouchpadExpression {
    */
   target: AutomationTarget | null;
   /**
-   * Enter the gesture, for a pointer user who cannot hold a key and move at once.
+   * Enter the gesture, for a pointer user who would rather click than reach for `G`.
    *
-   * `untilPointerUp` is what a button held down passes. It has to be said here rather
-   * than handled by the button, because once the lock is taken every mouse event
-   * targets the locked element instead of the button — so the button's own
-   * `pointerup` never arrives, and a gesture begun on it would stick until Escape.
+   * There is no matching "hold" form, and no way to leave through the same button:
+   * once the lock is taken every mouse event targets the locked element instead of the
+   * button, so a click can only ever start one. `G` and Escape are the ways out.
    */
-  begin: (untilPointerUp?: boolean) => void;
+  begin: () => void;
   /** Leave it. Idempotent — the browser can also end a lock on its own. */
   end: () => void;
 }
@@ -289,20 +291,8 @@ export function useTouchpadExpression({
     };
   }, [performing]);
 
-  const begin = useCallback((untilPointerUp: boolean = false) => {
+  const begin = useCallback(() => {
     if (document.pointerLockElement) return;
-
-    if (untilPointerUp) {
-      // One-shot, and on the window: the press that started this is about to be
-      // swallowed by the lock, so the release has to be caught wherever it lands.
-      window.addEventListener(
-        'pointerup',
-        () => {
-          if (document.pointerLockElement) document.exitPointerLock();
-        },
-        { once: true }
-      );
-    }
 
     const element = document.body;
     // `unadjustedMovement` takes the OS pointer acceleration out, so the same finger
@@ -336,8 +326,10 @@ export function useTouchpadExpression({
     if (document.pointerLockElement) document.exitPointerLock();
   }, []);
 
-  // Holding a key to perform, so the other hand stays on the touchpad. Ignored while
-  // typing, like every other single-key shortcut in the app.
+  // A key that latches the gesture, so the other hand stays on the touchpad for the
+  // whole of a pass rather than pinning a finger to `G` — and so an accidental release
+  // cannot cut a curve off halfway. Ignored while typing, like every other single-key
+  // shortcut in the app.
   useEffect(() => {
     const typing = (e: KeyboardEvent): boolean => {
       const el = e.target as HTMLElement | null;
@@ -352,25 +344,29 @@ export function useTouchpadExpression({
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() !== PERFORM_KEY) return;
-      // `e.repeat` because holding the key is the gesture: the auto-repeat that follows
-      // is the OS talking, not a second press.
+      // `e.repeat` because a held key is still one press: the auto-repeat that follows
+      // is the OS talking, and acting on it would toggle the lock at the repeat rate.
       if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || typing(e)) return;
-      if (!target) return;
 
       e.preventDefault();
+
+      // The lock rather than `performing`, which is a render behind it, and rather than
+      // a latch flag of our own — see `handleLockChange`.
+      if (document.pointerLockElement) {
+        end();
+        return;
+      }
+
+      // Checked only on the way in. Leaving must not depend on the assignment, or
+      // unassigning the controller mid-gesture — or selecting an instrument that has
+      // none — would strand a locked cursor this key could no longer release.
+      if (!target) return;
       begin();
     };
 
-    const handleKeyUp = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() !== PERFORM_KEY) return;
-      end();
-    };
-
     window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
     };
   }, [begin, end, target]);
 

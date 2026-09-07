@@ -22,6 +22,9 @@ interface TouchpadPanelProps {
  * at a time is a poor imitation of making it, however good it is at correcting it
  * afterwards.
  *
+ * The gesture latches rather than being held: `G` starts it and `G` ends it, so a long
+ * pass does not pin a finger to a key that only has to slip once to cut the curve off.
+ *
  * The assignment is per instrument, and is why this is a field rather than a button:
  * a harp's glissando is CC 11, a string library's dynamics are CC 1, and the finger
  * should follow whichever instrument is selected without anything being rebound.
@@ -95,7 +98,7 @@ export const TouchpadPanel: React.FC<TouchpadPanelProps> = ({
           setController(e.target.value === '' || !Number.isFinite(next) ? null : next);
         }}
         // Or the timeline's shortcuts would read the digits as commands — and `g`
-        // would start a gesture instead of being typed.
+        // would toggle a gesture instead of being typed.
         onKeyDown={e => e.stopPropagation()}
         className="w-14 shrink-0 bg-gray-700 border border-gray-600 rounded text-gray-300 px-1 py-0.5 focus:outline-none focus:border-indigo-500"
       />
@@ -123,26 +126,28 @@ export const TouchpadPanel: React.FC<TouchpadPanelProps> = ({
         {active ? 'Assigned' : 'Assign'}
       </button>
 
-      {/* Held rather than clicked: the value follows the finger for as long as the
-          gesture lasts, and a click would have nothing to hold. The button is here for
-          the same reason a play button is, next to the spacebar that does it — and it
-          is the one place the live value can be read once the cursor is gone.
-          The release is the hook's to catch, not this button's: once the lock is taken
-          every mouse event targets the locked element, so no `pointerup` ever reaches
-          here. */}
+      {/* Starts the gesture, and only starts it. The button is here for the same reason
+          a play button is, next to the spacebar that does it — and it is the one place
+          the live value can be read once the cursor is gone. It cannot be the way back
+          out, though: once the lock is taken every mouse event targets the locked
+          element, so no press ever reaches here again. `G` and Escape are the ways out,
+          which is why the label says so while the gesture is running. */}
       <button
         type="button"
         disabled={!assigned}
+        aria-pressed={performing}
         onPointerDown={e => {
           // Or the press would move focus and the lock would be requested against a
           // button that is about to lose it.
           e.preventDefault();
-          touchpad?.begin(true);
+          touchpad?.begin();
         }}
         title={
-          assigned
-            ? 'Hold G, or hold this, and move the touchpad up and down'
-            : 'Assign a controller first'
+          !assigned
+            ? 'Assign a controller first'
+            : performing
+              ? 'Performing — press G or Escape to stop'
+              : 'Press G, or click this, and move the touchpad up and down'
         }
         className={`shrink-0 px-2 py-0.5 rounded transition-colors disabled:bg-gray-800 disabled:text-gray-600 ${
           performing
@@ -150,7 +155,9 @@ export const TouchpadPanel: React.FC<TouchpadPanelProps> = ({
             : 'bg-gray-700 text-gray-200 hover:bg-gray-600'
         }`}
       >
-        {performing ? `Perform ${touchpad?.controllerValue ?? 0}` : 'Perform (G)'}
+        {performing
+          ? `Perform ${touchpad?.controllerValue ?? 0} — G to stop`
+          : 'Perform (G)'}
       </button>
 
       {unmapped && (

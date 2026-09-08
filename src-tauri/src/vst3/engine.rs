@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -34,6 +34,12 @@ const QUEUE_CAPACITY: usize = 4096;
 /// The largest block the audio device is allowed to ask for. Plugins are set up
 /// for this, and a device asking for more is split across several calls.
 const MAX_BLOCK: usize = 2048;
+
+/// How long `unload_all` waits for the audio thread to hand its plugins back.
+///
+/// Several blocks' worth at any sensible buffer size, and short enough that a
+/// stream which has already died costs the quit a blink rather than a hang.
+const RETIRE_WAIT: Duration = Duration::from_millis(200);
 
 /// A slot index in the audio thread's plugin table.
 type SlotId = u32;
@@ -376,6 +382,49 @@ impl Engine {
         }
         self.collect_retired();
         Ok(())
+    }
+
+    /// Unload every track's plugin, waiting for the audio thread to hand each
+    /// one back.
+    ///
+    /// The quit path, and the one place that wait matters. `unload` can afford
+    /// to leave a plugin sitting on the retire channel — there is always a
+    /// later call to collect it — but at shutdown there is no later call, and a
+    /// plugin left there is one whose `terminate` never runs.
+    pub fn unload_all(&self) {
+        self.components.lock().unwrap().clear();
+        self.controllers.lock().unwrap().clear();
+        self.cc_maps.lock().unwrap().clear();
+
+        let hosted: Vec<Hosted> = self
+            .slots
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, hosted)| hosted)
+            .collect();
+        let expected = hosted.len();
+        for hosted in hosted {
+            let _ = self.send(Command::Remove { slot: hosted.slot });
+        }
+
+        // Removals are drained at the top of a block, so nothing has come back
+        // yet. Bounded rather than a plain blocking wait: an audio thread that
+        // has already stopped would otherwise hang the quit it is part of.
+        let deadline = Instant::now() + RETIRE_WAIT;
+        let mut collected = 0;
+        while collected < expected {
+            {
+                let retired = self.retired.lock().unwrap();
+                while retired.try_recv().is_ok() {
+                    collected += 1;
+                }
+            }
+            if collected >= expected || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// The plugin's own opaque state — its preset, in effect.

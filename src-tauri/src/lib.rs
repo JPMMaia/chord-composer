@@ -9,7 +9,7 @@ pub mod vst3;
 /// additive, so a build with no plugins installed behaves exactly like the
 /// browser build.
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(vst3::Vst3State::default())
         // The native save/open dialogs. The browser build uses the File System Access
         // API for the same job; see `src/engine/projectFile.ts`.
@@ -51,6 +51,24 @@ pub fn run() {
             vst3::vst3_close_editor,
             vst3::vst3_editor_is_open,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running tauri application");
+
+    // Built and run in two steps only so that quitting has somewhere to hang
+    // teardown off. Plugins are not the webview's to clean up: their editors
+    // are native windows of this process and their DLLs outlive the page, so
+    // without this a quit leaves a frozen editor on screen with nothing left
+    // pumping its messages.
+    app.run(|app, event| {
+        // Not `Exit`: this fires while the event loop is still running, which
+        // is what detaching an editor and terminating a plugin both need.
+        if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            use tauri::Manager as _;
+
+            // Called directly, not through `run_on_main_thread`: this closure
+            // already runs on the main thread, and marshalling onto it from
+            // here would wait for a turn that never comes.
+            app.state::<vst3::Vst3State>().shutdown();
+        }
+    });
 }

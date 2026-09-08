@@ -174,6 +174,36 @@ fn unloading_a_track_silences_it() {
     assert_eq!(engine.take_peak(), 0.0);
 }
 
+// What quitting does. Every track at once, and — unlike `unload` — it waits for
+// the audio thread to hand the plugins back, because at shutdown there is no
+// later call to collect them and a plugin left uncollected is never terminated.
+#[test]
+fn unloading_everything_silences_every_track() {
+    const OTHER: &str = "second-track-under-test";
+
+    let Some(engine) = engine() else { return };
+
+    let path = fixture();
+    let cid = class_id(&path);
+    engine.load(TRACK, &path, &cid).expect("plugin loads");
+    engine.load(OTHER, &path, &cid).expect("second plugin loads");
+    engine.sync(0.0).expect("sync");
+    engine.schedule(TRACK, 60, 100, 0.03, 10.0).expect("schedule");
+    engine.schedule(OTHER, 64, 100, 0.03, 10.0).expect("schedule");
+
+    render_for(300);
+    assert!(engine.take_peak() > 0.0);
+
+    engine.unload_all();
+    assert!(!engine.is_loaded(TRACK));
+    assert!(!engine.is_loaded(OTHER));
+
+    render_for(200);
+    engine.take_peak();
+    render_for(200);
+    assert_eq!(engine.take_peak(), 0.0);
+}
+
 // Scheduling for a track with no plugin is not an error: the webview's pool can
 // dispatch a note a moment before the native side has finished loading.
 #[test]

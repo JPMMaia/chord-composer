@@ -104,3 +104,32 @@ fn opening_twice_does_not_make_a_second_window() {
     editor::close(TRACK2);
     assert!(!editor::is_open(TRACK2));
 }
+
+// The quit path. With nothing open it must be a no-op rather than a panic: an
+// app quit before a plugin was ever loaded goes through it too.
+#[test]
+fn closing_every_editor_with_none_open_is_harmless() {
+    editor::close_all();
+    assert!(!editor::is_open("never-opened"));
+}
+
+// What quitting with editors up now does, and the one behaviour that failing
+// leaves a frozen window on the user's screen.
+#[test]
+#[ignore = "needs a thread running a Win32 message loop; see the module comment"]
+fn closing_every_editor_closes_the_open_ones() {
+    const TRACK3: &str = "editor-track-3";
+    const TRACK4: &str = "editor-track-4";
+
+    let Some((plugin, name)) = plugin_with_editor() else {
+        return;
+    };
+    let controller = plugin.controller_handle().expect("checked above");
+
+    editor::open(TRACK3, &name, &controller).expect("editor opens");
+    editor::open(TRACK4, &name, &controller).expect("second editor opens");
+
+    editor::close_all();
+    assert!(!editor::is_open(TRACK3));
+    assert!(!editor::is_open(TRACK4));
+}

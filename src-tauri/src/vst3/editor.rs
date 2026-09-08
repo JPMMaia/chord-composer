@@ -304,3 +304,23 @@ pub fn is_open(track_id: &str) -> bool {
         .as_ref()
         .is_some_and(|map| map.contains_key(track_id))
 }
+
+/// Close every editor that is open. Main thread only.
+///
+/// The app's quit path: an editor window outlives the webview otherwise, with
+/// the plugin still attached to it and nothing pumping its messages.
+pub fn close_all() {
+    // Taken out in one go and detached outside the lock, as `close_by_hwnd`
+    // does: `detach` re-enters plugin code, which may pump messages and arrive
+    // back here through the window procedure.
+    let editors: Vec<OpenEditor> = OPEN
+        .lock()
+        .unwrap()
+        .as_mut()
+        .map(|map| map.drain().map(|(_, editor)| editor).collect())
+        .unwrap_or_default();
+
+    for editor in editors {
+        detach(editor);
+    }
+}

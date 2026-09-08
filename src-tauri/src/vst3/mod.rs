@@ -37,6 +37,8 @@ pub struct Vst3State {
     /// exist yet: a device can be chosen in a session that never loads a
     /// plugin, and the choice has to survive until one is.
     output_device: Mutex<Option<String>>,
+    /// Whether the quit teardown has already run, so that it runs once.
+    shut_down: std::sync::atomic::AtomicBool,
 }
 
 impl Vst3State {
@@ -83,6 +85,39 @@ impl Vst3State {
         match guard.as_ref() {
             Some(engine) => engine.set_output_device(name.as_deref()),
             None => Ok(()),
+        }
+    }
+
+    /// Close every plugin editor and tear every plugin down, at quit.
+    ///
+    /// Main thread only, and called from the app's exit path while the event
+    /// loop is still running. Both halves need that: a plugin being detached
+    /// from its window and one being terminated are each entitled to pump
+    /// messages, and a window destroyed after the loop has gone is the frozen
+    /// editor this exists to prevent.
+    ///
+    /// Idempotent, because an exit can be requested more than once.
+    pub fn shutdown(&self) {
+        use std::sync::atomic::Ordering;
+
+        if self.shut_down.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        // Editors before plugins, exactly as `vst3_unload` does it and for the
+        // reason its doc comment gives: the window holds an `IPlugView`
+        // belonging to a component that is about to be terminated.
+        #[cfg(windows)]
+        editor::close_all();
+
+        // Taken rather than borrowed: dropping the engine is what closes the
+        // switch channel, and that is what ends the thread owning the output
+        // stream. A `None` engine is a session that never loaded a plugin —
+        // deliberately not `with_engine`, which would start one at quit.
+        let engine = self.engine.lock().unwrap().take();
+        if let Some(engine) = engine {
+            engine.unload_all();
+            drop(engine);
         }
     }
 }

@@ -9,7 +9,7 @@ import { DEFAULT_VELOCITY, voicedPitches } from '@/engine/voicing';
 import { CHORD_INTERVALS, midiToNoteLabel } from '@/engine/chords';
 import { describePosition, formatNoteValue } from '@/engine/meterDisplay';
 import { DEFAULT_TIME_SIGNATURE, PIANO_ROLL_MAX_MIDI, PIANO_ROLL_MIN_MIDI } from '@/utils/constants';
-import { useRef, type ReactNode } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import type {
   ArpeggioPattern,
   ChordSegment,
@@ -61,6 +61,24 @@ const ARPEGGIO_PATTERNS: { value: ArpeggioPattern; label: string }[] = [
  * At 120bpm these run about 8ms to 31ms, the range of an actual strumming hand.
  */
 const STRUM_SPREADS = [1 / 64, 1 / 32, 1 / 16];
+
+/** Marks the spread dropdown's escape hatch; never a spread itself. */
+const CUSTOM_SPREAD = 'custom';
+
+/** The denominator a spread is named by: 1/32 of a beat reads as "32". */
+function spreadDenominator(spreadBeats: number): string {
+  return String(Math.round(1 / spreadBeats));
+}
+
+/**
+ * A spread named both ways.
+ *
+ * Stored in beats so it scales with the tempo, but a strum is easier to judge as
+ * a physical gesture, so name both.
+ */
+function describeSpread(spreadBeats: number, bpm: number): string {
+  return `1/${Math.round(1 / spreadBeats)} beat · ${Math.round((spreadBeats * 60000) / bpm)}ms`;
+}
 
 const FIELD_CLASS =
   'w-full px-2 py-1.5 text-sm bg-gray-700 border border-gray-600 rounded text-gray-200 focus:outline-none focus:border-indigo-500';
@@ -360,6 +378,7 @@ export function SegmentInspector() {
           )}
 
           <BreakSection
+            key={ids.join(',')}
             chords={chords.map(l => l.segment)}
             bpm={project.bpm}
             onChange={spec => setSegmentsBreak(ids, spec)}
@@ -578,6 +597,24 @@ function BreakSection({
   const spread = spec?.mode === 'strum' ? spec.spreadBeats : STRUM_SPREADS[1];
   const direction = spec?.mode === 'strum' ? spec.direction : 'up';
 
+  // null means the presets speak for the spread; a string is the denominator
+  // being typed. Kept as text so a half-typed or momentarily empty field is
+  // never committed to the store as a spread.
+  const [customDraft, setCustomDraft] = useState<string | null>(null);
+  // Sticky once opened, so typing a denominator that happens to name a preset
+  // does not snatch the field away mid-edit. A stored spread matching none of
+  // the presets opens it unasked — otherwise the select would name an option
+  // that is not the one playing.
+  const isCustom = customDraft !== null || !STRUM_SPREADS.includes(spread);
+
+  const typeCustom = (text: string) => {
+    setCustomDraft(text);
+    const denominator = Number(text);
+    if (Number.isFinite(denominator) && denominator > 0) {
+      onChange({ mode: 'strum', spreadBeats: 1 / denominator, direction });
+    }
+  };
+
   return (
     <Section label="Break">
       <div className="flex gap-1 mb-1" role="group" aria-label="Break">
@@ -624,24 +661,55 @@ function BreakSection({
           <select
             data-testid="strum-spread"
             aria-label="Strum spread"
-            value={spread}
-            onChange={e =>
+            value={isCustom ? CUSTOM_SPREAD : String(spread)}
+            onChange={e => {
+              if (e.target.value === CUSTOM_SPREAD) {
+                // Opening the field seeds it from the spread already playing;
+                // reaching for the control must not change what is heard.
+                setCustomDraft(spreadDenominator(spread));
+                return;
+              }
+              setCustomDraft(null);
               onChange({
                 mode: 'strum',
                 spreadBeats: Number(e.target.value),
                 direction,
-              })
-            }
+              });
+            }}
             className={FIELD_CLASS}
           >
             {STRUM_SPREADS.map(value => (
               <option key={value} value={value}>
-                {/* Stored in beats so it scales with the tempo, but a strum is
-                    easier to judge as a physical gesture, so name both. */}
-                {`1/${Math.round(1 / value)} beat · ${Math.round((value * 60000) / bpm)}ms`}
+                {describeSpread(value, bpm)}
               </option>
             ))}
+            <option value={CUSTOM_SPREAD}>Custom…</option>
           </select>
+          {isCustom && (
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={1}
+                step={1}
+                data-testid="strum-spread-custom"
+                aria-label="Custom strum spread denominator"
+                value={customDraft ?? spreadDenominator(spread)}
+                onChange={e => typeCustom(e.target.value)}
+                onBlur={() => {
+                  const denominator = Number(customDraft);
+                  // A field reading something other than what plays is worse
+                  // than one that snaps back, so restore the spread in force.
+                  if (!Number.isFinite(denominator) || denominator <= 0) {
+                    setCustomDraft(spreadDenominator(spread));
+                  }
+                }}
+                className={FIELD_CLASS}
+              />
+              <span className="text-xs text-gray-400 whitespace-nowrap">
+                {describeSpread(spread, bpm)}
+              </span>
+            </div>
+          )}
           <select
             data-testid="strum-direction"
             aria-label="Strum direction"

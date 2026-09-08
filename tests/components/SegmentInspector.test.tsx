@@ -246,6 +246,85 @@ describe('SegmentInspector', () => {
       const bar = bars().find(b => barChords(b, PHRASE_TRACK_KEY).some(c => c.id === segment.id))!;
       expect(barNotes(bar, PHRASE_TRACK_KEY).map(n => n.startBeat)).toEqual([0, 0.0625, 0.125]);
     });
+
+    it('opens the custom spread field on the value already playing, without changing it', () => {
+      const segment = placeAndSelect(chordSegment());
+      const { rerender } = render(<SegmentInspector />);
+
+      fireEvent.click(screen.getByTestId('break-strum'));
+      rerender(<SegmentInspector />);
+      fireEvent.change(screen.getByTestId('strum-spread'), { target: { value: '0.0625' } });
+      rerender(<SegmentInspector />);
+
+      fireEvent.change(screen.getByTestId('strum-spread'), { target: { value: 'custom' } });
+      rerender(<SegmentInspector />);
+
+      // Reaching for the control is not itself an edit.
+      expect(screen.getByTestId('strum-spread-custom')).toHaveValue(16);
+      expect(segmentOf(segment.id).voicing?.break).toEqual({
+        mode: 'strum',
+        spreadBeats: 0.0625,
+        direction: 'up',
+      });
+    });
+
+    it('strums at a spread the presets do not offer', () => {
+      const segment = placeAndSelect(chordSegment());
+      const { rerender } = render(<SegmentInspector />);
+
+      fireEvent.click(screen.getByTestId('break-strum'));
+      rerender(<SegmentInspector />);
+      fireEvent.change(screen.getByTestId('strum-spread'), { target: { value: 'custom' } });
+      rerender(<SegmentInspector />);
+
+      // Between the 1/32 and 1/64 presets, so unreachable before.
+      fireEvent.change(screen.getByTestId('strum-spread-custom'), { target: { value: '48' } });
+
+      expect(segmentOf(segment.id).voicing?.break).toEqual({
+        mode: 'strum',
+        spreadBeats: 1 / 48,
+        direction: 'up',
+      });
+      const bar = bars().find(b => barChords(b, PHRASE_TRACK_KEY).some(c => c.id === segment.id))!;
+      expect(barNotes(bar, PHRASE_TRACK_KEY).map(n => n.startBeat)).toEqual([
+        0,
+        1 / 48,
+        2 / 48,
+      ]);
+    });
+
+    it('reads a spread matching no preset as a custom one', () => {
+      placeAndSelect(
+        chordSegment({
+          voicing: { break: { mode: 'strum', spreadBeats: 1 / 48, direction: 'up' } },
+        })
+      );
+      render(<SegmentInspector />);
+
+      // The select must not claim a preset the chord is not playing.
+      expect(screen.getByTestId('strum-spread')).toHaveValue('custom');
+      expect(screen.getByTestId('strum-spread-custom')).toHaveValue(48);
+    });
+
+    it('leaves the spread alone while the custom field is half-typed', () => {
+      const segment = placeAndSelect(
+        chordSegment({
+          voicing: { break: { mode: 'strum', spreadBeats: 1 / 48, direction: 'up' } },
+        })
+      );
+      render(<SegmentInspector />);
+
+      const field = screen.getByTestId('strum-spread-custom');
+      fireEvent.change(field, { target: { value: '' } });
+      expect(segmentOf(segment.id).voicing?.break).toMatchObject({ spreadBeats: 1 / 48 });
+
+      fireEvent.change(field, { target: { value: '0' } });
+      expect(segmentOf(segment.id).voicing?.break).toMatchObject({ spreadBeats: 1 / 48 });
+
+      // Blurring an empty field restores what is actually playing.
+      fireEvent.blur(field);
+      expect(field).toHaveValue(48);
+    });
   });
 
   it('resets a voiced chord back to a plain block chord', () => {

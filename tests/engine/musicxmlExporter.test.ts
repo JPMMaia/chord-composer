@@ -82,6 +82,37 @@ describe('musicxmlExporter', () => {
       expect(xml).toContain('<kind text="major">major</kind>');
     });
 
+    it('writes an omitted tone as a subtracted degree', () => {
+      // Notation has a way to say "with no fifth"; without it a power chord would
+      // arrive in a score reader as the plain triad it is not.
+      const project = createTestProject();
+      const chords = project.bars[0].content[TEST_TRACK_ID].chords;
+      chords[0].tones = [0, 2];
+
+      const xml = projectToMusicXML(project);
+
+      expect(xml).toContain('<degree-value>3</degree-value>');
+      expect(xml).toContain('<degree-type>subtract</degree-type>');
+    });
+
+    it('writes a ninth as an added degree, since no kind names one', () => {
+      const project = createTestProject();
+      const chords = project.bars[0].content[TEST_TRACK_ID].chords;
+      chords[0].quality = 'maj7';
+      chords[0].tones = [0, 1, 2, 3, 4];
+
+      const xml = projectToMusicXML(project);
+
+      expect(xml).toContain('<kind text="maj7">major-seventh</kind>');
+      expect(xml).toContain('<degree-value>9</degree-value>');
+      expect(xml).toContain('<degree-type>add</degree-type>');
+    });
+
+    it('writes no degrees at all for a chord that names no stack', () => {
+      const xml = projectToMusicXML(createTestProject());
+      expect(xml).not.toContain('<degree>');
+    });
+
     it('writes notes as standard notation', () => {
       const project = createTestProject();
       const xml = projectToMusicXML(project);

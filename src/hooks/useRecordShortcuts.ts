@@ -189,15 +189,15 @@ export function useRecordShortcuts({
       const trackId = selectionStore.getState().selectedTrackId;
       if (!project || !trackId) return;
 
-      const { paletteScale, paletteMode, paletteOctave, recordArmed } = editorStore.getState();
-      const items = getPaletteItems(paletteScale, paletteMode, paletteOctave);
+      const { paletteScale, paletteSize, paletteOctave, recordArmed } = editorStore.getState();
+      const items = getPaletteItems(paletteScale, paletteSize, paletteOctave);
       if (items.length === 0) return;
       // Past the last degree the run keeps climbing rather than stopping: on a
       // seven-note scale `8` is `1` an octave up, and on a pentatonic one `6` is —
       // the same relationship either way, at whatever width the scale happens to be.
       const shift = Math.floor(degree / items.length);
       const item = shift
-        ? getPaletteItems(paletteScale, paletteMode, paletteOctave + shift)[degree % items.length]
+        ? getPaletteItems(paletteScale, paletteSize, paletteOctave + shift)[degree % items.length]
         : items[degree];
 
       const segment: ChordSegment = {

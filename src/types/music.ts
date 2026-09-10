@@ -53,6 +53,16 @@ export interface Scale {
  */
 export type SegmentKind = 'note' | 'chord';
 
+/**
+ * The highest chord tone a stack may reach: 0 root, 1 third, 2 fifth, 3 seventh,
+ * 4 ninth.
+ *
+ * Five is where a heptatonic scale's thirds start repeating what a doubling already
+ * says — an eleventh is the fourth degree an octave up — so it is the point past
+ * which a bigger stack stops being a different chord.
+ */
+export const MAX_CHORD_TONE = 4;
+
 /** How a chord's tones are spread across registers. Absent reads as 'close'. */
 export type SpacingPreset = 'close' | 'open' | 'drop2' | 'drop3';
 
@@ -130,11 +140,15 @@ export interface ChordSegment {
   /** MIDI pitch — only meaningful when kind === 'note'. */
   pitch?: number;
   /**
-   * Semitones this note sits off the scale degree it names. Note segments only.
+   * Semitones this block sits off the scale degree it names.
+   *
+   * On a note it is the pitch that moves; on a chord it is the *root*, so a ♭VI is
+   * the sixth degree flattened and needs no second way of being written — the same
+   * thing `FormulaStep.alter` has always meant.
    *
    * The pitch alone cannot say which degree a note *means*: a raised seventh of D
    * dorian and its tonic are both MIDI 60, and without this the arrow keys would step
-   * them to the same place. Absent means the note is the degree the scale spells,
+   * them to the same place. Absent means the block is the degree the scale spells,
    * which is every note written before formulas could name an accidental.
    */
   alter?: number;
@@ -156,6 +170,36 @@ export interface ChordSegment {
   root?: NoteName;
   inversion?: number;
   quality?: ChordQuality;
+  /**
+   * Which chord tones this block sounds, ascending, each in `0..MAX_CHORD_TONE`.
+   *
+   * The stack's *size* and its *shape* in one field: `[0]` is a single tone, `[0,1]`
+   * a third dyad, `[0,2]` a fifth dyad, `[0,1,2]` a triad, `[0,1,2,3,4]` a ninth,
+   * `[0,1,3,4]` a ninth with no fifth. Absent reads as the first
+   * `CHORD_INTERVALS[quality].length` tones — a triad or a seventh — which is what
+   * every block written before a stack could vary already was, so no saved project
+   * changes by a semitone.
+   *
+   * Always contains 0. The root is what a register, an inversion and a captured
+   * formula are all counted from, so a chord without one is a *voicing* — a tone
+   * pushed out of the way by `voicing.offsets` — rather than a stack.
+   *
+   * Shares its indices with `voicing.offsets` and `voicing.doublings`, which is what
+   * lets an offset written on the seventh stay on the seventh when the fifth beneath
+   * it is switched off.
+   */
+  tones?: number[];
+  /**
+   * The quality was chosen by hand, so a change of key or a step to another degree
+   * keeps it instead of re-deriving it from the scale.
+   *
+   * A flag rather than a comparison against the degree's diatonic quality, because
+   * the two are different questions: pinning Major on the I of C major writes the
+   * quality the scale would have written anyway, and a comparison would let the pin
+   * evaporate on the way to C minor. Absent means derived — every block written
+   * before a quality could be pinned, and still every block dropped from the palette.
+   */
+  qualityPinned?: boolean;
   /**
    * The key this block was written in — the scale its `romanNumeral` names a degree
    * of, and the one a change of key retunes it away from.

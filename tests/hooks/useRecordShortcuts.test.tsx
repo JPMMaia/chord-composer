@@ -95,7 +95,7 @@ describe('useRecordShortcuts', () => {
 
     editorStore.setState({
       paletteScale: { root: 'C', type: 'major' },
-      paletteMode: 'chords',
+      paletteSize: 3,
       paletteOctave: 4,
       recordArmed: true,
       recordQuantize: true,
@@ -179,8 +179,8 @@ describe('useRecordShortcuts', () => {
     expect(takes()).toEqual(['Em@1+2']);
   });
 
-  it('follows the palette into another mode and register', () => {
-    editorStore.getState().setPaletteMode('sevenths');
+  it('follows the palette into another size and register', () => {
+    editorStore.getState().setPaletteSize(4);
     editorStore.getState().setPaletteOctave(5);
     mount();
     press(2);
@@ -232,19 +232,19 @@ describe('useRecordShortcuts', () => {
   });
 
   it('wraps the degree past the end of the scale into the octave above', () => {
-    editorStore.setState({ paletteMode: 'notes' });
+    editorStore.getState().setPaletteSize(1);
     mount();
     press(8);
     release(8);
 
     // 8 is 1 an octave up: C4 is 60, so this is C5.
     expect(started).toEqual([72]);
-    expect(takes()).toEqual(['C5@0+1']);
+    expect(takes()).toEqual(['C@0+1']);
   });
 
   it('wraps at whatever width the scale actually has', () => {
     editorStore.getState().setPaletteScale({ root: 'C', type: 'pentatonicMajor' });
-    editorStore.setState({ paletteMode: 'notes' });
+    editorStore.getState().setPaletteSize(1);
     mount();
     // Five degrees, so 6 is the tonic an octave up rather than nothing at all.
     press(6);

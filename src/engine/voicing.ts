@@ -7,7 +7,8 @@ import type {
   SpacingPreset,
   ToneDoubling,
 } from '@/types/music';
-import { CHORD_INTERVALS, getDiatonicChords } from '@/engine/chords';
+import { segmentChordTones } from '@/engine/chords';
+import type { ChordTones } from '@/engine/chords';
 import { PIANO_ROLL_MAX_MIDI, PIANO_ROLL_MIN_MIDI } from '@/utils/constants';
 
 /**
@@ -23,12 +24,22 @@ import { PIANO_ROLL_MAX_MIDI, PIANO_ROLL_MIN_MIDI } from '@/utils/constants';
  * what every chord written before this module sounded like.
  */
 
+/** Re-exported so a caller voicing a chord needs only this module. */
+export type { ChordTones };
+
 /** One voice of a chord, still expressed as semitones above the chord root. */
 export interface VoicedTone {
-  /** Index into the root-position interval list: 0 root, 1 third, 2 fifth, 3 seventh. */
+  /** Which chord tone this is: 0 root, 1 third, 2 fifth, 3 seventh, 4 ninth. */
   tone: number;
   interval: number;
   /** True for a doubling copy rather than the chord tone itself. */
+  doubled: boolean;
+}
+
+/** One voice as it finally sounds, still naming the chord tone it belongs to. */
+export interface VoicedPitch {
+  tone: number;
+  pitch: number;
   doubled: boolean;
 }
 
@@ -57,19 +68,21 @@ const MAX_OFFSET_OCTAVES = 3;
  * Tone order is what an arpeggio's "as played" pattern means, and sorting is
  * cheap, so callers that want ascending pitch sort for themselves.
  *
- * @param intervals - Root-position semitone offsets, i.e. `CHORD_INTERVALS[quality]`.
+ * @param chord - The stack to voice, from `segmentChordTones`.
  * @param inversion - How many voices to lift, as `invertIntervals` counts them.
  * @param voicing - Absent means close position with no doubling.
  */
 export function voiceChord(
-  intervals: number[],
+  chord: ChordTones,
   inversion: number,
   voicing?: SegmentVoicing
 ): VoicedTone[] {
-  if (intervals.length === 0) return [];
+  if (chord.intervals.length === 0) return [];
 
-  const tones: VoicedTone[] = intervals.map((interval, tone) => ({
-    tone,
+  const tones: VoicedTone[] = chord.intervals.map((interval, position) => ({
+    // The tone this interval belongs to, which is only the same as its position
+    // while the stack has no gaps in it.
+    tone: chord.tones[position] ?? position,
     interval,
     doubled: false,
   }));
@@ -85,15 +98,18 @@ export function voiceChord(
   // A preset only ever seeds `offsets`, so explicit offsets win: they are what
   // the user last said, and a file carrying only a preset still voices correctly.
   const offsets = voicing?.offsets ?? spacingOffsets(tones, voicing?.spacing ?? 'close');
-  for (let i = 0; i < tones.length; i++) {
-    tones[i].interval += clampOffset(offsets[i]) * 12;
+  // By tone, not by position: an offset written on the seventh has to keep moving
+  // the seventh when the fifth below it is not sounding.
+  for (const voice of tones) {
+    voice.interval += clampOffset(offsets[voice.tone]) * 12;
   }
 
   for (const doubling of voicing?.doublings ?? []) {
-    const source = tones[doubling.tone];
+    const source = tones.find(t => t.tone === doubling.tone && !t.doubled);
     // A doubling can outlive the chord it was written for — switch a seventh to a
-    // triad and the seventh's doubling has nothing to copy. Drop it quietly.
-    if (!source || source.doubled) continue;
+    // triad, or simply omit the fifth, and the doubling has nothing to copy. Drop
+    // it quietly; toggling the tone back on brings the doubling back with it.
+    if (!source) continue;
     tones.push({
       tone: doubling.tone,
       interval: source.interval + clampOffset(doubling.octaves) * 12,
@@ -112,20 +128,27 @@ export function voiceChord(
  * rather than the root-position one, or drop-2 would move the wrong note in
  * every inversion but the first.
  *
+ * Indexed by `VoicedTone.tone` rather than by position, because `withSpacing`
+ * writes the result straight into `voicing.offsets` and `withToneOffset` then pads
+ * that same array by tone. If the two disagreed, a hand-tweak after a preset would
+ * land on the wrong voice.
+ *
  * @returns One offset per tone, indexed by `VoicedTone.tone`.
  */
 export function spacingOffsets(tones: VoicedTone[], preset: SpacingPreset): number[] {
-  const offsets = new Array<number>(tones.length).fill(0);
+  const size = tones.reduce((max, t) => Math.max(max, t.tone + 1), 0);
+  const offsets = new Array<number>(size).fill(0);
   if (preset === 'close' || tones.length === 0) return offsets;
 
   // Top voice first, so "nth from the top" is just an index.
   const fromTop = tones
-    .map((t, index) => ({ index, interval: t.interval }))
+    .filter(t => !t.doubled)
+    .map(t => ({ tone: t.tone, interval: t.interval }))
     .sort((a, b) => b.interval - a.interval);
 
   const drop = (nthFromTop: number) => {
     const voice = fromTop[nthFromTop];
-    if (voice) offsets[voice.index] = -1;
+    if (voice) offsets[voice.tone] = -1;
   };
 
   switch (preset) {
@@ -157,18 +180,18 @@ export function spacingOffsets(tones: VoicedTone[], preset: SpacingPreset): numb
  * `breakChord` among them, sort for themselves.
  *
  * @param baseMidi - MIDI number of the chord root in its chosen register.
- * @returns Pitches in tone order, within the piano roll's range, no duplicates.
+ * @returns Voices in tone order, within the piano roll's range, no duplicates.
  */
-export function voicedPitches(
-  intervals: number[],
+export function voicedVoices(
+  chord: ChordTones,
   inversion: number,
   baseMidi: number,
   voicing?: SegmentVoicing
-): number[] {
-  const pitches: number[] = [];
+): VoicedPitch[] {
+  const voices: VoicedPitch[] = [];
   const seen = new Set<number>();
 
-  for (const tone of voiceChord(intervals, inversion, voicing)) {
+  for (const tone of voiceChord(chord, inversion, voicing)) {
     const pitch = baseMidi + tone.interval;
     // Dropped rather than clamped: folding an out-of-range doubling back into
     // the roll would land it on a note the user did not ask for, usually a
@@ -178,10 +201,26 @@ export function voicedPitches(
     // would confuse the sampler and the MIDI export both.
     if (seen.has(pitch)) continue;
     seen.add(pitch);
-    pitches.push(pitch);
+    voices.push({ tone: tone.tone, pitch, doubled: tone.doubled });
   }
 
-  return pitches;
+  return voices;
+}
+
+/**
+ * The absolute MIDI pitches a chord segment sounds, in tone order.
+ *
+ * The pitch half of `voicedVoices`. A caller that needs to know *which* tone a
+ * pitch belongs to must use that instead: pitches are dropped here when they leave
+ * the roll or collide, so this list cannot be indexed by tone.
+ */
+export function voicedPitches(
+  chord: ChordTones,
+  inversion: number,
+  baseMidi: number,
+  voicing?: SegmentVoicing
+): number[] {
+  return voicedVoices(chord, inversion, baseMidi, voicing).map(v => v.pitch);
 }
 
 /**
@@ -297,7 +336,7 @@ export function withSpacing(
 ): ChordSegment {
   if (!isChord(segment)) return segment;
 
-  const tones = voiceChord(chordIntervals(segment, scale), segment.inversion ?? 0, {
+  const tones = voiceChord(segmentChordTones(segment, scale), segment.inversion ?? 0, {
     ...segment.voicing,
     // Seed from the chord as it sits before spacing, not as the previous preset
     // left it, or each click would compound on the last.
@@ -369,7 +408,7 @@ export function withInversion(
 ): ChordSegment {
   if (!isChord(segment)) return segment;
 
-  const size = chordIntervals(segment, scale).length;
+  const size = segmentChordTones(segment, scale).tones.length;
   if (size === 0) return segment;
 
   const wrapped = ((Math.floor(inversion) % size) + size) % size;
@@ -437,31 +476,6 @@ function withVoicing(segment: ChordSegment, voicing: SegmentVoicing): ChordSegme
   }
 
   return { ...segment, voicing: { spacing, offsets, doublings, break: voicing.break } };
-}
-
-/**
- * The chord's root-position intervals — its size is what inversions wrap around
- * and what a tone index has to be valid against.
- *
- * This resolves only the quality half of what `resolveSegmentChord` does; roots
- * and registers are no business of this module, and reaching for the full
- * version would make `chordOperations` and this file import each other.
- */
-function chordIntervals(segment: ChordSegment, scale: Scale): number[] {
-  const quality = segment.quality ?? qualityFromScale(segment, scale);
-  return CHORD_INTERVALS[quality] ?? CHORD_INTERVALS.major;
-}
-
-function qualityFromScale(segment: ChordSegment, scale: Scale) {
-  const match = segment.romanNumeral
-    ? getDiatonicChords(scale).find(c => bare(c.romanNumeral) === bare(segment.romanNumeral!))
-    : undefined;
-  return match?.quality ?? 'major';
-}
-
-/** Casing carries a numeral's quality; the symbols are decoration. */
-function bare(numeral: string): string {
-  return numeral.replace(/[°+]/g, '');
 }
 
 // ---------------------------------------------------------------------------

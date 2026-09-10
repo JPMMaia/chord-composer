@@ -19,6 +19,8 @@ import type {
   TrackContent,
   TrackGroup,
 } from '@/types/music';
+import { MAX_CHORD_TONE } from '@/types/music';
+import { CHORD_INTERVALS, readStackTones } from '@/engine/chords';
 import { barChords, barContent, getTotalBeats, isValidTimeSignature } from '@/engine/timeline';
 import {
   PHRASE_TRACK_KEY,
@@ -222,8 +224,28 @@ const LEGACY_TRACK_ID = 'track-legacy';
  * amount only the ear can find. Written only when non-zero, so an un-nudged
  * instrument serialises byte for byte as it did under 1.19, and a pre-1.20 file
  * reads back unnudged — which is what every project was before this.
+ *
+ * 1.21 let a block choose how many notes it stacks: each gained an optional
+ * `tones`, the chord-tone indices it sounds — 0 root, 1 third, 2 fifth, 3 seventh,
+ * 4 ninth — and an optional `qualityPinned` saying its quality was chosen by hand
+ * rather than derived from its key.
+ *
+ * `tones` replaces the old rule that a chord was a triad or a seventh according to
+ * how many intervals its quality happened to name. `[0,2]` is a fifth dyad, `[0]` a
+ * single tone, `[0,1,2,3,4]` a ninth, `[0,1,3,4]` a ninth with no fifth. It always
+ * contains the root, which is what a register and an inversion are counted from.
+ *
+ * The quality still names a triad or a seventh and nothing wider — the ninth is
+ * spelled by the key and never written down — so nothing that switches on a quality
+ * had to learn a new one.
+ *
+ * Both keys are written only when they say something their absence would not:
+ * `tones` when it differs from every tone of the quality, `qualityPinned` when it is
+ * true. So a project nobody has restacked serialises byte for byte as it did under
+ * 1.20, and a pre-1.21 file reads back as exactly the triad or seventh its quality
+ * already named.
  */
-export const SCHEMA_VERSION = '1.20';
+export const SCHEMA_VERSION = '1.21';
 
 /**
  * Validation error returned by validateProject.
@@ -274,6 +296,26 @@ const VALID_SCALE_TYPES = [
  * understands the other — which is what lets the pre-1.17 migration hand a song bar's
  * content straight to the same reader.
  */
+/**
+ * A segment's stack, or undefined when it says nothing the quality does not.
+ *
+ * The same discipline every optional key in this file follows: a value equal to what
+ * absence already means is not written, so a project that has never been restacked
+ * serialises byte for byte as it did under 1.20 and keeps its 1.20 meaning if it is
+ * ever opened by an older build.
+ */
+function writableTones(segment: ChordSegment): number[] | undefined {
+  const tones = segment.tones;
+  if (!Array.isArray(tones) || tones.length === 0) return undefined;
+
+  const quality = segment.quality;
+  const size = quality ? (CHORD_INTERVALS[quality]?.length ?? 3) : 3;
+  const isDefault =
+    tones.length === size && tones.every((tone, index) => tone === index);
+
+  return isDefault ? undefined : tones;
+}
+
 function serializeContent(content: Record<string, TrackContent>) {
   return Object.fromEntries(
     Object.entries(content).map(([key, trackContent]) => [
@@ -298,6 +340,13 @@ function serializeContent(content: Record<string, TrackContent>) {
           root: c.root,
           inversion: c.inversion,
           quality: c.quality,
+          // Written only when it says more than the quality already does, so a
+          // project nobody has restacked gains no bytes and round-trips exactly
+          // as it did under 1.20.
+          tones: writableTones(c),
+          // Likewise: absent means the quality was derived from the key, which
+          // is every block dropped from the palette.
+          qualityPinned: c.qualityPinned ? true : undefined,
           velocity: c.velocity,
           // The key this block is written in — a bar-level `scale` is no
           // longer written, so this is where a 1.8 file states its keys.
@@ -860,6 +909,10 @@ export function deserializeProject(json: string): Project {
           root: typeof c.root === 'string' ? (c.root as NoteName) : undefined,
           inversion: typeof c.inversion === 'number' ? c.inversion : 0,
           quality: typeof c.quality === 'string' ? (c.quality as ChordQuality) : undefined,
+          // Schema 1.20 and earlier had no stacks; an absent one reads as every
+          // tone of the quality, which is the triad or seventh those files meant.
+          tones: readStackTones(c.tones),
+          qualityPinned: c.qualityPinned === true ? true : undefined,
           // Schema 1.7 and earlier stated one key per bar. That is the key every
           // segment in the bar was written against, so it migrates down onto each
           // of them and the piece reads back identically.
@@ -1305,6 +1358,17 @@ export function validateProject(project: Project): ValidationResult {
         // the first lane and always fine.
         if (c.lane !== undefined && (!Number.isInteger(c.lane) || c.lane < 0)) {
           errors.push(`Phrase "${phrase.name}" bar ${i}, chord ${j}: invalid lane "${c.lane}".`);
+        }
+        // A stack names chord tones, so anything outside 0..MAX_CHORD_TONE names
+        // none of them. Absent is every tone of the quality and always fine.
+        if (
+          c.tones !== undefined &&
+          (c.tones.length === 0 ||
+            !c.tones.every(t => Number.isInteger(t) && t >= 0 && t <= MAX_CHORD_TONE))
+        ) {
+          errors.push(
+            `Phrase "${phrase.name}" bar ${i}, chord ${j}: invalid tones "${c.tones}".`
+          );
         }
       }
     }

@@ -8,10 +8,21 @@ import type {
   TimeSignature,
 } from '@/types/music';
 import { generateId } from '@/utils/id';
+import type { SeventhColour, TriadColour } from '@/engine/chords';
+import { MAX_CHORD_TONE } from '@/types/music';
 import {
   CHORD_INTERVALS,
   getDiatonicChords,
   getDiatonicSevenths,
+  composeQuality,
+  degreeOfSegment,
+  diatonicChordAt,
+  segmentChordTones,
+  segmentQuality,
+  segmentQualitySize,
+  segmentTones,
+  seventhColourOf,
+  triadColourOf,
   midiToNoteLabel,
   midiToOctave,
   SEMITONE_TO_NOTE,
@@ -31,7 +42,7 @@ import {
 } from '@/engine/formulas';
 import { breakChord, DEFAULT_VELOCITY, voicedPitches } from '@/engine/voicing';
 import { getBarBeats, laneOf, MIN_SEGMENT_BEATS, withStartBeats } from '@/engine/timeline';
-import { formatChordSymbol } from '@/engine/palette';
+import { formatChordSymbol, nameSegment } from '@/engine/palette';
 import {
   DEFAULT_TIME_SIGNATURE,
   MAX_SEGMENT_OCTAVE,
@@ -204,7 +215,9 @@ export function generateNotesFromSegments(
       continue;
     }
 
-    const { quality, rootSemitone } = resolveSegmentChord(
+    // Only the root: which notes sit above it is `segmentChordTones` business now,
+    // and it resolves the quality itself.
+    const { rootSemitone } = resolveSegmentChord(
       segment,
       segmentScale(segment, fallbackScale)
     );
@@ -215,7 +228,7 @@ export function generateNotesFromSegments(
     // A segment with no voicing comes back from these two as the same block
     // chord this loop used to build by hand.
     const pitches = voicedPitches(
-      CHORD_INTERVALS[quality],
+      segmentChordTones(segment, segmentScale(segment, fallbackScale)),
       segment.inversion ?? 0,
       baseMidi,
       segment.voicing
@@ -269,6 +282,7 @@ export function resolveSegmentChord(
 /** Local alias so the interval lookup stays exhaustive over known qualities. */
 type ChordQualityKey = keyof typeof CHORD_INTERVALS;
 
+
 /** Normalise a roman numeral for comparison — casing carries the quality, symbols don't. */
 function bareNumeral(numeral: string): string {
   return numeral.replace(/[°+]/g, '');
@@ -309,24 +323,29 @@ export function retuneSegmentsToScale(
     const degree = degreeOfNumeral(fromScale, segment.romanNumeral);
     if (degree === -1) return segment;
 
-    // Keep a seventh a seventh: the note count is what the user chose, the scale
-    // only decides which notes.
-    const target = isSeventhChord(segment)
-      ? getDiatonicSevenths(toScale)
-      : getDiatonicChords(toScale);
-
-    // A shorter scale (pentatonic, blues) may simply not have this degree.
-    const chord = target[degree];
+    // Keep the stack the user built: the tones are theirs, the scale only decides
+    // which notes they land on. A shorter scale (pentatonic, blues) may simply not
+    // have this degree.
+    const chord = diatonicChordAt(toScale, degree, segmentQualitySize(segment));
     if (!chord) return segment;
 
-    return {
+    // A quality chosen by hand is the user's and survives the move; one the old key
+    // spelled belongs to the key, and follows it into the new one.
+    const quality = segment.qualityPinned ? (segment.quality ?? chord.quality) : chord.quality;
+
+    const moved = {
       ...segment,
       root: chord.root,
-      quality: chord.quality,
-      romanNumeral: chord.romanNumeral,
-      chordSymbol: formatChordSymbol(chord.root, chord.quality),
+      quality,
+      // Dropped before naming: the numeral the block arrived with names a degree of
+      // the key it is leaving, and `nameSegment` would otherwise believe it over the
+      // root it has just been given.
+      romanNumeral: undefined,
       octave: retunedOctave(segment, fromScale, toScale, chord.root),
     };
+    // Named after the move, from the one namer, so the block's symbol and numeral
+    // describe the stack it actually has in the key it has actually landed in.
+    return { ...moved, ...nameSegment(moved, toScale) };
   });
 }
 
@@ -391,11 +410,150 @@ function retuneNote(
   };
 }
 
-/** True when a segment's quality has four notes, so a step must keep it a seventh. */
-function isSeventhChord(segment: ChordSegment): boolean {
-  return segment.quality
-    ? CHORD_INTERVALS[segment.quality as ChordQualityKey].length === 4
-    : false;
+/* ------------------------------------------------------------------------ */
+/* Stack transforms                                                          */
+/* ------------------------------------------------------------------------ */
+
+/*
+ * What the inspector's size stepper, tone toggles and colour buttons do to a block.
+ *
+ * They live here rather than in `voicing.ts` because they need `nameSegment`, and a
+ * block's name is a function of the whole chord — its degree, its key, its colour and
+ * its stack — rather than of the voicing alone.
+ */
+
+/** The widest stack the app builds, as a size rather than a tone index. */
+export const MAX_STACK_SIZE = MAX_CHORD_TONE + 1;
+
+/**
+ * Re-derive everything that follows from a segment's stack, and rename it.
+ *
+ * The one path every stack edit goes through, so none of them can forget a step.
+ * Three things follow from a change of tones:
+ *
+ * - the **quality**, which has to name a triad or a seventh according to how far the
+ *   stack now reaches — unless it was pinned, in which case it is the user's and stays;
+ * - the **inversion**, which counts sounded tones, and which `voiceChord` would
+ *   silently read as a whole-chord octave shift rather than an error if it were left
+ *   pointing past the end of a shrunken stack;
+ * - the **name**, which now carries the size.
+ */
+function restack(segment: ChordSegment, scale: Scale, tones: number[]): ChordSegment {
+  const size = tones.some(t => t >= 3) ? 4 : 3;
+  const derived = diatonicChordAt(scale, degreeOfSegment(segment, scale), size)?.quality;
+  const quality = segment.qualityPinned ? segment.quality : (derived ?? segment.quality);
+
+  // Wrapped rather than clamped, matching how `withInversion` treats one: an
+  // inversion past the chord's size means the same thing either way.
+  const inversion =
+    segment.inversion === undefined
+      ? undefined
+      : ((segment.inversion % tones.length) + tones.length) % tones.length;
+
+  const next: ChordSegment = { ...segment, tones, quality, inversion };
+  return { ...next, ...nameSegment(next, scale) };
+}
+
+/** True for a block that names a degree, and so has a stack to change. */
+function isChordSegment(segment: ChordSegment): boolean {
+  return segment.kind !== 'note';
+}
+
+/**
+ * Set how many tones a block stacks: 1 a note, 2 a dyad, 3 a triad, 4 a seventh,
+ * 5 a ninth.
+ *
+ * Writes the plain stack `[0 … size-1]`, discarding any gap the block had. That is
+ * what the stepper means — "give me a seventh" — and the tone toggles are there for
+ * anyone who wants the gap back.
+ */
+export function withStackSize(
+  segment: ChordSegment,
+  scale: Scale,
+  size: number
+): ChordSegment {
+  if (!isChordSegment(segment)) return segment;
+
+  const clamped = Math.min(MAX_STACK_SIZE, Math.max(1, Math.trunc(size)));
+  return restack(segment, scale, Array.from({ length: clamped }, (_, i) => i));
+}
+
+/**
+ * Switch one chord tone on or off.
+ *
+ * The root is refused: a register, an inversion and a captured formula are all
+ * counted from it, so a chord without one is a voicing — a tone pushed aside by
+ * `voicing.offsets` — rather than a stack.
+ */
+export function withToggledTone(
+  segment: ChordSegment,
+  scale: Scale,
+  tone: number
+): ChordSegment {
+  if (!isChordSegment(segment)) return segment;
+  if (!Number.isInteger(tone) || tone <= 0 || tone > MAX_CHORD_TONE) return segment;
+
+  const tones = segmentTones(segment, scale);
+  const next = tones.includes(tone) ? tones.filter(t => t !== tone) : [...tones, tone].sort((a, b) => a - b);
+
+  return restack(segment, scale, next);
+}
+
+/**
+ * Pin the triad this chord is coloured by, keeping whatever seventh it already has.
+ *
+ * Pinned, because the user said it: a change of key or a step to another degree keeps
+ * a hand-set colour instead of re-deriving it. `withDiatonicQuality` is how it is
+ * handed back to the key.
+ */
+export function withTriadColour(
+  segment: ChordSegment,
+  scale: Scale,
+  triad: TriadColour
+): ChordSegment {
+  if (!isChordSegment(segment)) return segment;
+
+  const current = segmentQuality(segment, scale);
+  const quality = composeQuality(triad, seventhColourOf(current));
+  const next: ChordSegment = { ...segment, quality, qualityPinned: true };
+
+  return { ...next, ...nameSegment(next, scale) };
+}
+
+/**
+ * Pin the colour of the seventh, keeping the triad beneath it.
+ *
+ * `undefined` hands the seventh back to the key without unpinning the triad, which is
+ * what a chord wants when its colour was chosen but its extension was not.
+ */
+export function withSeventhColour(
+  segment: ChordSegment,
+  scale: Scale,
+  seventh?: SeventhColour
+): ChordSegment {
+  if (!isChordSegment(segment)) return segment;
+
+  const quality = composeQuality(triadColourOf(segmentQuality(segment, scale)), seventh);
+  const next: ChordSegment = { ...segment, quality, qualityPinned: true };
+
+  return { ...next, ...nameSegment(next, scale) };
+}
+
+/**
+ * Hand the colour back to the key: unpin, and take the quality the scale spells.
+ *
+ * The way out of a pin, and the reason a pin can be a plain flag rather than something
+ * inferred by comparing a quality against its degree.
+ */
+export function withDiatonicQuality(segment: ChordSegment, scale: Scale): ChordSegment {
+  if (!isChordSegment(segment)) return segment;
+
+  const size = segmentQualitySize(segment);
+  const quality = diatonicChordAt(scale, degreeOfSegment(segment, scale), size)?.quality;
+  if (!quality) return segment;
+
+  const next: ChordSegment = { ...segment, quality, qualityPinned: undefined };
+  return { ...next, ...nameSegment(next, scale) };
 }
 
 /* ------------------------------------------------------------------------ */
@@ -660,21 +818,22 @@ export function stepSegmentInScale(
   const degree = degreeOfChord(segment, scale);
   if (degree === -1) return segment;
 
-  const target = isSeventhChord(segment) ? getDiatonicSevenths(scale) : getDiatonicChords(scale);
-  const next = target[(degree + direction + target.length) % target.length];
+  const size = segmentQualitySize(segment);
+  const length = getScalePitches(scale.root, scale.type).length;
+  const next = diatonicChordAt(scale, (degree + direction + length) % length, size);
   if (!next) return segment;
 
   const octave = (segment.octave ?? 4) + registerShift(segment.root, next.root, direction);
   if (octave < MIN_SEGMENT_OCTAVE || octave > MAX_SEGMENT_OCTAVE) return segment;
 
-  return {
-    ...segment,
-    root: next.root,
-    quality: next.quality,
-    romanNumeral: next.romanNumeral,
-    chordSymbol: formatChordSymbol(next.root, next.quality),
-    octave,
-  };
+  // The pin travels with the block, exactly as it does through a change of key: a
+  // borrowed colour is still borrowed one degree along.
+  const quality = segment.qualityPinned ? (segment.quality ?? next.quality) : next.quality;
+
+  // The old numeral names the degree it is stepping off, so it goes before naming —
+  // the new root is what says where the block now is.
+  const stepped = { ...segment, root: next.root, quality, romanNumeral: undefined, octave };
+  return { ...stepped, ...nameSegment(stepped, scale) };
 }
 
 /**
@@ -699,28 +858,67 @@ function registerShift(
 }
 
 /**
- * Raises or flattens a note, keeping the degree it names.
+ * Raises or flattens a block, keeping the degree it names.
  *
- * The pitch moves, the degree does not: sharpening the seventh gives the leading tone
- * of the same scale, which is what an accidental means. Chords are left alone — a
- * chord names a whole stack of degrees and there is no one note to bend.
+ * The sound moves, the degree does not: sharpening the seventh gives the leading tone
+ * of the same scale, which is what an accidental means. On a note it is the pitch that
+ * moves; on a chord it is the *root*, so flattening the sixth degree gives ♭VI — the
+ * borrowed chord, still named as the sixth degree of the key it was borrowed into.
+ *
+ * A chord had no accidental until stacks arrived, because the palette offered a
+ * separate Notes mode for writing one. That mode is gone — a degree-named block is a
+ * chord at every size now — so this is the only way left to write a block the key does
+ * not contain, short of recording one.
  *
  * @param segment - The segment to alter.
  * @param scale - The key the segment is written in.
- * @param alter - Semitones off the degree; 0 puts the note back on it.
+ * @param alter - Semitones off the degree; 0 puts the block back on it.
  */
 export function alterSegment(
   segment: ChordSegment,
   scale: Scale,
   alter: number
 ): ChordSegment {
-  if (segment.kind !== 'note' || segment.pitch === undefined) return segment;
+  if (segment.kind === 'note') {
+    if (segment.pitch === undefined) return segment;
 
-  const at = { degree: noteDegreeAlteration(segment, scale).degree, alter };
-  const pitch = degreeAlterationPitch(scale, at);
-  if (pitch < PIANO_ROLL_MIN_MIDI || pitch > PIANO_ROLL_MAX_MIDI) return segment;
+    const at = { degree: noteDegreeAlteration(segment, scale).degree, alter };
+    const pitch = degreeAlterationPitch(scale, at);
+    if (pitch < PIANO_ROLL_MIN_MIDI || pitch > PIANO_ROLL_MAX_MIDI) return segment;
 
-  return withNotePitch(segment, scale, at);
+    return withNotePitch(segment, scale, at);
+  }
+
+  if (!segment.root) return segment;
+
+  // The degree is looked for underneath whatever accidental the chord already
+  // carries, exactly as a note's is: the degree belongs to the key, the accidental
+  // on top of it is the writer's and is simply replaced.
+  const rootSemitone = NOTE_NAMES.indexOf(segment.root);
+  if (rootSemitone < 0) return segment;
+  const plain = (((rootSemitone - (segment.alter ?? 0)) % 12) + 12) % 12;
+
+  const degree = getScalePitches(scale.root, scale.type).indexOf(plain);
+  // A chord already off the scale names no degree to bend, so there is nothing here
+  // that would not be an invention.
+  if (degree === -1) return segment;
+
+  const root = SEMITONE_TO_NOTE[(((plain + alter) % 12) + 12) % 12];
+  // Named against the *degree* rather than the altered root, which sits on no degree
+  // at all — so the numeral has a base to wear its accidental on.
+  const based: ChordSegment = {
+    ...segment,
+    root,
+    alter: alter || undefined,
+    romanNumeral: diatonicChordAt(scale, degree, segmentQualitySize(segment))?.romanNumeral,
+  };
+  const named = nameSegment(based, scale);
+
+  return {
+    ...based,
+    chordSymbol: named.chordSymbol,
+    romanNumeral: accidentalLabel(alter) + named.romanNumeral,
+  };
 }
 
 /**

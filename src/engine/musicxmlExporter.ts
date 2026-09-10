@@ -1,3 +1,4 @@
+import { CHORD_INTERVALS } from '@/engine/chords';
 import type { Bar, ChordQuality, ChordSegment, Note, NoteName, Project, TimeSignature } from '@/types/music';
 import {
   barChords,
@@ -269,7 +270,22 @@ export function projectToMusicXML(project: Project): string {
   return lines.join('\n');
 }
 
-/** Render a chord segment as a `<harmony>` element. */
+/**
+ * The scale degree each chord tone sits on, for a `<degree>` element.
+ *
+ * Root excluded: a chord always sounds it, so it is never added or subtracted.
+ */
+const DEGREE_NUMBER: Record<number, number> = { 1: 3, 2: 5, 3: 7, 4: 9 };
+
+/**
+ * Render a chord segment as a `<harmony>` element.
+ *
+ * A stack that is not simply the quality's own tones is written as that quality plus
+ * `<degree>` elements — `subtract` for a tone it omits, `add` for the ninth, which no
+ * `kind` names. That is how MusicXML says "C major with no fifth" or "G7 add 9", and
+ * it means a dyad and a ninth both survive an export to notation software rather than
+ * silently arriving as the plain triad underneath them.
+ */
 function renderHarmony(chord: ChordSegment): string[] {
   const root = chord.root ?? (chord.chordSymbol?.[0] as NoteName | undefined);
   if (!root) return [];
@@ -286,6 +302,23 @@ function renderHarmony(chord: ChordSegment): string[] {
   }
   lines.push('        </root>');
   lines.push(`        <kind text="${escapeXml(quality)}">${KIND_BY_QUALITY[quality] ?? 'other'}</kind>`);
+
+  // Only when the segment states a stack: a chord that names none sounds exactly the
+  // quality's own tones, and writes exactly the XML it wrote before stacks existed.
+  if (Array.isArray(chord.tones) && chord.tones.length > 0) {
+    const named = CHORD_INTERVALS[quality]?.length ?? 3;
+    for (let tone = 1; tone <= 4; tone++) {
+      const sounds = chord.tones.includes(tone);
+      const inKind = tone < named;
+      if (sounds === inKind) continue;
+      lines.push('        <degree>');
+      lines.push(`          <degree-value>${DEGREE_NUMBER[tone]}</degree-value>`);
+      lines.push('          <degree-alter>0</degree-alter>');
+      lines.push(`          <degree-type>${sounds ? 'add' : 'subtract'}</degree-type>`);
+      lines.push('        </degree>');
+    }
+  }
+
   lines.push('      </harmony>');
   return lines;
 }

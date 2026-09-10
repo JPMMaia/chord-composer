@@ -43,15 +43,15 @@ function makeDataTransfer() {
 }
 
 describe('ScalePalette', () => {
-  // The palette's key, mode and octave are all store state now, not props, and the
+  // The palette's key, size and octave are all store state now, not props, and the
   // store outlives a single test — so each case starts from the same settings.
   beforeEach(() => {
     editorStore.getState().setPaletteScale(C_MAJOR);
-    editorStore.getState().setPaletteMode('chords');
+    editorStore.getState().setPaletteSize(3);
     editorStore.getState().setPaletteOctave(4);
   });
 
-  it('defaults to chords mode and renders each degree as "Label (Numeral)"', () => {
+  it('defaults to triads and renders each degree as "Label (Numeral)"', () => {
     render(<ScalePalette />);
 
     expect(blockTexts()).toEqual([
@@ -59,13 +59,26 @@ describe('ScalePalette', () => {
     ]);
   });
 
-  it('switches to notes mode, naming each note with its octave', () => {
+  it('offers one tone per degree at the smallest size', () => {
     render(<ScalePalette />);
 
-    fireEvent.change(screen.getByLabelText('Palette mode'), { target: { value: 'notes' } });
+    fireEvent.change(screen.getByLabelText('Palette size'), { target: { value: '1' } });
 
     expect(blockTexts()).toEqual([
-      'C4 (I)', 'D4 (ii)', 'E4 (iii)', 'F4 (IV)', 'G4 (V)', 'A4 (vi)', 'B4 (vii°)',
+      'C (I)', 'D (ii)', 'E (iii)', 'F (IV)', 'G (V)', 'A (vi)', 'B (vii°)',
+    ]);
+  });
+
+  it('thickens every degree at once as the size grows', () => {
+    render(<ScalePalette />);
+
+    fireEvent.change(screen.getByLabelText('Palette size'), { target: { value: '2' } });
+    expect(blockTexts()[1]).toBe('Dm(no5) (ii(no5))');
+
+    fireEvent.change(screen.getByLabelText('Palette size'), { target: { value: '5' } });
+    expect(blockTexts()).toEqual([
+      'Cmaj9 (Imaj9)', 'Dm9 (ii9)', 'Em9 (iii9)', 'Fmaj9 (IVmaj9)',
+      'G9 (V9)', 'Am9 (vi9)', 'Bø9 (viiø9)',
     ]);
   });
 
@@ -76,14 +89,20 @@ describe('ScalePalette', () => {
     expect(screen.getByText(/octave 4/)).toBeInTheDocument();
   });
 
-  it('rebuilds note blocks in the chosen octave', () => {
+  it('rebuilds one-tone blocks in the chosen octave', () => {
     render(<ScalePalette />);
-    fireEvent.change(screen.getByLabelText('Palette mode'), { target: { value: 'notes' } });
+    fireEvent.change(screen.getByLabelText('Palette size'), { target: { value: '1' } });
     fireEvent.change(screen.getByLabelText('Octave'), { target: { value: '6' } });
 
-    expect(blockTexts()).toEqual([
-      'C6 (I)', 'D6 (ii)', 'E6 (iii)', 'F6 (IV)', 'G6 (V)', 'A6 (vi)', 'B6 (vii°)',
-    ]);
+    // A one-tone block is a chord segment, so its register rides in the payload
+    // rather than being spliced into a bare note name.
+    const dataTransfer = makeDataTransfer();
+    fireEvent.dragStart(block('C (I)'), { dataTransfer });
+    expect(JSON.parse(dataTransfer.data['application/x-palette-item'])).toMatchObject({
+      kind: 'chord',
+      tones: [0],
+      octave: 6,
+    });
   });
 
   it('keeps chord symbols bare but carries the chosen octave in the payload', () => {
@@ -102,10 +121,10 @@ describe('ScalePalette', () => {
     });
   });
 
-  it('switches to seventh chords mode', () => {
+  it('offers sevenths at size four', () => {
     render(<ScalePalette />);
 
-    fireEvent.change(screen.getByLabelText('Palette mode'), { target: { value: 'sevenths' } });
+    fireEvent.change(screen.getByLabelText('Palette size'), { target: { value: '4' } });
 
     expect(blockTexts()).toEqual([
       'Cmaj7 (Imaj7)', 'Dm7 (ii7)', 'Em7 (iii7)', 'Fmaj7 (IVmaj7)',
@@ -150,14 +169,22 @@ describe('ScalePalette', () => {
     expect(dataTransfer.effectAllowed).toBe('copy');
   });
 
-  it('carries a pitch on note blocks', () => {
+  it('carries the stack on the payload, at every size', () => {
     render(<ScalePalette />);
-    fireEvent.change(screen.getByLabelText('Palette mode'), { target: { value: 'notes' } });
 
     const dataTransfer = makeDataTransfer();
-    fireEvent.dragStart(block('C4 (I)'), { dataTransfer });
+    fireEvent.dragStart(block('C (I)'), { dataTransfer });
+    expect(JSON.parse(dataTransfer.data['application/x-palette-item'])).toMatchObject({
+      kind: 'chord',
+      tones: [0, 1, 2],
+    });
 
-    const payload = JSON.parse(dataTransfer.data['application/x-palette-item']);
-    expect(payload).toMatchObject({ kind: 'note', pitch: 60, octave: 4 });
+    fireEvent.change(screen.getByLabelText('Palette size'), { target: { value: '5' } });
+    const ninth = makeDataTransfer();
+    fireEvent.dragStart(block('Cmaj9 (Imaj9)'), { dataTransfer: ninth });
+    expect(JSON.parse(ninth.data['application/x-palette-item'])).toMatchObject({
+      kind: 'chord',
+      tones: [0, 1, 2, 3, 4],
+    });
   });
 });

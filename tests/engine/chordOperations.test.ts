@@ -283,6 +283,116 @@ describe("chordOperations", () => {
       expect(result.map((n) => n.pitch).sort((a, b) => a - b)).toEqual([67, 71, 74, 77]);
     });
 
+    it("generates one note for a single-tone stack", () => {
+      const bar = barWith([
+        { id: generateId(), kind: "chord", root: "C", quality: "major", tones: [0], duration: 4 },
+      ]);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
+      expect(result.map((n) => n.pitch)).toEqual([60]);
+    });
+
+    it("generates a third dyad and a fifth dyad from the same chord", () => {
+      const third = barWith([
+        { id: generateId(), kind: "chord", root: "C", quality: "major", tones: [0, 1], duration: 4 },
+      ]);
+      expect(
+        generateNotesFromSegments(barChords(third, TEST_TRACK_ID), third, C_MAJOR, TS_4_4, 4).map((n) => n.pitch)
+      ).toEqual([60, 64]);
+
+      const fifth = barWith([
+        { id: generateId(), kind: "chord", root: "C", quality: "major", tones: [0, 2], duration: 4 },
+      ]);
+      expect(
+        generateNotesFromSegments(barChords(fifth, TEST_TRACK_ID), fifth, C_MAJOR, TS_4_4, 4).map((n) => n.pitch)
+      ).toEqual([60, 67]);
+    });
+
+    it("generates five notes for a ninth chord, spelled by the key", () => {
+      const bar = barWith([
+        {
+          id: generateId(),
+          kind: "chord",
+          root: "G",
+          quality: "dominant7",
+          romanNumeral: "V",
+          tones: [0, 1, 2, 3, 4],
+          duration: 4,
+        },
+      ]);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
+      // G9: G4 B4 D5 F5 A5 = 67, 71, 74, 77, 81
+      expect(result.map((n) => n.pitch).sort((a, b) => a - b)).toEqual([67, 71, 74, 77, 81]);
+    });
+
+    it("omits a tone from the middle without moving the ones above it", () => {
+      const bar = barWith([
+        {
+          id: generateId(),
+          kind: "chord",
+          root: "G",
+          quality: "dominant7",
+          romanNumeral: "V",
+          tones: [0, 1, 3, 4],
+          duration: 4,
+        },
+      ]);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
+      // The fifth (D5, 74) drops out; the seventh and ninth stay where they were.
+      expect(result.map((n) => n.pitch).sort((a, b) => a - b)).toEqual([67, 71, 77, 81]);
+    });
+
+    it("keeps an offset on the seventh when the fifth beneath it is omitted", () => {
+      // The reason offsets are keyed by tone rather than by position.
+      const bar = barWith([
+        {
+          id: generateId(),
+          kind: "chord",
+          root: "G",
+          quality: "dominant7",
+          romanNumeral: "V",
+          tones: [0, 1, 3],
+          voicing: { offsets: [0, 0, 0, -1] },
+          duration: 4,
+        },
+      ]);
+      const result = generateNotesFromSegments(barChords(bar, TEST_TRACK_ID), bar, C_MAJOR, TS_4_4, 4);
+      // F5 (77) drops an octave to F4 (65); G4 and B4 stay put.
+      expect(result.map((n) => n.pitch).sort((a, b) => a - b)).toEqual([65, 67, 71]);
+    });
+
+    it("strums a dyad and a ninth with the right number of onsets", () => {
+      const dyad = barWith([
+        {
+          id: generateId(),
+          kind: "chord",
+          root: "C",
+          quality: "major",
+          tones: [0, 2],
+          voicing: { break: { mode: "strum", spreadBeats: 0.0625, direction: "up" } },
+          duration: 4,
+        },
+      ]);
+      expect(
+        generateNotesFromSegments(barChords(dyad, TEST_TRACK_ID), dyad, C_MAJOR, TS_4_4, 4).map((n) => n.startBeat)
+      ).toEqual([0, 0.0625]);
+
+      const ninth = barWith([
+        {
+          id: generateId(),
+          kind: "chord",
+          root: "C",
+          quality: "maj7",
+          romanNumeral: "I",
+          tones: [0, 1, 2, 3, 4],
+          voicing: { break: { mode: "strum", spreadBeats: 0.0625, direction: "up" } },
+          duration: 4,
+        },
+      ]);
+      expect(
+        generateNotesFromSegments(barChords(ninth, TEST_TRACK_ID), ninth, C_MAJOR, TS_4_4, 4).map((n) => n.startBeat)
+      ).toEqual([0, 0.0625, 0.125, 0.1875, 0.25]);
+    });
+
     it("generates exactly one note for a note-kind segment", () => {
       const bar = barWith([
         { id: generateId(), kind: "note", pitch: 64, duration: 2 },
@@ -532,6 +642,45 @@ describe("chordOperations", () => {
       expect(segment.root).toBe("D");
       expect(segment.quality).toBe("maj7");
       expect(segment.chordSymbol).toBe("Dmaj7");
+    });
+
+    // A quality the user chose by hand is theirs, and a change of key must not
+    // quietly take it back. A quality the key spelled is the key's, and follows it.
+    it("keeps a pinned quality through a change of key", () => {
+      const pinned = diatonic({
+        romanNumeral: "ii",
+        root: "D",
+        quality: "major",
+        chordSymbol: "D",
+        qualityPinned: true,
+      });
+      const [segment] = retuneSegmentsToScale([pinned], C_MAJOR, D_MAJOR);
+      // Degree 2 of D major is E minor; the pin says major, so major it stays.
+      expect(segment.root).toBe("E");
+      expect(segment.quality).toBe("major");
+      expect(segment.qualityPinned).toBe(true);
+    });
+
+    it("lets an unpinned neighbour follow the key it moved to", () => {
+      const unpinned = diatonic({ romanNumeral: "ii", root: "D", quality: "minor", chordSymbol: "Dm" });
+      const [segment] = retuneSegmentsToScale([unpinned], C_MAJOR, D_MAJOR);
+      expect(segment.root).toBe("E");
+      expect(segment.quality).toBe("minor");
+      expect(segment.qualityPinned).toBeUndefined();
+    });
+
+    it("carries a stack across a change of key", () => {
+      const ninth = diatonic({ quality: "maj7", tones: [0, 1, 2, 3, 4], chordSymbol: "Cmaj9" });
+      const [segment] = retuneSegmentsToScale([ninth], C_MAJOR, D_MAJOR);
+      expect(segment.tones).toEqual([0, 1, 2, 3, 4]);
+      expect(segment.root).toBe("D");
+    });
+
+    it("keeps a dyad a dyad, taking its quality from the new key", () => {
+      const dyad = diatonic({ romanNumeral: "ii", root: "D", quality: "minor", tones: [0, 2] });
+      const [segment] = retuneSegmentsToScale([dyad], C_MAJOR, A_MINOR);
+      expect(segment.tones).toEqual([0, 2]);
+      expect(segment.quality).toBe("diminished");
     });
 
     it("retunes a note segment to the same degree of the new scale", () => {
@@ -896,9 +1045,49 @@ describe("chordOperations", () => {
       expect(alterSegment(note(61, 1), C_MAJOR, -1).pitch).toBe(59);
     });
 
-    it("leaves a chord alone — it names a stack, not one note", () => {
-      const chord: ChordSegment = { id: generateId(), kind: "chord", root: "C", duration: 1 };
-      expect(alterSegment(chord, C_MAJOR, 1)).toEqual(chord);
+    it("moves a chord's root off its degree, naming the borrowed chord", () => {
+      // The palette's separate Notes mode is gone, so this is the only way left to
+      // write a block the key does not contain.
+      const vi: ChordSegment = {
+        id: generateId(),
+        kind: "chord",
+        root: "A",
+        quality: "minor",
+        romanNumeral: "vi",
+        duration: 1,
+      };
+      const flattened = alterSegment(vi, C_MAJOR, -1);
+
+      expect(flattened.root).toBe("G#");
+      expect(flattened.alter).toBe(-1);
+      expect(flattened.romanNumeral).toBe("♭vi");
+    });
+
+    it("puts an altered chord back on its degree", () => {
+      const vi: ChordSegment = {
+        id: generateId(),
+        kind: "chord",
+        root: "A",
+        quality: "minor",
+        romanNumeral: "vi",
+        duration: 1,
+      };
+      const back = alterSegment(alterSegment(vi, C_MAJOR, -1), C_MAJOR, 0);
+
+      expect(back.root).toBe("A");
+      expect(back.alter).toBeUndefined();
+      expect(back.romanNumeral).toBe("vi");
+    });
+
+    it("leaves a chord already off the scale alone", () => {
+      const chromatic: ChordSegment = {
+        id: generateId(),
+        kind: "chord",
+        root: "C#",
+        quality: "major",
+        duration: 1,
+      };
+      expect(alterSegment(chromatic, C_MAJOR, 1)).toEqual(chromatic);
     });
   });
 

@@ -11,7 +11,7 @@ describe('editorStore', () => {
       scrollX: 0,
       maxScrollX: 0,
       viewportWidth: 0,
-      paletteMode: 'chords',
+      paletteSize: 3,
       paletteOctave: 4,
       view: 'arrangement',
       recordArmed: false,
@@ -86,16 +86,23 @@ describe('editorStore', () => {
   });
 
   describe('palette settings', () => {
-    it('starts on chords at octave 4', () => {
-      expect(editorStore.getState().paletteMode).toBe('chords');
+    it('starts on triads at octave 4', () => {
+      expect(editorStore.getState().paletteSize).toBe(3);
       expect(editorStore.getState().paletteOctave).toBe(4);
     });
 
-    it('switches mode and octave', () => {
-      editorStore.getState().setPaletteMode('sevenths');
+    it('switches size and octave', () => {
+      editorStore.getState().setPaletteSize(4);
       editorStore.getState().setPaletteOctave(6);
-      expect(editorStore.getState().paletteMode).toBe('sevenths');
+      expect(editorStore.getState().paletteSize).toBe(4);
       expect(editorStore.getState().paletteOctave).toBe(6);
+    });
+
+    it('clamps a size the app cannot build', () => {
+      editorStore.getState().setPaletteSize(0);
+      expect(editorStore.getState().paletteSize).toBe(1);
+      editorStore.getState().setPaletteSize(99);
+      expect(editorStore.getState().paletteSize).toBe(5);
     });
 
     it('clamps the octave to the registers a segment may live in', () => {

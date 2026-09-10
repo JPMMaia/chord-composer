@@ -5,6 +5,7 @@ import {
   spacingOffsets,
   voiceChord,
   voicedPitches,
+  voicedVoices,
   withBreak,
   withInversion,
   withSpacing,
@@ -13,7 +14,7 @@ import {
   withVelocity,
   withoutVoicing,
 } from '@/engine/voicing';
-import type { VoicedTone } from '@/engine/voicing';
+import type { ChordTones, VoicedTone } from '@/engine/voicing';
 import { CHORD_INTERVALS, invertIntervals } from '@/engine/chords';
 import { PIANO_ROLL_MAX_MIDI, PIANO_ROLL_MIN_MIDI } from '@/utils/constants';
 import type { ChordSegment, Scale } from '@/types/music';
@@ -37,7 +38,7 @@ describe('voiceChord', () => {
   it('reproduces invertIntervals exactly when no voicing is given', () => {
     for (const intervals of [TRIAD, SEVENTH]) {
       for (let inversion = 0; inversion <= 3; inversion++) {
-        expect(intervalsOf(voiceChord(intervals, inversion))).toEqual(
+        expect(intervalsOf(voiceChord(stack(intervals), inversion))).toEqual(
           [...invertIntervals(intervals, inversion)].sort((a, b) => a - b)
         );
       }
@@ -48,38 +49,38 @@ describe('voiceChord', () => {
     // The third is interval 4 in root position and still the third — now an
     // octave up — in first inversion. This is what makes a hand-tweaked offset
     // survive the user changing inversion.
-    const root = voiceChord(TRIAD, 0);
-    const first = voiceChord(TRIAD, 1);
+    const root = voiceChord(stack(TRIAD), 0);
+    const first = voiceChord(stack(TRIAD), 1);
     expect(root.find(t => t.tone === 1)?.interval).toBe(4);
     expect(first.find(t => t.tone === 1)?.interval).toBe(4);
     expect(first.find(t => t.tone === 0)?.interval).toBe(12);
   });
 
   it('lets explicit offsets override the spacing preset', () => {
-    const tones = voiceChord(TRIAD, 0, { spacing: 'drop2', offsets: [0, 0, -1] });
+    const tones = voiceChord(stack(TRIAD), 0, { spacing: 'drop2', offsets: [0, 0, -1] });
     expect(intervalsOf(tones)).toEqual([-5, 0, 4]);
   });
 
   it('adds a doubled voice an octave from its tone', () => {
-    const tones = voiceChord(TRIAD, 0, { doublings: [{ tone: 0, octaves: -1 }] });
+    const tones = voiceChord(stack(TRIAD), 0, { doublings: [{ tone: 0, octaves: -1 }] });
     expect(intervalsOf(tones)).toEqual([-12, 0, 4, 7]);
     expect(tones.filter(t => t.doubled)).toHaveLength(1);
   });
 
   it('drops a doubling of a tone the chord no longer has', () => {
     // A seventh's doubling left behind after the chord became a triad.
-    const tones = voiceChord(TRIAD, 0, { doublings: [{ tone: 3, octaves: 1 }] });
+    const tones = voiceChord(stack(TRIAD), 0, { doublings: [{ tone: 3, octaves: 1 }] });
     expect(intervalsOf(tones)).toEqual([0, 4, 7]);
   });
 
   it('returns nothing for an empty chord rather than throwing', () => {
-    expect(voiceChord([], 0)).toEqual([]);
+    expect(voiceChord(stack([]), 0)).toEqual([]);
   });
 });
 
 describe('spacingOffsets', () => {
   const tonesFor = (intervals: number[], inversion = 0): VoicedTone[] =>
-    voiceChord(intervals, inversion);
+    voiceChord(stack(intervals), inversion);
 
   it('leaves a close voicing alone', () => {
     expect(spacingOffsets(tonesFor(TRIAD), 'close')).toEqual([0, 0, 0]);
@@ -117,18 +118,18 @@ describe('spacingOffsets', () => {
 
 describe('voicedPitches', () => {
   it('builds absolute pitches from the chord root', () => {
-    expect(voicedPitches(TRIAD, 0, 60)).toEqual([60, 64, 67]);
+    expect(voicedPitches(stack(TRIAD), 0, 60)).toEqual([60, 64, 67]);
   });
 
   it('drops pitches outside the piano roll rather than clamping them', () => {
     // Clamping would fold the doubling onto a note the user never asked for.
-    const low = voicedPitches(TRIAD, 0, PIANO_ROLL_MIN_MIDI + 1, {
+    const low = voicedPitches(stack(TRIAD), 0, PIANO_ROLL_MIN_MIDI + 1, {
       doublings: [{ tone: 0, octaves: -1 }],
     });
     expect(low).not.toContain(PIANO_ROLL_MIN_MIDI);
     expect(low.every(p => p >= PIANO_ROLL_MIN_MIDI && p <= PIANO_ROLL_MAX_MIDI)).toBe(true);
 
-    const high = voicedPitches(TRIAD, 0, PIANO_ROLL_MAX_MIDI - 1, {
+    const high = voicedPitches(stack(TRIAD), 0, PIANO_ROLL_MAX_MIDI - 1, {
       doublings: [{ tone: 0, octaves: 1 }],
     });
     expect(high.every(p => p <= PIANO_ROLL_MAX_MIDI)).toBe(true);
@@ -140,7 +141,7 @@ describe('voicedPitches', () => {
     // can, though, which is what a hand-edited file may well contain; toggling in
     // the panel cannot produce it. Two note-ons on one pitch would confuse both
     // the sampler and the MIDI export.
-    const pitches = voicedPitches(TRIAD, 0, 60, {
+    const pitches = voicedPitches(stack(TRIAD), 0, 60, {
       doublings: [
         { tone: 0, octaves: -1 },
         { tone: 0, octaves: -1 },
@@ -338,5 +339,100 @@ describe('withVelocity', () => {
   it('ignores a velocity that is not a number', () => {
     const source = chord();
     expect(withVelocity(source, Number.NaN)).toBe(source);
+  });
+});
+
+/**
+ * A full stack of every tone in order — what every chord was before a tone could be
+ * omitted, and so what every one of the cases above builds.
+ */
+function stack(intervals: number[]): ChordTones {
+  return { tones: intervals.map((_, i) => i), intervals };
+}
+
+/**
+ * The contract that makes omission possible: `offsets` and `doublings` are keyed by
+ * *chord tone*, never by the position a tone happens to sit at.
+ *
+ * Unobservable today — every chord sounds all of its tones in order, so the two
+ * indexings coincide — which is exactly why it is worth pinning now, before a stack
+ * with a gap in it can tell them apart the hard way.
+ */
+describe('tone-keyed voicing', () => {
+  /** A seventh with no fifth: tone 3 sounds at position 2. */
+  const GAPPED: ChordTones = { tones: [0, 1, 3], intervals: [0, 4, 10] };
+
+  it('applies an offset to the tone it names, not the position it sits at', () => {
+    const voiced = voiceChord(GAPPED, 0, { offsets: [0, 0, 0, -1] });
+
+    expect(voiced.find(t => t.tone === 3)!.interval).toBe(10 - 12);
+    expect(voiced.find(t => t.tone === 1)!.interval).toBe(4);
+  });
+
+  it('doubles the tone it names when a lower tone is absent', () => {
+    const fifthDyad: ChordTones = { tones: [0, 2], intervals: [0, 7] };
+    const voiced = voiceChord(fifthDyad, 0, { doublings: [{ tone: 2, octaves: 1 }] });
+
+    expect(voiced.filter(t => t.tone === 2)).toHaveLength(2);
+    expect(intervalsOf(voiced)).toEqual([0, 7, 19]);
+  });
+
+  it('drops a doubling of a tone the stack does not sound', () => {
+    const thirdDyad: ChordTones = { tones: [0, 1], intervals: [0, 4] };
+    const voiced = voiceChord(thirdDyad, 0, { doublings: [{ tone: 2, octaves: 1 }] });
+
+    expect(voiced).toHaveLength(2);
+  });
+
+  it('keys spacing offsets by tone, so a preset can be fed straight back in', () => {
+    const offsets = spacingOffsets(voiceChord(GAPPED, 0), 'drop2');
+
+    // Long enough to be indexed by tone 3, though only three tones sound.
+    expect(offsets).toHaveLength(4);
+    expect(voicedPitches(GAPPED, 0, 60, { offsets })).toEqual(
+      voicedPitches(GAPPED, 0, 60, { spacing: 'drop2' })
+    );
+  });
+
+  it('counts inversions in sounded tones, so a fifth dyad has two', () => {
+    const fifthDyad: ChordTones = { tones: [0, 2], intervals: [0, 7] };
+
+    expect(voicedPitches(fifthDyad, 0, 60)).toEqual([60, 67]);
+    // Tone order, not pitch order: the root has been lifted over the fifth, and
+    // following the chord's own function is what an 'as played' arpeggio means.
+    expect(voicedPitches(fifthDyad, 1, 60)).toEqual([72, 67]);
+    expect(voicedPitches(fifthDyad, 2, 60)).toEqual(voicedPitches(fifthDyad, 0, 60).map(p => p + 12));
+  });
+});
+
+/**
+ * `voicedPitches` drops a pitch that leaves the roll or collides with another, so its
+ * result cannot be indexed by tone. `voicedVoices` is what the inspector reads instead.
+ */
+describe('voicedVoices', () => {
+  it('names the chord tone each sounding voice belongs to', () => {
+    expect(voicedVoices(stack(TRIAD), 0, 60)).toEqual([
+      { tone: 0, pitch: 60, doubled: false },
+      { tone: 1, pitch: 64, doubled: false },
+      { tone: 2, pitch: 67, doubled: false },
+    ]);
+  });
+
+  it('marks a doubling as one, so a caller can ask for the voice itself', () => {
+    const voices = voicedVoices(stack(TRIAD), 0, 60, {
+      doublings: [{ tone: 0, octaves: 1 }],
+    });
+
+    expect(voices.find(v => v.tone === 0 && !v.doubled)!.pitch).toBe(60);
+    expect(voices.find(v => v.tone === 0 && v.doubled)!.pitch).toBe(72);
+  });
+
+  it('agrees with voicedPitches on which pitches survive', () => {
+    const voicing = { offsets: [0, 0, 3] };
+    const voices = voicedVoices(stack(TRIAD), 0, PIANO_ROLL_MAX_MIDI - 1, voicing);
+
+    expect(voices.map(v => v.pitch)).toEqual(
+      voicedPitches(stack(TRIAD), 0, PIANO_ROLL_MAX_MIDI - 1, voicing)
+    );
   });
 });

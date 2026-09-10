@@ -91,6 +91,11 @@ import {
 import {
   alterSegment,
   convertSegmentKind,
+  withStackSize,
+  withToggledTone,
+  withTriadColour,
+  withSeventhColour,
+  withDiatonicQuality,
   cycleSegmentInversion,
   generateNotesFromSegments,
   retuneSegmentsToScale,
@@ -292,6 +297,22 @@ interface ProjectState {
     segmentIds: string[],
     target: import('@/engine/chordOperations').SegmentKindTarget
   ) => void;
+  /** How many tones the blocks stack: 1 a note, 2 a dyad, 3 a triad, 4 a seventh, 5 a ninth. */
+  setSegmentsStackSize: (segmentIds: string[], size: number) => void;
+  /** Switch one chord tone on or off. The root is refused — everything is counted from it. */
+  toggleSegmentsTone: (segmentIds: string[], tone: number) => void;
+  /** Pin the triad the blocks are coloured by, keeping whatever seventh they have. */
+  setSegmentsTriadColour: (
+    segmentIds: string[],
+    triad: import('@/engine/chords').TriadColour
+  ) => void;
+  /** Pin the seventh's colour; `undefined` hands it back to the key. */
+  setSegmentsSeventhColour: (
+    segmentIds: string[],
+    seventh?: import('@/engine/chords').SeventhColour
+  ) => void;
+  /** Unpin, and take whatever quality each block's own key spells for its degree. */
+  clearSegmentsQualityPin: (segmentIds: string[]) => void;
   setLoopRegion: (start: number | null, end: number | null) => void;
   /**
    * Draw a named span over the arrangement. Returns its id, so the caller can select
@@ -1666,6 +1687,49 @@ export const projectStore = create<ProjectState>((set, get) => ({
     const next = transformSelection(get(), segmentIds, (segment, scale) =>
       convertSegmentKind(segment, scale, target)
     );
+    if (next) set({ project: next });
+  },
+
+  setSegmentsStackSize: (segmentIds, size) => {
+    const project = get().project;
+    if (!project) return;
+    const next = transformSelection(get(), segmentIds, (segment, scale) =>
+      withStackSize(segment, scale, size)
+    );
+    if (next) set({ project: next });
+  },
+
+  toggleSegmentsTone: (segmentIds, tone) => {
+    const project = get().project;
+    if (!project) return;
+    const next = transformSelection(get(), segmentIds, (segment, scale) =>
+      withToggledTone(segment, scale, tone)
+    );
+    if (next) set({ project: next });
+  },
+
+  setSegmentsTriadColour: (segmentIds, triad) => {
+    const project = get().project;
+    if (!project) return;
+    const next = transformSelection(get(), segmentIds, (segment, scale) =>
+      withTriadColour(segment, scale, triad)
+    );
+    if (next) set({ project: next });
+  },
+
+  setSegmentsSeventhColour: (segmentIds, seventh) => {
+    const project = get().project;
+    if (!project) return;
+    const next = transformSelection(get(), segmentIds, (segment, scale) =>
+      withSeventhColour(segment, scale, seventh)
+    );
+    if (next) set({ project: next });
+  },
+
+  clearSegmentsQualityPin: segmentIds => {
+    const project = get().project;
+    if (!project) return;
+    const next = transformSelection(get(), segmentIds, withDiatonicQuality);
     if (next) set({ project: next });
   },
 

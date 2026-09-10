@@ -398,6 +398,6 @@ describe('the mode a formula is written in', () => {
 describe('the library version', () => {
   it('is written on everything this app saves', () => {
     expect(emptyLibrary('x').version).toBe(FORMULA_LIBRARY_VERSION);
-    expect(FORMULA_LIBRARY_VERSION).toBe('1.1');
+    expect(FORMULA_LIBRARY_VERSION).toBe('1.2');
   });
 });

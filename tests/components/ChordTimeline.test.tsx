@@ -921,24 +921,26 @@ describe('ChordTimeline', () => {
     expect(within(block).getByText('ii')).toBeInTheDocument();
   });
 
-  it('renders a note segment with its note name and octave', () => {
+  it('renders a one-tone block as its degree, sounding a single note', () => {
     render(<ChordTimeline />);
-    const noteItem = getPaletteItems({ root: 'C', type: 'major' }, 'notes')[2]; // E
-    dropAt(bars()[0].id, noteItem, 0);
+    const oneTone = getPaletteItems({ root: 'C', type: 'major' }, 1)[2]; // E
+    dropAt(bars()[0].id, oneTone, 0);
 
     const block = screen.getByTestId(`chord-block-${segments()[0].id}`);
-    expect(within(block).getByText('E4')).toBeInTheDocument();
+    expect(within(block).getByText('E')).toBeInTheDocument();
     expect(barNotes(bars()[0], PHRASE_TRACK_KEY).map(n => n.pitch)).toEqual([64]);
   });
 
-  it('badges a chord segment with its octave, but not a note segment', () => {
+  it('badges every degree-named block with its octave, whatever its size', () => {
+    // A one-tone block is a chord segment now, so it carries a register like any
+    // other — it is the recorded note, with an absolute pitch, that has none.
     render(<ChordTimeline />);
     dropAt(bars()[0].id, cMajorChords()[0], 0);
-    dropAt(bars()[0].id, getPaletteItems({ root: 'C', type: 'major' }, 'notes')[0], 2);
+    dropAt(bars()[0].id, getPaletteItems({ root: 'C', type: 'major' }, 1)[0], 2);
 
-    const [chord, note] = segments();
+    const [chord, oneTone] = segments();
     expect(screen.getByTestId(`octave-badge-${chord.id}`)).toHaveTextContent('oct 4');
-    expect(screen.queryByTestId(`octave-badge-${note.id}`)).not.toBeInTheDocument();
+    expect(screen.getByTestId(`octave-badge-${oneTone.id}`)).toHaveTextContent('oct 4');
   });
 
   it('shows different badges for chords dropped from different octaves', () => {

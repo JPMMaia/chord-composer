@@ -120,7 +120,7 @@ describe('recording pass — Ctrl+Z erases the take', () => {
 
     editorStore.setState({
       paletteScale: { root: 'C', type: 'major' },
-      paletteMode: 'chords',
+      paletteSize: 3,
       paletteOctave: 4,
       recordArmed: true,
       recordQuantize: true,

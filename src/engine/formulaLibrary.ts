@@ -20,7 +20,8 @@
 import type { ChordQuality, ScaleType } from '@/types/music';
 import type { FormulaGroup, FormulaScaleRef, FormulaStep, MelodicFormula } from '@/engine/formulas';
 import type { FileFilter } from '@/engine/projectFile';
-import { CHORD_INTERVALS } from '@/engine/chords';
+import { CHORD_INTERVALS, readStackTones } from '@/engine/chords';
+import { MAX_CHORD_TONE } from '@/types/music';
 import { SCALE_INTERVALS } from '@/engine/scales';
 import { readVoicing } from '@/engine/voicing';
 
@@ -35,7 +36,7 @@ import { readVoicing } from '@/engine/voicing';
  * Nothing is read differently on the strength of the version; the field is here so
  * that a change which *cannot* degrade so quietly has somewhere to announce itself.
  */
-export const FORMULA_LIBRARY_VERSION = '1.1';
+export const FORMULA_LIBRARY_VERSION = '1.2';
 
 /** The Open/Save dialog filter. JSON contents, but a name and a suffix of its own. */
 export const FORMULA_LIBRARY_FILTER: FileFilter = {
@@ -134,10 +135,15 @@ function readStep(raw: unknown): FormulaStep | null {
     isChord && typeof s.quality === 'string' && s.quality in CHORD_INTERVALS
       ? (s.quality as ChordQuality)
       : undefined;
+  // Clamped to the widest stack this app can build, not to a seventh: a ninth has a
+  // fourth inversion, and clamping to 3 would quietly return it to root position.
   const inversion =
     isChord && typeof s.inversion === 'number' && Number.isFinite(s.inversion)
-      ? Math.max(0, Math.min(3, Math.round(s.inversion))) || undefined
+      ? Math.max(0, Math.min(MAX_CHORD_TONE, Math.round(s.inversion))) || undefined
       : undefined;
+  // The same reader a project file's stack goes through, so the two documents cannot
+  // come to disagree about what a hand-edited one means.
+  const tones = isChord ? readStackTones(s.tones) : undefined;
 
   return {
     kind: isChord ? 'chord' : undefined,
@@ -146,6 +152,7 @@ function readStep(raw: unknown): FormulaStep | null {
     scale: readScaleRef(s.scale),
     quality,
     inversion,
+    tones,
     // The same reader a project file's voicing goes through, so the two documents
     // cannot come to disagree about what a hand-edited one means.
     voicing: isChord ? readVoicing(s.voicing) : undefined,

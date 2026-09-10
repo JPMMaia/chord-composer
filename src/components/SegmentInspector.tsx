@@ -1,12 +1,21 @@
 import { editSurface, projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { findSegment } from '@/engine/timeline';
-import { currentKind, resolveSegmentChord, segmentVelocity } from '@/engine/chordOperations';
-import type { SegmentKindTarget } from '@/engine/chordOperations';
+import { resolveSegmentChord, segmentVelocity } from '@/engine/chordOperations';
 import { projectScale, segmentScale } from '@/engine/scales';
 import { ScaleSelect } from '@/components/ScaleSelect';
-import { DEFAULT_VELOCITY, voicedPitches } from '@/engine/voicing';
-import { CHORD_INTERVALS, midiToNoteLabel } from '@/engine/chords';
+import { DEFAULT_VELOCITY, voicedVoices } from '@/engine/voicing';
+import type { ChordTones } from '@/engine/voicing';
+import {
+  midiToNoteLabel,
+  segmentChordTones,
+  segmentQuality,
+  segmentTones,
+  triadColourOf,
+} from '@/engine/chords';
+import type { SeventhColour, TriadColour } from '@/engine/chords';
+import { PALETTE_SIZES, SIZE_LABELS } from '@/engine/palette';
+import { seventhColourOf } from '@/engine/chords';
 import { describePosition, formatNoteValue } from '@/engine/meterDisplay';
 import { DEFAULT_TIME_SIGNATURE, PIANO_ROLL_MAX_MIDI, PIANO_ROLL_MIN_MIDI } from '@/utils/constants';
 import { useRef, useState, type ReactNode } from 'react';
@@ -20,10 +29,31 @@ import type {
 } from '@/types/music';
 
 /** Inversion names by index; root position is named so a button can carry it. */
-const INVERSION_NAMES = ['Root', '1st', '2nd', '3rd'];
+const INVERSION_NAMES = ['Root', '1st', '2nd', '3rd', '4th'];
 
-/** Chord tone names by index, matching how `CHORD_INTERVALS` stacks them. */
-const TONE_NAMES = ['Root', '3rd', '5th', '7th'];
+/** Chord tone names by index, matching the order a stack builds them in. */
+const TONE_NAMES = ['Root', '3rd', '5th', '7th', '9th'];
+
+/** The triad a chord is coloured by — offered at every size above a single tone. */
+const TRIAD_COLOURS: { value: TriadColour; label: string }[] = [
+  { value: 'major', label: 'Maj' },
+  { value: 'minor', label: 'Min' },
+  { value: 'diminished', label: 'Dim' },
+  { value: 'augmented', label: 'Aug' },
+  { value: 'sus2', label: 'Sus2' },
+  { value: 'sus4', label: 'Sus4' },
+];
+
+/**
+ * The seventh's colour. `undefined` is the key's own, which is what every block that
+ * has never been touched here has.
+ */
+const SEVENTH_COLOURS: { value: SeventhColour | undefined; label: string }[] = [
+  { value: undefined, label: 'Key' },
+  { value: 'major', label: 'Maj' },
+  { value: 'minor', label: 'Min' },
+  { value: 'diminished', label: 'Dim' },
+];
 
 /**
  * Alterations a note may be given, by semitones off its degree.
@@ -168,6 +198,11 @@ export function SegmentInspector() {
   const setSegmentsAlter = projectStore(s => s.setSegmentsAlter);
   const withRecording = projectStore(s => s.withRecording);
   const convertSegmentsKind = projectStore(s => s.convertSegmentsKind);
+  const setSegmentsStackSize = projectStore(s => s.setSegmentsStackSize);
+  const toggleSegmentsTone = projectStore(s => s.toggleSegmentsTone);
+  const setSegmentsTriadColour = projectStore(s => s.setSegmentsTriadColour);
+  const setSegmentsSeventhColour = projectStore(s => s.setSegmentsSeventhColour);
+  const clearSegmentsQualityPin = projectStore(s => s.clearSegmentsQualityPin);
   const setSegmentsScale = projectStore(s => s.setSegmentsScale);
 
   // Selected ids name blocks in the phrase being edited, not in the compiled song —
@@ -199,22 +234,29 @@ export function SegmentInspector() {
   const scaleOf = (segment: ChordSegment) => segmentScale(segment, fallbackScale);
 
   // Each chord is resolved against the key it was actually written in, so a
-  // selection spanning keys still counts its tones correctly.
-  const toneCounts = chords.map(
-    l => CHORD_INTERVALS[resolveSegmentChord(l.segment, scaleOf(l.segment)).quality].length
-  );
-  const toneCount = sharedValue(toneCounts);
-  const perToneControls = toneCount !== undefined && chords.length > 0;
+  // selection spanning keys still reads its stack correctly.
+  //
+  // Compared as whole *sets* rather than as counts: two four-note chords can stack
+  // different tones — one a seventh, one a ninth with no fifth — and a row labelled
+  // "the 7th" would then address a different note in each.
+  const toneSets = chords.map(l => segmentTones(l.segment, scaleOf(l.segment)));
+  const sharedToneKey = sharedValue(toneSets.map(t => t.join(',')));
+  const tones: number[] | undefined =
+    sharedToneKey === undefined ? undefined : sharedToneKey.split(',').map(Number);
+  const toneCount = tones?.length;
+  const perToneControls = tones !== undefined && chords.length > 0;
 
   // Root and type are shared separately: a selection agreeing on one but not the
   // other should still show the half it agrees on.
   const sharedRoot = sharedValue(segments.map(s => scaleOf(s).root));
   const sharedType = sharedValue(segments.map(s => scaleOf(s).type));
 
-  // Derive the current kind of each segment so the dropdown can show the
-  // shared value or go blank when kinds disagree.
-  const segmentKinds = segments.map(s => currentKind(s));
-  const sharedKind = sharedValue(segmentKinds) as SegmentKindTarget | undefined;
+  // The colour every selected chord shares, or undefined when they disagree — the
+  // same "a blank control means they differ" idiom the rest of the panel uses.
+  const qualities = chords.map(l => segmentQuality(l.segment, scaleOf(l.segment)));
+  const sharedTriad = sharedValue(qualities.map(q => triadColourOf(q)));
+  const sharedSeventh = sharedValue(qualities.map(q => seventhColourOf(q)));
+  const anyPinned = chords.some(l => l.segment.qualityPinned);
 
   return (
     <div className="pt-2 border-t border-gray-700 space-y-3" data-testid="segment-inspector">
@@ -226,19 +268,103 @@ export function SegmentInspector() {
         }
       />
 
-      <Section label="Kind">
-        <select
-          data-testid="segment-kind-select"
-          value={sharedKind ?? ''}
-          disabled={located.length === 0}
-          onChange={e => convertSegmentsKind(ids, e.target.value as SegmentKindTarget)}
-          className={FIELD_CLASS}
-        >
-          <option value="note">Note</option>
-          <option value="triad">Triad</option>
-          <option value="seventh">Seventh</option>
-        </select>
-      </Section>
+      {/* A recorded block carries an absolute pitch and names no degree, so it has no
+          stack to size until it is given one. */}
+      {chords.length === 0 ? (
+        <Section label="Kind">
+          <button
+            type="button"
+            data-testid="make-chord"
+            onClick={() => convertSegmentsKind(ids, 'triad')}
+            className="w-full px-3 py-1.5 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded transition-colors"
+          >
+            Make a chord
+          </button>
+        </Section>
+      ) : (
+        <>
+          <Section label="Size">
+            <select
+              data-testid="segment-size-select"
+              value={toneCount ?? ''}
+              onChange={e => setSegmentsStackSize(ids, Number(e.target.value))}
+              className={FIELD_CLASS}
+            >
+              {toneCount === undefined && <option value="">Mixed</option>}
+              {PALETTE_SIZES.map(n => (
+                <option key={n} value={n}>
+                  {SIZE_LABELS[n]}
+                </option>
+              ))}
+            </select>
+          </Section>
+
+          {/* The size stepper writes a plain stack; these put the gaps back — a fifth
+              dyad, a ninth with no fifth, a seventh with no third. */}
+          <Section label="Tones">
+            <div className="flex gap-1" role="group" aria-label="Tones">
+              {TONE_NAMES.map((name, tone) => (
+                <ToggleButton
+                  key={tone}
+                  testId={`tone-${tone}`}
+                  label={name}
+                  // Everything is counted from the root: a register, an inversion and
+                  // a captured formula all start there.
+                  disabled={tone === 0}
+                  title={tone === 0 ? 'Every chord sounds its root' : undefined}
+                  active={tones?.includes(tone) ?? false}
+                  onClick={() => toggleSegmentsTone(ids, tone)}
+                />
+              ))}
+            </div>
+          </Section>
+
+          {(toneCount ?? 0) > 1 && (
+            <Section label="Triad">
+              <div className="flex gap-1 flex-wrap" role="group" aria-label="Triad">
+                {TRIAD_COLOURS.map(colour => (
+                  <ToggleButton
+                    key={colour.value}
+                    testId={`triad-${colour.value}`}
+                    label={colour.label}
+                    active={sharedTriad === colour.value}
+                    onClick={() => setSegmentsTriadColour(ids, colour.value)}
+                  />
+                ))}
+              </div>
+            </Section>
+          )}
+
+          {tones?.includes(3) && (
+            <Section label="7th">
+              <div className="flex gap-1" role="group" aria-label="Seventh">
+                {SEVENTH_COLOURS.map(colour => (
+                  <ToggleButton
+                    key={colour.label}
+                    testId={`seventh-${colour.value ?? 'key'}`}
+                    label={colour.label}
+                    active={sharedSeventh === colour.value}
+                    onClick={() => setSegmentsSeventhColour(ids, colour.value)}
+                  />
+                ))}
+              </div>
+            </Section>
+          )}
+
+          {/* The way out of a pin, and the reason a pin can be a plain flag rather
+              than something guessed by comparing a quality against its degree. */}
+          {anyPinned && (
+            <button
+              type="button"
+              data-testid="follow-key"
+              onClick={() => clearSegmentsQualityPin(ids)}
+              className="w-full px-3 py-1.5 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded transition-colors"
+            >
+              Follow the key
+            </button>
+          )}
+        </>
+      )}
 
       {/* Outside the chords-only branch below: a note is written in a key too, and
           retuning one moves it to the same degree of the new scale. */}
@@ -252,25 +378,24 @@ export function SegmentInspector() {
         />
       </Section>
 
-      {/* Notes only, and the only way to write one the scale does not contain: the
-          piano roll refuses off-scale pitches, so without this a chromatic note could
-          only arrive from a formula or a recording. */}
-      {chords.length === 0 && (
-        <Section label="Alteration">
-          <div className="flex gap-1" role="group" aria-label="Alteration">
-            {ALTERATIONS.map(({ value, label, name }) => (
-              <ToggleButton
-                key={value}
-                testId={`alter-${value}`}
-                label={label}
-                title={name}
-                active={sharedValue(segments.map(s => s.alter ?? 0)) === value}
-                onClick={() => setSegmentsAlter(ids, value)}
-              />
-            ))}
-          </div>
-        </Section>
-      )}
+      {/* The only way to write a block the scale does not contain: the piano roll
+          refuses off-scale pitches, and the palette offers the key's own degrees, so
+          without this a chromatic block could only arrive from a formula or a
+          recording. On a note it bends the pitch; on a chord, the root. */}
+      <Section label="Alteration">
+        <div className="flex gap-1" role="group" aria-label="Alteration">
+          {ALTERATIONS.map(({ value, label, name }) => (
+            <ToggleButton
+              key={value}
+              testId={`alter-${value}`}
+              label={label}
+              title={name}
+              active={sharedValue(segments.map(s => s.alter ?? 0)) === value}
+              onClick={() => setSegmentsAlter(ids, value)}
+            />
+          ))}
+        </div>
+      </Section>
 
       {/* Offered for every kind, unlike the voicing controls below: a note sounds at
           some velocity too, but only a chord has tones to voice. */}
@@ -290,7 +415,7 @@ export function SegmentInspector() {
           {perToneControls && (
             <Section label="Inversion">
               <div className="flex gap-1" role="group" aria-label="Inversion">
-                {INVERSION_NAMES.slice(0, toneCount).map((name, index) => (
+                {INVERSION_NAMES.slice(0, toneCount ?? 0).map((name, index) => (
                   <ToggleButton
                     key={name}
                     testId={`inversion-${index}`}
@@ -306,8 +431,9 @@ export function SegmentInspector() {
           <Section label="Spacing">
             <div className="flex gap-1" role="group" aria-label="Spacing">
               {SPACING_PRESETS.map(preset => {
-                // Drop 3 needs a third voice from the top to drop.
-                const unavailable = preset.value === 'drop3' && (toneCount ?? 3) < 3;
+                // Every preset but Close moves a voice relative to the ones around
+                // it, so all of them need three sounding voices to mean anything.
+                const unavailable = preset.value !== 'close' && (toneCount ?? 3) < 3;
                 return (
                   <ToggleButton
                     key={preset.value}
@@ -318,7 +444,7 @@ export function SegmentInspector() {
                       unavailable
                         ? 'Needs at least three voices'
                         : preset.value === 'open' && toneCount === 3
-                          ? 'On a triad, open position is the same as drop 2'
+                          ? 'On a three-note chord, open position is the same as drop 2'
                           : undefined
                     }
                     active={
@@ -334,7 +460,7 @@ export function SegmentInspector() {
           {perToneControls && (
             <Section label="Voices">
               <div className="space-y-1">
-                {Array.from({ length: toneCount }, (_, tone) => (
+                {tones.map(tone => (
                   <VoiceRow
                     key={tone}
                     tone={tone}
@@ -351,7 +477,7 @@ export function SegmentInspector() {
           {perToneControls && (
             <Section label="Doubling">
               <div className="space-y-1">
-                {Array.from({ length: toneCount }, (_, tone) => (
+                {tones.map(tone => (
                   <div key={tone} className="flex items-center gap-1">
                     <span className="text-xs text-gray-400 w-10">{TONE_NAMES[tone]}</span>
                     {([1, -1] as const).map(octaves => (
@@ -514,8 +640,8 @@ function VelocitySection({
 /**
  * One chord tone, with the pitch it currently sounds and steppers to move it.
  *
- * The pitch is computed with the same `voicedPitches` the note generator uses, so
- * the label and the piano roll cannot drift apart.
+ * The pitch is computed from the same voicing the note generator uses, so the label
+ * and the piano roll cannot drift apart.
  */
 function VoiceRow({
   tone,
@@ -531,18 +657,20 @@ function VoiceRow({
   single: boolean;
   onStep: (offsetOctaves: number) => void;
 }) {
-  const { quality, rootSemitone } = resolveSegmentChord(segment, scale);
+  const { rootSemitone } = resolveSegmentChord(segment, scale);
   const baseMidi = ((segment.octave ?? 4) + 1) * 12 + rootSemitone;
   const offset = segment.voicing?.offsets?.[tone] ?? 0;
 
-  // Tone order, undoubled voices first, so index `tone` is this tone's pitch.
-  const pitches = voicedPitches(
-    CHORD_INTERVALS[quality],
+  // Found by tone rather than indexed by it: a voice that left the roll or
+  // collided with another is dropped from this list, so its position in it says
+  // nothing about which chord tone it is.
+  const chord: ChordTones = segmentChordTones(segment, scale);
+  const sounding = voicedVoices(
+    chord,
     segment.inversion ?? 0,
     baseMidi,
     segment.voicing
-  );
-  const sounding = pitches[tone];
+  ).find(v => v.tone === tone && !v.doubled)?.pitch;
 
   const step = (delta: number) => onStep(offset + delta);
   const wouldLeaveRange = (delta: number) =>

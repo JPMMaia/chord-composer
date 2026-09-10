@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { getPaletteItems, type PaletteItem, type PaletteMode } from '@/engine/palette';
+import { getPaletteItems, PALETTE_SIZES, SIZE_LABELS, type PaletteItem } from '@/engine/palette';
 import { getScaleName } from '@/engine/scales';
 import { ScaleSelect } from '@/components/ScaleSelect';
 import { editorStore } from '@/store/editorStore';
@@ -7,12 +7,6 @@ import { MAX_SEGMENT_OCTAVE, MIN_SEGMENT_OCTAVE } from '@/utils/constants';
 
 /** MIME type carrying the full palette item across a drag. */
 export const PALETTE_DRAG_TYPE = 'application/x-palette-item';
-
-const MODE_LABELS: Record<PaletteMode, string> = {
-  notes: 'Notes',
-  chords: 'Chords',
-  sevenths: 'Seventh Chords',
-};
 
 /** Octaves offered for new blocks — the same registers a segment may be moved to. */
 const OCTAVES = Array.from(
@@ -24,24 +18,28 @@ const OCTAVES = Array.from(
  * Horizontal strip of draggable blocks for the current scale.
  *
  * Every block reads `Label (Numeral)` — `C (I)`, `Dm (ii)`, `G7 (V7)` — so the
- * harmonic function stays visible while switching modes swaps only the material.
+ * harmonic function stays visible while changing the size swaps only the material.
+ *
+ * The size control is one dimension where three named families used to be: a degree
+ * is the same degree however thickly it is played, so the strip lists the degrees
+ * once and the dropdown says how much of each to take.
  *
  * The key is the strip's own, not the selected bar's: choosing what to compose
  * with is a different act from changing what an existing block is, so moving this
  * dropdown re-stocks the palette and touches nothing already on the timeline.
  *
- * Mode and octave live in `editorStore` rather than here, because the strip is no
+ * Size and octave live in `editorStore` rather than here, because the strip is no
  * longer their only reader: the number keys play this same palette.
  */
 export const ScalePalette: React.FC = () => {
   const scale = editorStore(s => s.paletteScale);
   const setPaletteScale = editorStore(s => s.setPaletteScale);
-  const mode = editorStore(s => s.paletteMode);
-  const setMode = editorStore(s => s.setPaletteMode);
+  const size = editorStore(s => s.paletteSize);
+  const setSize = editorStore(s => s.setPaletteSize);
   const octave = editorStore(s => s.paletteOctave);
   const setOctave = editorStore(s => s.setPaletteOctave);
 
-  const items = useMemo(() => getPaletteItems(scale, mode, octave), [scale, mode, octave]);
+  const items = useMemo(() => getPaletteItems(scale, size, octave), [scale, size, octave]);
 
   const handleDragStart = (e: React.DragEvent, item: PaletteItem) => {
     e.dataTransfer.setData(PALETTE_DRAG_TYPE, JSON.stringify(item));
@@ -60,19 +58,19 @@ export const ScalePalette: React.FC = () => {
           onChange={patch => setPaletteScale({ ...scale, ...patch })}
         />
 
-        <label htmlFor="palette-mode" className="sr-only">
-          Palette mode
+        <label htmlFor="palette-size" className="sr-only">
+          Palette size
         </label>
         <select
-          id="palette-mode"
-          aria-label="Palette mode"
-          value={mode}
-          onChange={e => setMode(e.target.value as PaletteMode)}
+          id="palette-size"
+          aria-label="Palette size"
+          value={size}
+          onChange={e => setSize(Number(e.target.value))}
           className="px-2 py-1.5 text-sm bg-gray-700 border border-gray-600 rounded text-gray-200 focus:outline-none focus:border-indigo-500"
         >
-          {(Object.keys(MODE_LABELS) as PaletteMode[]).map(m => (
-            <option key={m} value={m}>
-              {MODE_LABELS[m]}
+          {PALETTE_SIZES.map(n => (
+            <option key={n} value={n}>
+              {SIZE_LABELS[n]}
             </option>
           ))}
         </select>
@@ -108,7 +106,7 @@ export const ScalePalette: React.FC = () => {
               data-testid={`palette-item-${item.id}`}
               onDragStart={e => handleDragStart(e, item)}
               className={`px-3 py-1.5 rounded-md text-sm cursor-grab active:cursor-grabbing select-none border transition-colors ${
-                item.kind === 'note'
+                item.tones.length === 1
                   ? 'bg-teal-900/60 border-teal-700 text-teal-100 hover:bg-teal-800'
                   : 'bg-gray-700 border-gray-600 text-gray-100 hover:bg-gray-600'
               }`}

@@ -151,13 +151,13 @@ describe('SegmentInspector', () => {
       expect(screen.getByTestId('spacing-drop3')).not.toBeDisabled();
     });
 
-    it('notes that open and drop 2 coincide on a triad', () => {
+    it('notes that open and drop 2 coincide on three notes', () => {
       placeAndSelect(chordSegment());
       render(<SegmentInspector />);
 
       expect(screen.getByTestId('spacing-open')).toHaveAttribute(
         'title',
-        'On a triad, open position is the same as drop 2'
+        'On a three-note chord, open position is the same as drop 2'
       );
     });
   });
@@ -575,10 +575,18 @@ describe('SegmentInspector', () => {
       expect(segmentOf(note.id).alter).toBeUndefined();
     });
 
-    it('is not offered for a chord, which names a stack rather than a note', () => {
-      placeAndSelect(chordSegment());
+    it('is offered for a chord too, where it bends the root', () => {
+      // With the palette's separate Notes mode gone, this is the only way left to
+      // write a block the key does not contain.
+      const segment = placeAndSelect(
+        chordSegment({ root: 'A', quality: 'minor', romanNumeral: 'vi', chordSymbol: 'Am' })
+      );
       render(<SegmentInspector />);
-      expect(screen.queryByTestId('alter-1')).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId('alter--1'));
+
+      expect(segmentOf(segment.id).root).toBe('G#');
+      expect(segmentOf(segment.id).romanNumeral).toBe('♭vi');
     });
   });
 
@@ -591,4 +599,161 @@ describe('SegmentInspector', () => {
     expect(screen.getByText('A single note has no chord tones to voice.')).toBeInTheDocument();
     expect(screen.queryByTestId('spacing-drop2')).not.toBeInTheDocument();
   });
+
+  describe('the stack', () => {
+    it('grows a triad into a seventh and a ninth, and shrinks it back', () => {
+      const segment = placeAndSelect(chordSegment());
+      render(<SegmentInspector />);
+
+      const size = screen.getByTestId('segment-size-select');
+      expect((size as HTMLSelectElement).value).toBe('3');
+      expect(pitchesOf(segment.id).sort((a, b) => a - b)).toEqual([60, 64, 67]);
+
+      fireEvent.change(size, { target: { value: '4' } });
+      expect(segmentOf(segment.id).chordSymbol).toBe('Cmaj7');
+      expect(pitchesOf(segment.id).sort((a, b) => a - b)).toEqual([60, 64, 67, 71]);
+
+      fireEvent.change(screen.getByTestId('segment-size-select'), { target: { value: '5' } });
+      expect(segmentOf(segment.id).chordSymbol).toBe('Cmaj9');
+      expect(pitchesOf(segment.id).sort((a, b) => a - b)).toEqual([60, 64, 67, 71, 74]);
+
+      fireEvent.change(screen.getByTestId('segment-size-select'), { target: { value: '1' } });
+      expect(segmentOf(segment.id).chordSymbol).toBe('C');
+      expect(pitchesOf(segment.id)).toEqual([60]);
+    });
+
+    it('switches a single tone on and off, and never the root', () => {
+      const segment = placeAndSelect(chordSegment());
+      render(<SegmentInspector />);
+
+      // Off with the third: a power chord.
+      fireEvent.click(screen.getByTestId('tone-1'));
+      expect(segmentOf(segment.id).chordSymbol).toBe('C5');
+      expect(pitchesOf(segment.id).sort((a, b) => a - b)).toEqual([60, 67]);
+
+      // Back on again.
+      fireEvent.click(screen.getByTestId('tone-1'));
+      expect(segmentOf(segment.id).chordSymbol).toBe('C');
+
+      expect(screen.getByTestId('tone-0')).toBeDisabled();
+    });
+
+    it('lights exactly the tones the chord sounds', () => {
+      placeAndSelect(chordSegment({ quality: 'maj7', tones: [0, 1, 3, 4] }));
+      render(<SegmentInspector />);
+
+      expect(screen.getByTestId('tone-0')).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.getByTestId('tone-1')).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.getByTestId('tone-2')).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.getByTestId('tone-3')).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.getByTestId('tone-4')).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('keeps an offset on the seventh when the fifth beneath it is switched off', () => {
+      // The reason offsets are keyed by chord tone rather than by position.
+      const segment = placeAndSelect(
+        chordSegment({ quality: 'maj7', tones: [0, 1, 2, 3], voicing: { offsets: [0, 0, 0, -1] } })
+      );
+      render(<SegmentInspector />);
+
+      expect(pitchesOf(segment.id).sort((a, b) => a - b)).toEqual([59, 60, 64, 67]);
+
+      fireEvent.click(screen.getByTestId('tone-2'));
+      // G4 is gone; B3 stays exactly where the offset put it.
+      expect(pitchesOf(segment.id).sort((a, b) => a - b)).toEqual([59, 60, 64]);
+    });
+
+    it('offers an inversion for every tone the stack sounds', () => {
+      placeAndSelect(chordSegment({ quality: 'maj7', tones: [0, 1, 2, 3, 4] }));
+      render(<SegmentInspector />);
+
+      expect(screen.getByTestId('inversion-4')).toBeInTheDocument();
+    });
+
+    it('offers no voicing presets to a chord too thin to space', () => {
+      placeAndSelect(chordSegment({ tones: [0, 1] }));
+      render(<SegmentInspector />);
+
+      expect(screen.getByTestId('spacing-close')).not.toBeDisabled();
+      expect(screen.getByTestId('spacing-drop2')).toBeDisabled();
+      expect(screen.getByTestId('spacing-open')).toBeDisabled();
+    });
+  });
+
+  describe('the colour', () => {
+    it('pins a triad colour and says so in the name', () => {
+      const segment = placeAndSelect(
+        chordSegment({ root: 'D', quality: 'minor', romanNumeral: 'ii', chordSymbol: 'Dm' })
+      );
+      render(<SegmentInspector />);
+
+      expect(screen.getByTestId('triad-minor')).toHaveAttribute('aria-pressed', 'true');
+
+      fireEvent.click(screen.getByTestId('triad-major'));
+      expect(segmentOf(segment.id).quality).toBe('major');
+      expect(segmentOf(segment.id).qualityPinned).toBe(true);
+      expect(segmentOf(segment.id).romanNumeral).toBe('II');
+    });
+
+    it('offers the seventh only once the stack reaches one', () => {
+      const segment = placeAndSelect(chordSegment());
+      render(<SegmentInspector />);
+
+      expect(screen.queryByTestId('seventh-key')).not.toBeInTheDocument();
+
+      fireEvent.change(screen.getByTestId('segment-size-select'), { target: { value: '4' } });
+      expect(screen.getByTestId('seventh-major')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId('seventh-minor'));
+      expect(segmentOf(segment.id).quality).toBe('dominant7');
+      expect(pitchesOf(segment.id).sort((a, b) => a - b)).toEqual([60, 64, 67, 70]);
+    });
+
+    it('hands a pinned colour back to the key', () => {
+      const segment = placeAndSelect(
+        chordSegment({ root: 'D', quality: 'minor', romanNumeral: 'ii', chordSymbol: 'Dm' })
+      );
+      render(<SegmentInspector />);
+
+      expect(screen.queryByTestId('follow-key')).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId('triad-major'));
+      fireEvent.click(screen.getByTestId('follow-key'));
+
+      expect(segmentOf(segment.id).quality).toBe('minor');
+      expect(segmentOf(segment.id).qualityPinned).toBeUndefined();
+    });
+
+    it('leaves the colour blank when the selection disagrees', () => {
+      const major = chordSegment();
+      const minor = chordSegment({ root: 'D', quality: 'minor', romanNumeral: 'ii' });
+      state().insertSegment(bars()[0].id, 0, major, trackId());
+      state().insertSegment(bars()[1].id, 0, minor, trackId());
+      selectionStore.getState().setSelectedSegments([major.id, minor.id]);
+      render(<SegmentInspector />);
+
+      expect(screen.getByTestId('triad-major')).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.getByTestId('triad-minor')).toHaveAttribute('aria-pressed', 'false');
+    });
+  });
+
+  describe('a recorded note', () => {
+    it('is given a stack only when asked', () => {
+      const note: ChordSegment = {
+        id: generateId(),
+        kind: 'note',
+        pitch: 60,
+        duration: 1,
+      };
+      placeAndSelect(note);
+      render(<SegmentInspector />);
+
+      expect(screen.queryByTestId('segment-size-select')).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId('make-chord'));
+      expect(segmentOf(note.id).kind).toBe('chord');
+      expect(segmentOf(note.id).chordSymbol).toBe('C');
+    });
+  });
+
 });

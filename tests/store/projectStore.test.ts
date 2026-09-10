@@ -1732,14 +1732,15 @@ describe('projectStore', () => {
           expect(segmentOf(note.id).alter).toBeUndefined();
         });
 
-        it('leaves a chord alone — there is no one note to bend', () => {
+        it('moves a chord bodily, since the accidental belongs to its root', () => {
           const chord = chordSegment({ octave: 4 });
           appendSegment(chord);
           const before = pitchesOf(chord.id);
 
           state().setSegmentsAlter([chord.id], 1);
 
-          expect(pitchesOf(chord.id)).toEqual(before);
+          // The whole stack rises a semitone with the root it is built on.
+          expect(pitchesOf(chord.id)).toEqual(before.map(p => p + 1));
         });
       });
 

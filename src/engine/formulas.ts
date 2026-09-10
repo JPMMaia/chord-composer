@@ -99,6 +99,16 @@ export interface FormulaStep {
   /** Chord steps only. Absent is root position. */
   inversion?: number;
   /**
+   * Chord steps only: which chord tones the block sounds, as `ChordSegment.tones`
+   * spells them. Absent means every tone the quality names — a triad or a seventh,
+   * which is every chord step written before a stack could vary.
+   *
+   * Carried verbatim in both directions, like `voicing` beside it. A stack says
+   * nothing about the key it lands in — tone 3 is the seventh of wherever it is
+   * dropped — so a captured ninth comes back a ninth in any key.
+   */
+  tones?: number[];
+  /**
    * Chord steps only: spacing, per-tone octave offsets, doublings, arpeggio or strum.
    *
    * Carried verbatim in both directions. None of it depends on the key — `offsets` is
@@ -409,13 +419,20 @@ function chordFromStep(
   const diatonic = diatonicChordAt(scale, degree);
   const quality = step.quality ?? diatonic.quality;
   const root = SEMITONE_TO_NOTE[rootPitch % 12];
-  const isSeventh = (CHORD_INTERVALS[quality]?.length ?? 3) > 3;
+  // How far the stack reaches, which is what decides whether the numeral wears an
+  // extension. A step naming no tones sounds every tone of its quality, so the
+  // quality's own width still answers for every formula written before stacks.
+  const highestTone = step.tones?.length
+    ? Math.max(...step.tones)
+    : (CHORD_INTERVALS[quality]?.length ?? 3) - 1;
+  const isSeventh = highestTone >= 3;
 
   return {
     kind: 'chord',
     root,
     quality,
     inversion: step.inversion,
+    tones: step.tones,
     // The register a chord may be voiced in is narrower than the roll's range, so a
     // shape pushed to either end is placed at the edge rather than off it.
     octave: Math.min(MAX_SEGMENT_OCTAVE, Math.max(MIN_SEGMENT_OCTAVE, midiToOctave(rootPitch))),
@@ -610,6 +627,9 @@ export function captureFormula(
           ? segment.quality
           : undefined,
       inversion: isChord ? segment.inversion || undefined : undefined,
+      // Carried verbatim, like the voicing beside it: a stack names chord tones, and
+      // tone 3 is the seventh of whatever key the formula is dropped in.
+      tones: isChord ? segment.tones : undefined,
       voicing: isChord ? segment.voicing : undefined,
       velocity: segment.velocity,
       beats,

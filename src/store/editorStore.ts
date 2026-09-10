@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { DEFAULT_SNAP_BEATS, SNAP_OPTIONS } from '@/engine/timeline';
-import type { PaletteMode } from '@/engine/palette';
+import { DEFAULT_PALETTE_SIZE, PALETTE_SIZES } from '@/engine/palette';
 import type { Scale } from '@/types/music';
 import { MAX_SEGMENT_OCTAVE, MIN_SEGMENT_OCTAVE, PIXELS_PER_BEAT } from '@/utils/constants';
 
@@ -90,14 +90,14 @@ interface EditorState {
   setPaletteScale: (scale: Scale) => void;
 
   /**
-   * Which family of blocks the palette offers, and the register it builds them in.
+   * How many tones the palette's blocks stack, and the register it builds them in.
    *
    * Here rather than inside `ScalePalette` because they are no longer only the
    * strip's business: the number keys play the palette, and they need to know
-   * whether `2` means `Dm`, `Dm7` or `D4`.
+   * whether `2` means `D`, `Dm`, `Dm7` or `Dm9`.
    */
-  paletteMode: PaletteMode;
-  setPaletteMode: (mode: PaletteMode) => void;
+  paletteSize: number;
+  setPaletteSize: (size: number) => void;
   paletteOctave: number;
   setPaletteOctave: (octave: number) => void;
 
@@ -255,10 +255,15 @@ export const editorStore = create<EditorState>((set, get) => ({
     set({ paletteScale: { root: scale.root, type: scale.type } });
   },
 
-  paletteMode: 'chords',
+  paletteSize: DEFAULT_PALETTE_SIZE,
 
-  setPaletteMode: (mode: PaletteMode) => {
-    set({ paletteMode: mode });
+  setPaletteSize: (size: number) => {
+    // Clamped rather than trusted, exactly as the octave below is: the record
+    // shortcuts can point this at anything, and a stack has to be one the app builds.
+    if (!Number.isFinite(size)) return;
+    set({
+      paletteSize: Math.min(PALETTE_SIZES.length, Math.max(1, Math.round(size))),
+    });
   },
 
   paletteOctave: 4,

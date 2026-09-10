@@ -1,4 +1,5 @@
-import type { NoteName, Scale, ChordQuality } from '@/types/music';
+import type { ChordSegment, NoteName, Scale, ChordQuality } from '@/types/music';
+import { MAX_CHORD_TONE } from '@/types/music';
 import { getScalePitches } from './scales';
 
 /** Internal representation of a chord with intervals. */
@@ -13,6 +14,22 @@ export interface ChordInfo {
   root: NoteName;
   quality: ChordQuality;
   romanNumeral: string;
+}
+
+/**
+ * A chord's sounding stack: which chord tones it contains, and what they sound.
+ *
+ * The two arrays are parallel. They are separate because a stack may have gaps — a
+ * fifth dyad is tones `[0,2]`, a ninth with no fifth `[0,1,3,4]` — and once a tone
+ * can be absent, a tone's *index* and its *position* stop coinciding. Every stored
+ * voicing is keyed by the former: `offsets[3]` means "the seventh", wherever the
+ * seventh happens to sit.
+ */
+export interface ChordTones {
+  /** Sounded tone indices, ascending, always containing 0. 0 root … 4 ninth. */
+  tones: number[];
+  /** Root-position semitone offsets, parallel to `tones`, strictly ascending. */
+  intervals: number[];
 }
 
 /** Interval patterns for each chord quality (relative to root). */
@@ -136,29 +153,49 @@ function isMinorScale(scale: Scale): boolean {
  *
  * @param scalePitches - Pitch classes of the scale, in scale-degree order.
  * @param degree - Index of the scale degree to build on.
- * @param noteCount - 3 for a triad, 4 for a seventh.
+ * @param noteCount - How many thirds to stack: 3 a triad, 4 a seventh, 5 a ninth.
+ *   Never ask for fewer than 3 — `approximateQuality` reads `intervals[1]`.
  * @returns Ascending semitone intervals relative to the chord root.
  */
 export function buildStackedChord(
   scalePitches: number[],
   degree: number,
-  noteCount: 3 | 4
+  noteCount: number
 ): number[] {
   const length = scalePitches.length;
   const root = scalePitches[degree % length];
-  const intervals: number[] = [];
+  const pitchClasses: number[] = [];
 
   for (let i = 0; i < noteCount; i++) {
     const pitch = scalePitches[(degree + i * 2) % length];
-    let interval = ((pitch - root) % 12 + 12) % 12;
-    // Keep the stack ascending — a wrapped degree belongs in the next octave.
-    while (i > 0 && interval <= intervals[i - 1]) {
-      interval += 12;
-    }
-    intervals.push(interval);
+    pitchClasses.push(((pitch - root) % 12 + 12) % 12);
   }
 
-  return intervals;
+  return ascend(pitchClasses);
+}
+
+/**
+ * Lift each interval into the octave that keeps the stack strictly ascending.
+ *
+ * A wrapped scale degree belongs above the tone beneath it, not below it. Shared
+ * with `segmentChordTones`, which composes a stack out of two sources — a quality's
+ * triad and a scale's extensions — and so has to re-establish an order that neither
+ * source alone can guarantee. Without it a pinned diminished triad under a blues
+ * scale's "seventh" produces a descending array, which every voicing function would
+ * then read as an inversion nobody asked for.
+ */
+export function ascend(intervals: number[]): number[] {
+  const stacked: number[] = [];
+
+  for (const value of intervals) {
+    let interval = value;
+    while (stacked.length > 0 && interval <= stacked[stacked.length - 1]) {
+      interval += 12;
+    }
+    stacked.push(interval);
+  }
+
+  return stacked;
 }
 
 /**
@@ -183,7 +220,7 @@ function approximateQuality(intervals: number[]): ChordQuality {
  * @param scale - The scale to derive chords from.
  * @param noteCount - 3 for triads, 4 for sevenths.
  */
-function getDiatonicStack(scale: Scale, noteCount: 3 | 4): ChordInfo[] {
+function getDiatonicStack(scale: Scale, noteCount: number): ChordInfo[] {
   const scalePitches = getScalePitches(scale.root, scale.type);
   const bases = isMinorScale(scale) ? ROMAN_NUMERAL_BASES_MINOR : ROMAN_NUMERAL_BASES_MAJOR;
 
@@ -223,6 +260,278 @@ export function getDiatonicChords(scale: Scale): ChordInfo[] {
  */
 export function getDiatonicSevenths(scale: Scale): ChordInfo[] {
   return getDiatonicStack(scale, 4);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Resolving a segment to the tones it sounds                                  */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * These live here rather than in `chordOperations` because deciding which notes a
+ * chord contains is theory, and because `voicing.ts` needs them: it kept a private
+ * copy of the interval lookup purely to avoid importing `chordOperations`, and this
+ * is the module both of them already depend on.
+ */
+
+/** The triadic half of a quality — the colour that survives a change of size. */
+export type TriadColour = 'major' | 'minor' | 'diminished' | 'augmented' | 'sus2' | 'sus4';
+
+/** The triad each quality is built on, which is what a size change preserves. */
+const TRIAD_COLOUR: Record<ChordQuality, TriadColour> = {
+  major: 'major',
+  minor: 'minor',
+  diminished: 'diminished',
+  augmented: 'augmented',
+  sus2: 'sus2',
+  sus4: 'sus4',
+  dominant7: 'major',
+  maj7: 'major',
+  min7: 'minor',
+  dim7: 'diminished',
+  halfDim7: 'diminished',
+  minMaj7: 'minor',
+};
+
+/**
+ * The seventh a chord takes when it sits on no scale degree at all.
+ *
+ * Only reached by a chord the key cannot spell — a borrowed root, or a degree a
+ * gapped scale simply lacks. A major triad takes its major seventh; everything else
+ * takes a minor one, diminished included, because the half-diminished is much the
+ * commoner chord and `dim7` is available by naming it outright.
+ */
+const DEFAULT_SEVENTH: Record<TriadColour, number> = {
+  major: 11,
+  minor: 10,
+  diminished: 10,
+  augmented: 10,
+  sus2: 10,
+  sus4: 10,
+};
+
+/** The ninth a chord takes off-degree: the plain major ninth, whatever sits below. */
+const DEFAULT_NINTH = 14;
+
+/** The seventh's colour. Absent means the one the key spells for this degree. */
+export type SeventhColour = 'major' | 'minor' | 'diminished';
+
+/**
+ * The stored quality each pair of colours composes to.
+ *
+ * Deliberately partial. `ChordQuality` has twelve members — six triads and six
+ * sevenths — so several pairs name no quality at all: a suspended or augmented triad
+ * with a seventh on it, or a diminished triad under a major seventh. Rather than
+ * widen a union that `validateProject`, the MusicXML exporter and the formula library
+ * all switch on, those keep the *triad* quality and let the seventh come from the key,
+ * which `segmentChordTones` already does and `nameSegment` already says out loud.
+ */
+const QUALITY_BY_COLOUR: Partial<Record<TriadColour, Partial<Record<SeventhColour, ChordQuality>>>> =
+  {
+    major: { major: 'maj7', minor: 'dominant7' },
+    minor: { major: 'minMaj7', minor: 'min7' },
+    diminished: { minor: 'halfDim7', diminished: 'dim7' },
+  };
+
+/**
+ * Compose a triad colour and a seventh colour into the quality that stores them.
+ *
+ * Falls back to the bare triad for a pair no quality names, which is not a loss: the
+ * seventh is then spelled by the key, and a stack that reaches tone 3 still sounds one.
+ */
+export function composeQuality(triad: TriadColour, seventh?: SeventhColour): ChordQuality {
+  if (!seventh) return triad;
+  return QUALITY_BY_COLOUR[triad]?.[seventh] ?? triad;
+}
+
+/** The seventh a quality names, or undefined for a triad — which names none. */
+export function seventhColourOf(quality: ChordQuality): SeventhColour | undefined {
+  switch (quality) {
+    case 'maj7':
+    case 'minMaj7':
+      return 'major';
+    case 'dominant7':
+    case 'min7':
+    case 'halfDim7':
+      return 'minor';
+    case 'dim7':
+      return 'diminished';
+    default:
+      return undefined;
+  }
+}
+
+/** The triad a quality is coloured by. */
+export function triadColourOf(quality: ChordQuality): TriadColour {
+  return TRIAD_COLOUR[quality] ?? 'major';
+}
+
+/** Casing carries a numeral's quality; the symbols are decoration. */
+function bareNumeral(numeral: string): string {
+  return numeral.replace(/[°+]/g, '');
+}
+
+/**
+ * Which degree of `scale` a segment sits on, or -1.
+ *
+ * The roman numeral is the authority — it is what the user wrote — but a segment
+ * dropped without one still names a degree through its root, so fall back to that
+ * before giving up and calling the chord chromatic.
+ */
+export function degreeOfSegment(segment: ChordSegment, scale: Scale): number {
+  if (segment.romanNumeral) {
+    const target = bareNumeral(segment.romanNumeral);
+    const byNumeral = getDiatonicChords(scale).findIndex(
+      c => bareNumeral(c.romanNumeral) === target
+    );
+    if (byNumeral !== -1) return byNumeral;
+  }
+
+  if (!segment.root) return -1;
+  const semitone = NOTE_TO_SEMITONE[segment.root];
+  if (semitone === undefined) return -1;
+  return getScalePitches(scale.root, scale.type).indexOf(semitone);
+}
+
+/**
+ * The diatonic chord at one degree, at a given stack size.
+ *
+ * Generalises `getDiatonicChords` and `getDiatonicSevenths` to a single lookup, so
+ * nothing has to branch on "is this a seventh" to pick a table. The size is clamped
+ * to 3 or 4: a quality names a triad or a seventh and nothing wider, and asking for
+ * fewer than three would leave `approximateQuality` with no third to read.
+ *
+ * @returns The chord, or undefined at a degree the scale does not reach.
+ */
+export function diatonicChordAt(
+  scale: Scale,
+  degree: number,
+  size: number
+): ChordInfo | undefined {
+  if (degree < 0) return undefined;
+  const chords = getDiatonicStack(scale, Math.min(4, Math.max(3, Math.trunc(size))));
+  return chords[degree];
+}
+
+/**
+ * How wide a stack the stored `quality` has to name: 3 or 4.
+ *
+ * The invariant that keeps `ChordQuality` from having to grow: a quality always
+ * describes the triad or the seventh a segment's tones are drawn from, and the ninth
+ * is never stored because no quality can name one.
+ */
+function qualitySize(tones: number[] | undefined): number {
+  if (!Array.isArray(tones) || tones.length === 0) return 3;
+  const highest = tones.reduce(
+    (max, t) => (Number.isFinite(t) ? Math.max(max, Math.trunc(t)) : max),
+    0
+  );
+  return highest >= 3 ? 4 : 3;
+}
+
+/**
+ * How wide a stack a segment's stored quality has to name: 3 or 4.
+ *
+ * What every "is this a seventh?" test becomes once a chord can be any size. A
+ * segment naming no tones falls back to the width of the quality it carries, which
+ * is exactly the answer the old interval-counting test gave, so nothing about a
+ * pre-stack project changes.
+ */
+export function segmentQualitySize(segment: ChordSegment): number {
+  if (Array.isArray(segment.tones) && segment.tones.length > 0) {
+    return qualitySize(segment.tones);
+  }
+  return segment.quality ? (CHORD_INTERVALS[segment.quality]?.length ?? 3) : 3;
+}
+
+/**
+ * The quality a segment resolves to: its own, else the one its key spells for the
+ * degree it sits on, else plain major.
+ */
+export function segmentQuality(segment: ChordSegment, scale: Scale): ChordQuality {
+  if (segment.quality && CHORD_INTERVALS[segment.quality]) return segment.quality;
+  const degree = degreeOfSegment(segment, scale);
+  return diatonicChordAt(scale, degree, qualitySize(segment.tones))?.quality ?? 'major';
+}
+
+/**
+ * Read a stack off a segment, keeping only what makes sense.
+ *
+ * Dropped rather than repaired, the way `readVoicing` treats a voicing: a tone index
+ * the app has no name for says nothing about what the author meant. An absent or
+ * empty stack falls back to every tone of the quality, which is what every block
+ * written before stacks existed was.
+ */
+function readTones(raw: number[] | undefined, fallbackSize: number): number[] {
+  return readStackTones(raw) ?? Array.from({ length: fallbackSize }, (_, i) => i);
+}
+
+/**
+ * Read a stack off a document, or undefined when it names none.
+ *
+ * Shared by the project reader and the formula-library reader, exactly as
+ * `readVoicing` is: both take a stack off a file a user may have hand-edited, and
+ * both want the same answer for the same garbage. One copy, so the two can never
+ * drift apart about what a file means.
+ *
+ * Anything unrecognised is dropped rather than repaired — a tone index this app has
+ * no name for says nothing about what the author meant. The root is forced in
+ * because a register and an inversion are both counted from it.
+ */
+export function readStackTones(raw: unknown): number[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+
+  const kept = new Set<number>();
+  for (const value of raw) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+    const tone = Math.trunc(value);
+    if (tone < 0 || tone > MAX_CHORD_TONE) continue;
+    kept.add(tone);
+  }
+
+  if (kept.size === 0) return undefined;
+  kept.add(0);
+  return [...kept].sort((a, b) => a - b);
+}
+
+/**
+ * The chord tones a segment sounds, and the intervals they sound at.
+ *
+ * The one place a chord's notes are decided. Tones 0-2 come from the segment's
+ * quality, so a chord sounds exactly as it did before stacks existed; the seventh
+ * comes from the quality when it names one and from the key otherwise; and the
+ * ninth always comes from the key, because no quality can name one.
+ *
+ * That split is what makes a pinned colour musically useful rather than merely
+ * defined: pinning a major triad on the ii of C major gives D F# A, and the key
+ * still spells its seventh and ninth, so the stack grows into D7 and D9 — the
+ * secondary dominant, which is the reason anyone pins a colour on ii.
+ */
+export function segmentChordTones(segment: ChordSegment, scale: Scale): ChordTones {
+  const quality = segmentQuality(segment, scale);
+  const base = CHORD_INTERVALS[quality] ?? CHORD_INTERVALS.major;
+  const tones = readTones(segment.tones, base.length);
+
+  const degree = degreeOfSegment(segment, scale);
+  const stacked =
+    degree >= 0
+      ? buildStackedChord(getScalePitches(scale.root, scale.type), degree, MAX_CHORD_TONE + 1)
+      : undefined;
+  const colour = triadColourOf(quality);
+
+  const full = ascend([
+    base[0],
+    base[1],
+    base[2],
+    base[3] ?? stacked?.[3] ?? DEFAULT_SEVENTH[colour],
+    stacked?.[4] ?? DEFAULT_NINTH,
+  ]);
+
+  return { tones, intervals: tones.map(t => full[t]) };
+}
+
+/** Just the tone indices — what the inspector labels its rows with. */
+export function segmentTones(segment: ChordSegment, scale: Scale): number[] {
+  return segmentChordTones(segment, scale).tones;
 }
 
 /**

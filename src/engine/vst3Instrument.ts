@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { isTauri } from '@/engine/platform';
 import type { Instrument, ScheduledNote } from '@/engine/instrument';
 import type { AutomationTarget, Project } from '@/types/music';
 
@@ -80,6 +81,91 @@ export function syncVst3Clock(): void {
   sharedClock.send();
 }
 
+/** Where the transport is, as a plugin's process context states it. */
+export interface Vst3Transport {
+  /** Whether the transport is rolling. */
+  playing: boolean;
+  tempo: number;
+  /** Beats per measure and the beat's note value, for the bar under the playhead. */
+  numerator: number;
+  denominator: number;
+}
+
+/**
+ * The last transport sent, so repeating it costs nothing.
+ *
+ * The scheduling pass is the only thing that knows the tempo *and* runs often
+ * enough to notice it change, and it runs twenty times a second. Comparing here
+ * rather than asking the caller to is what lets it simply say where it is on
+ * every pass.
+ */
+let lastTransport: Vst3Transport | null = null;
+
+/**
+ * Tell the native side what the transport is doing.
+ *
+ * Every plugin is handed this as its `ProcessContext`, which a VST3 plugin is
+ * entitled to and which nothing native can work out for itself: the output
+ * stream runs whether or not anything is playing, and the tempo lives in the
+ * store. A plugin without one cannot sync to a tempo and cannot tell playing
+ * from idling.
+ *
+ * Safe to call on every scheduling pass: an unchanged transport sends nothing.
+ */
+export function setVst3Transport(transport: Vst3Transport): void {
+  if (!isTauri()) return;
+  if (
+    lastTransport &&
+    lastTransport.playing === transport.playing &&
+    lastTransport.tempo === transport.tempo &&
+    lastTransport.numerator === transport.numerator &&
+    lastTransport.denominator === transport.denominator
+  ) {
+    return;
+  }
+  lastTransport = transport;
+
+  // Spread into a plain record rather than passed as the interface: `invoke`
+  // takes an index signature, which a declared shape does not satisfy however
+  // well its keys match.
+  invoke('vst3_set_transport', { ...transport }).catch(err => {
+    // Nothing stops playing over this: a plugin with a stale context plays the
+    // wrong tempo-synced delay, which is far better than a silent track. The
+    // cache is cleared so the next pass tries again.
+    console.error('vst3: could not state the transport', err);
+    lastTransport = null;
+  });
+}
+
+/**
+ * Put every hosted instrument back the way it was when it loaded.
+ *
+ * A detailed sampled instrument can get slower the longer it plays, and a
+ * buffer does not cure that — it only puts off the moment the shortfall is
+ * heard. Reloading the instrument inside the plugin's own editor clears it, and
+ * this asks the native side for the same thing without re-streaming the samples
+ * a real reload would.
+ *
+ * One global call rather than a loop over the pool: the engine walks its own
+ * slots, and it has to hold the renderer's lock to do any of this safely, which
+ * is a thing to do once rather than once per track.
+ *
+ * Answers how many instruments were put back — 0 where there is no plugin
+ * engine at all, which includes every browser.
+ */
+export async function resetVst3Plugins(): Promise<number> {
+  if (!isTauri()) return 0;
+
+  try {
+    return (await invoke<number>('vst3_reset_all')) ?? 0;
+  } catch (err) {
+    // Nothing depends on this having worked. An instrument that was not put
+    // back is one that goes on getting slower, which is where it started.
+    console.error('vst3: could not reset the instruments', err);
+    return 0;
+  }
+}
+
 /**
  * Stop syncing and forget how many plugins were using the clock.
  *
@@ -89,6 +175,7 @@ export function syncVst3Clock(): void {
 export function resetVst3Clock(): void {
   sharedClock.stop();
   live.clear();
+  lastTransport = null;
 }
 
 /**

@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useMemo, useRef, useSyncExternalStore } from 'react';
+import { useEffect, useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { projectStore } from '@/store/projectStore';
 import { selectionStore } from '@/store/selectionStore';
 import { createUndoRedoMiddleware } from '@/engine/undoRedo';
@@ -9,7 +9,8 @@ import {
 import { setRecordingGate } from '@/store/projectStore';
 import { Transport } from '@/components/Transport';
 import { FileMenu } from '@/components/FileMenu';
-import { AudioSettings } from '@/components/AudioSettings';
+import { SettingsDialog } from '@/components/SettingsDialog';
+import { primeAudioPrefs } from '@/engine/audioPrefs';
 import { InstrumentsPanel } from '@/components/InstrumentsPanel';
 import { ScalePalette } from '@/components/ScalePalette';
 import { FormulaPalette } from '@/components/FormulaPalette';
@@ -68,6 +69,15 @@ function barRangeLabel(
 }
 
 function App() {
+  /** Whether the machine settings are open. Owned here, like every other dialog. */
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // What this machine was last set to, handed to the plugin engine before it can
+  // have started: the Rust side begins each session knowing nothing, so a block
+  // size chosen in an earlier one would otherwise sit in storage looking applied.
+  useEffect(() => {
+    void primeAudioPrefs();
+  }, []);
   const project = projectStore(s => s.project);
   const createProject = projectStore(s => s.createProject);
   const setBpm = projectStore(s => s.setBpm);
@@ -503,10 +513,19 @@ function App() {
       <div className="px-4 py-2 bg-gray-800 border-b border-gray-700 flex items-center gap-3">
         <FileMenu />
         {/* Beside the file menu rather than in the transport: which speakers the
-            app uses is a property of the machine, set once, not a playback
-            control reached for while working. */}
-        <AudioSettings />
+            app uses, and how hard it works to drive them, are properties of the
+            machine — set once, not playback controls reached for while working. */}
+        <button
+          onClick={() => setSettingsOpen(true)}
+          aria-label="Settings"
+          title="Output device, block size and how the audio engine is doing"
+          className="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 text-gray-200 rounded transition-colors"
+        >
+          ⚙ Settings
+        </button>
       </div>
+
+      {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
 
       {/* Transport Bar */}
       <Transport

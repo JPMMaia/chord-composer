@@ -58,6 +58,13 @@ let supportsRamp = true;
  */
 let supportsParams = true;
 
+// The plugin bridge is native-only and a no-op in jsdom, so the reset has to be
+// mocked to be seen at all. Everything else in the module is left real.
+vi.mock('@/engine/vst3Instrument', async importActual => ({
+  ...(await importActual<typeof import('@/engine/vst3Instrument')>()),
+  resetVst3Plugins: vi.fn(async () => 0),
+}));
+
 vi.mock('@/engine/smplrPiano', () => {
   class MockPiano {
     readonly name = 'Test Piano';
@@ -115,6 +122,7 @@ import { TICK_MS, LOOKAHEAD_SECONDS } from '@/engine/scheduler';
 import type { PlaybackConfig } from '@/engine/playback';
 import type { AutomationTarget, Bar, Note, Track } from '@/types/music';
 import { laneKey } from '@/engine/parameterAutomation';
+import { resetVst3Plugins } from '@/engine/vst3Instrument';
 import { soloContent, TEST_TRACK_ID } from '../helpers/tracks';
 
 /** The instrument the fixture bars' notes belong to. */
@@ -903,6 +911,46 @@ describe('usePlayback', () => {
     const forTarget = (key: string) =>
       automated().filter(c => laneKey(c.target) === key);
 
+    // A track nobody can hear is not automated either. Its notes are already
+    // filtered by the same set, and a curve is no different: driving a muted
+    // plugin is work for nothing, and on a sampler that modulates per voice it is
+    // work the tracks you *can* hear pay for, since every plugin is rendered on
+    // the one thread inside the one deadline.
+    it('automates only the tracks that can be heard', async () => {
+      const silenced: PlaybackConfig = {
+        ...sweeping,
+        tracks: [
+          sweeping.tracks[0],
+          {
+            ...testTrack,
+            id: 'lead',
+            name: 'Lead',
+            solo: true,
+            parameterAutomation: [
+              {
+                target: { kind: 'param', paramId: 9 },
+                name: 'Resonance',
+                points: [
+                  { beat: 1, value: 0.2 },
+                  { beat: 3, value: 0.9 },
+                ],
+              },
+            ],
+          },
+        ],
+      };
+
+      const { result } = renderHook(() => usePlayback(silenced));
+      await startPlayback(result);
+      await advance(4);
+
+      expect(forTarget('param:9').length).toBeGreaterThan(20);
+      expect(forTarget('param:7')).toEqual([]);
+      // Not even the pin at Play, which would otherwise state a value on a
+      // plugin nobody is listening to and leave it there once the solo is lifted.
+      expect(pinned().filter(c => laneKey(c.target) === 'param:7')).toEqual([]);
+    });
+
     it('says nothing at all when no parameter is automated', async () => {
       const { result } = renderHook(() => usePlayback(config));
       await startPlayback(result);
@@ -1049,6 +1097,19 @@ describe('usePlayback', () => {
       ],
     };
 
+    /** The same sweep with the walking switched off, for comparing the two. */
+    const glissPlain: PlaybackConfig = {
+      ...gliss,
+      tracks: [
+        {
+          ...gliss.tracks[0],
+          parameterAutomation: [
+            { ...gliss.tracks[0].parameterAutomation![0], smooth: false },
+          ],
+        },
+      ],
+    };
+
     // A controller is a 7-bit value, so a normalised value between two steps
     // names a position no controller could have been in. An instrument that acts
     // on controller movement — a harp plays a string per step — hears the
@@ -1079,6 +1140,117 @@ describe('usePlayback', () => {
       expect(steps).toEqual([...steps].sort((a, b) => a - b));
       expect(steps.at(-1)).toBe(127);
       expect(steps.length).toBeLessThanOrEqual(128);
+    });
+
+    /**
+     * A near-vertical edge on CC 20: the whole controller range inside 50 ms.
+     *
+     * The shape that pops. A harp's glissando plucks a string per controller
+     * step, so a sample that arrives 25 steps above the last one plays 25 strings
+     * on one sample — and the sampled grid produces exactly that from an edge
+     * this steep, because it states a value every 10 ms and nothing in between.
+     */
+    const edge = [
+      { beat: 0, value: 0 },
+      { beat: 1, value: 0 },
+      { beat: 1.05, value: 1 },
+      { beat: 3, value: 1 },
+    ];
+
+    /**
+     * Held rather than built per render, as every config here is: a curve whose
+     * points array changes identity is an edit, and an edit re-pins the cursor.
+     */
+    const cliff: PlaybackConfig = {
+      ...config,
+      tracks: [
+        {
+          ...testTrack,
+          parameterAutomation: [{ target: CC20, name: 'Glissando', points: edge }],
+        },
+      ],
+    };
+
+    /** The same edge with the walking switched off on the lane. */
+    const cliffPlain: PlaybackConfig = {
+      ...config,
+      tracks: [
+        {
+          ...testTrack,
+          parameterAutomation: [
+            { target: CC20, name: 'Glissando', points: edge, smooth: false },
+          ],
+        },
+      ],
+    };
+
+    /** The controller numbers sent for CC 20, in the order they were sent. */
+    const ccSteps = () => forTarget('cc:20').map(c => Math.round(c.value * 127));
+
+    /** The largest jump between two consecutive values sent for CC 20. */
+    const biggestJump = () => {
+      const steps = ccSteps();
+      return Math.max(...steps.slice(1).map((n, i) => Math.abs(n - steps[i])));
+    };
+
+    it('walks a steep edge step by step instead of jumping', async () => {
+      const { result } = renderHook(() => usePlayback(cliff));
+      await startPlayback(result);
+      await advance(4);
+
+      // Sampled alone, the same edge arrives as five jumps of 25 steps.
+      expect(biggestJump()).toBeLessThanOrEqual(4);
+      expect(ccSteps().at(-1)).toBe(127);
+    });
+
+    // The line is a way of getting there, not somewhere else to go: the curve
+    // still reaches the top at the moment it reaches the top.
+    it('keeps a walked edge inside the time the edge takes', async () => {
+      const { result } = renderHook(() => usePlayback(cliff));
+      await startPlayback(result);
+      await advance(4);
+
+      const sent = forTarget('cc:20');
+      const arrived = sent.find(c => Math.round(c.value * 127) === 127)!;
+      expect(arrived.when).toBeGreaterThan(1);
+      expect(arrived.when).toBeLessThanOrEqual(1.06);
+    });
+
+    it('places every value of a walk at its own time, in order', async () => {
+      const { result } = renderHook(() => usePlayback(cliff));
+      await startPlayback(result);
+      await advance(4);
+
+      const times = forTarget('cc:20').map(c => c.when!);
+      expect(times).toEqual([...times].sort((a, b) => a - b));
+      expect(new Set(times).size).toBe(times.length);
+    });
+
+    // The switch on the lane. A target that merely reads its value gains nothing
+    // from the filling in, and the user is the one who knows which it is.
+    it('sends the jump as drawn on a lane with the walking switched off', async () => {
+      const { result } = renderHook(() => usePlayback(cliffPlain));
+      await startPlayback(result);
+      await advance(4);
+
+      expect(biggestJump()).toBeGreaterThan(20);
+      expect(ccSteps().at(-1)).toBe(127);
+    });
+
+    // The common case must not pay for any of this: a sweep that was already
+    // moving a step at a time is sent exactly as it was before.
+    it('sends a smooth sweep as the same run of steps either way', async () => {
+      const walked = renderHook(() => usePlayback(gliss));
+      await startPlayback(walked.result);
+      await advance(5);
+      const withWalk = ccSteps();
+
+      paramCalls.length = 0;
+      const plain = renderHook(() => usePlayback(glissPlain));
+      await startPlayback(plain.result);
+      await advance(5);
+
+      expect(withWalk).toEqual(ccSteps());
     });
 
     // A plugin parameter is genuinely continuous, and snapping it to 128 places
@@ -1257,5 +1429,100 @@ describe('usePlayback', () => {
     });
 
     expect(scheduled.map(n => n.midiNote)).toEqual([60]);
+  });
+
+  describe('putting instruments back once the transport is idle', () => {
+    /** How long `usePlayback` waits before resetting. Its own constant, by value. */
+    const IDLE_RESET_MS = 1500;
+
+    beforeEach(() => {
+      localStorage.clear();
+      vi.mocked(resetVst3Plugins).mockClear();
+    });
+
+    /** Let the idle timer fire without advancing the audio clock. */
+    async function idle(ms: number) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+      });
+    }
+
+    it('resets a moment after Stop rather than on the Stop itself', async () => {
+      const { result } = renderHook(() => usePlayback(config));
+      await startPlayback(result);
+      await advance(0.5);
+
+      act(() => result.current.stop());
+      // The tail of a sampled instrument is still sounding here; cutting it at
+      // this moment is exactly what the delay exists to avoid.
+      expect(resetVst3Plugins).not.toHaveBeenCalled();
+
+      await idle(IDLE_RESET_MS);
+      expect(resetVst3Plugins).toHaveBeenCalledTimes(1);
+    });
+
+    // The trade the delay buys: Play is never held up by a reset.
+    it('does not reset when Play follows straight on', async () => {
+      const { result } = renderHook(() => usePlayback(config));
+      await startPlayback(result);
+
+      act(() => result.current.stop());
+      await idle(IDLE_RESET_MS / 3);
+      await startPlayback(result);
+      await idle(IDLE_RESET_MS * 2);
+
+      expect(resetVst3Plugins).not.toHaveBeenCalled();
+    });
+
+    it('resets after a Pause, which is idle too', async () => {
+      const { result } = renderHook(() => usePlayback(config));
+      await startPlayback(result);
+      await advance(0.5);
+
+      act(() => result.current.pause());
+      await idle(IDLE_RESET_MS);
+
+      expect(resetVst3Plugins).toHaveBeenCalledTimes(1);
+    });
+
+    it('resets once however many times the transport is stopped', async () => {
+      const { result } = renderHook(() => usePlayback(config));
+      await startPlayback(result);
+
+      act(() => result.current.stop());
+      act(() => result.current.stop());
+      act(() => result.current.stop());
+      await idle(IDLE_RESET_MS * 2);
+
+      expect(resetVst3Plugins).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not reset when the machine has asked not to', async () => {
+      localStorage.setItem(
+        'chord-composer-audio-prefs-v1',
+        JSON.stringify({ bufferFrames: null, headroomMs: 0, resetOnStop: false })
+      );
+
+      const { result } = renderHook(() => usePlayback(config));
+      await startPlayback(result);
+
+      act(() => result.current.stop());
+      await idle(IDLE_RESET_MS * 2);
+
+      expect(resetVst3Plugins).not.toHaveBeenCalled();
+    });
+
+    // A timer that outlived the hook would reset plugins belonging to a project
+    // that is no longer open.
+    it('does not fire after the hook has gone', async () => {
+      const { result, unmount } = renderHook(() => usePlayback(config));
+      await startPlayback(result);
+
+      act(() => result.current.stop());
+      unmount();
+      await idle(IDLE_RESET_MS * 2);
+
+      expect(resetVst3Plugins).not.toHaveBeenCalled();
+    });
   });
 });

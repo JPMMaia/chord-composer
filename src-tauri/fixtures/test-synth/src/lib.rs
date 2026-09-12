@@ -251,7 +251,18 @@ impl IComponentTrait for TestSynth {
         kResultOk
     }
 
-    unsafe fn setActive(&self, _state: TBool) -> tresult {
+    unsafe fn setActive(&self, state: TBool) -> tresult {
+        // Deactivating silences every voice, which is what a real instrument
+        // does: the host is entitled to deactivate a component precisely to make
+        // it let go of what it is holding. Without this the fixture would go on
+        // sounding a note whose note-off it can no longer be sent, and a host
+        // test could not tell a reset that worked from one that did nothing.
+        if state == 0 {
+            // SAFETY: deactivation happens with processing stopped, so nothing
+            // else is touching the state — the same contract `process` relies on.
+            let synth = &mut *self.state.get();
+            synth.voices = [Voice::default(); VOICES];
+        }
         kResultOk
     }
 

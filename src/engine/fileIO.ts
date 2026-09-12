@@ -43,7 +43,11 @@ import { normalizeSections } from '@/engine/sections';
 import { normalizeTrackOrder } from '@/engine/trackGroups';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
 import { trackColorAt } from '@/utils/constants';
-import { MAX_TIME_OFFSET_MS } from '@/engine/scheduler';
+import {
+  MAX_RELEASE_GAP_MS,
+  MAX_TIME_OFFSET_MS,
+  MAX_VOICE_STAGGER_MS,
+} from '@/engine/scheduler';
 
 /**
  * Track id given to the piano synthesised for a pre-1.5 file that listed no tracks.
@@ -244,8 +248,23 @@ const LEGACY_TRACK_ID = 'track-legacy';
  * true. So a project nobody has restacked serialises byte for byte as it did under
  * 1.20, and a pre-1.21 file reads back as exactly the triad or seventh its quality
  * already named.
+ *
+ * 1.22 let an instrument make room for its plugin: each gained an optional
+ * `voiceStaggerMs`, spreading the notes of a chord by that many milliseconds each,
+ * and an optional `releaseGapMs`, stopping it that long before its next attack.
+ *
+ * Neither is a musical decision — the musical one is a segment's strum, which is
+ * authored per chord and measured in beats. These exist because a sampled plugin
+ * does most of its work at an attack: a chord landing on one sample can cost a
+ * single audio block more time than it has, and a block over its deadline is a gap
+ * in the stream, heard as a click. Like `timeOffsetMs` before them they move only
+ * when the instrument sounds, never where its notes are written.
+ *
+ * Written only when non-zero, so an instrument nobody has spread serialises byte
+ * for byte as it did under 1.21, and a pre-1.22 file reads back with its chords
+ * landing together — which is what every project was before this.
  */
-export const SCHEMA_VERSION = '1.21';
+export const SCHEMA_VERSION = '1.22';
 
 /**
  * Validation error returned by validateProject.
@@ -435,6 +454,10 @@ export function serializeProject(project: Project): string {
       touchpadTarget: t.touchpadTarget,
       // Absent means on the beat, which is where every instrument sat before 1.20.
       timeOffsetMs: t.timeOffsetMs ? t.timeOffsetMs : undefined,
+      // Absent means the chord lands together and the notes abut, which is what
+      // every instrument did before 1.22.
+      voiceStaggerMs: t.voiceStaggerMs ? t.voiceStaggerMs : undefined,
+      releaseGapMs: t.releaseGapMs ? t.releaseGapMs : undefined,
     })),
     // Phrases are where all music lives from 1.17 on. Their bars are local, numbered
     // from zero, and carry no metre of their own — the song's bars own that.
@@ -606,6 +629,19 @@ function readTimeOffset(raw: unknown): number | undefined {
   if (typeof raw !== 'number' || !Number.isFinite(raw) || raw === 0) return undefined;
 
   return Math.max(-MAX_TIME_OFFSET_MS, Math.min(MAX_TIME_OFFSET_MS, Math.round(raw)));
+}
+
+/**
+ * One of the two 1.22 spreads, clamped to 0..`most`.
+ *
+ * Absent for anything that is not a positive number, which is the ordinary state:
+ * an instrument whose chords land together. Negative reads as absent rather than as
+ * an error — there is no such thing as a chord spread backwards.
+ */
+function readSpread(raw: unknown, most: number): number | undefined {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return undefined;
+
+  return Math.min(most, Math.round(raw));
 }
 
 /**
@@ -808,6 +844,10 @@ export function deserializeProject(json: string): Project {
         // and roughly how far the author wanted the instrument moved, and the ear
         // that set it was hearing the clamped value anyway.
         timeOffsetMs: readTimeOffset(t.timeOffsetMs),
+        // Clamped rather than dropped, on the same terms as the nudge above: a
+        // number past the range still says the author wanted room made here.
+        voiceStaggerMs: readSpread(t.voiceStaggerMs, MAX_VOICE_STAGGER_MS),
+        releaseGapMs: readSpread(t.releaseGapMs, MAX_RELEASE_GAP_MS),
       }))
     : [];
 
@@ -1291,6 +1331,20 @@ export function validateProject(project: Project): ValidationResult {
       errors.push(
         `Track ${i}: time offset must be between -${MAX_TIME_OFFSET_MS} and ${MAX_TIME_OFFSET_MS} ms.`
       );
+    }
+    // Absent is the ordinary state for both: a chord that lands together, and
+    // notes that abut. Zero is allowed and means the same thing.
+    for (const [key, most] of [
+      ['voiceStaggerMs', MAX_VOICE_STAGGER_MS],
+      ['releaseGapMs', MAX_RELEASE_GAP_MS],
+    ] as const) {
+      const value = t[key];
+      if (
+        value !== undefined &&
+        (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > most)
+      ) {
+        errors.push(`Track ${i}: ${key} must be between 0 and ${most} ms.`);
+      }
     }
     // Having none is the ordinary state; naming something unsendable is not. Same
     // predicate the lanes are checked against below, so a touchpad assignment can

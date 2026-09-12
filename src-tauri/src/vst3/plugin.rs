@@ -8,6 +8,7 @@
 
 use std::ffi::c_void;
 use std::ptr;
+use std::time::{Duration, Instant};
 
 use vst3::Steinberg::Vst::{
     BusDirections_::{kInput, kOutput},
@@ -17,7 +18,8 @@ use vst3::Steinberg::Vst::{
     MediaTypes_::{kAudio, kEvent},
     ParamID, ParameterInfo,
     ParameterInfo_::ParameterFlags_::{kCanAutomate, kIsHidden, kIsReadOnly},
-    ProcessData, ProcessModes_::kRealtime, ProcessSetup, SymbolicSampleSizes_::kSample32,
+    ProcessContext, ProcessContext_::StatesAndFlags_ as ContextFlags, ProcessData,
+    ProcessModes_::kRealtime, ProcessSetup, SymbolicSampleSizes_::kSample32,
 };
 use vst3::Steinberg::{
     kResultOk, FUnknown, IBStream, IBStreamTrait, IBStream_, IPluginBaseTrait, IPluginFactoryTrait,
@@ -26,10 +28,13 @@ use vst3::Steinberg::{
 use vst3::{ComPtr, ComWrapper, Interface};
 
 use super::events::{Event as NoteEvent, EventKind, Scheduler};
-use super::host::{read_wstring, ComponentHandler, EventList, HostApplication, ParameterChanges};
+use super::host::{
+    read_wstring, ComponentHandler, ConnectionProxy, EventList, HostApplication, ParameterChanges,
+};
 use super::module::{tuid_from_hex, Module};
 use super::params::ParamScheduler;
 use super::stream::MemoryStream;
+use super::trace::{self, Record};
 
 /// How many note events may be in flight for one plugin.
 ///
@@ -45,6 +50,13 @@ const EVENT_CAPACITY: usize = 512;
 /// parameter, so a ramp reaches it as a series of points. At the webview's
 /// 10 ms grid over a 200 ms look-ahead window that is twenty points per lane per
 /// pass, and this leaves room for a hundred lanes at once.
+///
+/// A controller lane can be denser than the grid, because the host walks a jump
+/// through the steps between rather than sending it — see the webview's
+/// `controllerRamp`. Its own floor is a millisecond between values, so the worst
+/// a lane can ask for is two hundred points in one window rather than twenty, and
+/// ten such lanes at once would reach this. What arrives past it is counted
+/// rather than silently dropped: see [`ParamScheduler::dropped`].
 const PARAM_CAPACITY: usize = 2048;
 
 /// How many distinct parameters may change within one block.
@@ -54,11 +66,66 @@ const PARAM_CAPACITY: usize = 2048;
 const PARAM_QUEUE_CAPACITY: usize = 32;
 
 /// How many changes one parameter may carry within one block.
+///
+/// Above what a walked jump can produce: a millisecond apart at the closest, so
+/// ten in a 480-frame block and forty-three in the largest one this host asks
+/// for.
 const PARAM_POINT_CAPACITY: usize = 64;
 
 /// The most channels one bus may have. Anything past the first two is rendered
 /// but not listened to.
 const MAX_CHANNELS: usize = 32;
+
+/// How often a plugin reports what it is holding and what it cost.
+///
+/// A fault that builds does so over minutes, so a line a second is enough to
+/// see the slope and rare enough to read.
+const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Where the host's transport is, as a `ProcessContext` states it.
+///
+/// A plugin handed no process context has no tempo, no time signature and no way
+/// to tell playing from idling — and every real host hands one over. The output
+/// stream here runs whether or not anything is being played, so `playing` is the
+/// only thing that distinguishes the two, and only the webview knows it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Transport {
+    /// Whether the webview's transport is rolling.
+    pub playing: bool,
+    pub tempo: f64,
+    /// Beats per measure and the beat's note value, taken from the bar the
+    /// playhead is in rather than from the project: each bar carries its own.
+    pub time_sig: (i32, i32),
+    /// Monotonic nanoseconds, for `ProcessContext::systemTime`. Carried in rather
+    /// than read here so one callback's plugins all report the same moment, and
+    /// so the clock is read once a block instead of once a plugin.
+    pub system_time: i64,
+}
+
+impl Default for Transport {
+    /// Stopped, at the tempo and signature a project opens on: what holds before
+    /// the webview has said anything, and what an idling stream is doing.
+    fn default() -> Transport {
+        Transport {
+            playing: false,
+            tempo: 120.0,
+            time_sig: (4, 4),
+            system_time: 0,
+        }
+    }
+}
+
+impl Transport {
+    /// Rolling at `tempo` in 4/4 — what an offline render is doing, and better
+    /// than leaving a plugin to guess.
+    pub fn rolling(tempo: f64) -> Transport {
+        Transport {
+            playing: true,
+            tempo,
+            ..Transport::default()
+        }
+    }
+}
 
 /// What a plugin reports about its own configuration.
 #[derive(Debug, Clone, Copy)]
@@ -69,6 +136,27 @@ pub struct Diagnostics {
     pub accepts_f32: bool,
     pub last_process: i32,
     pub latency: u32,
+}
+
+/// How much of a plugin to put back the way it was.
+///
+/// Four rungs of the same ladder, cheapest first. Which one actually clears a
+/// given instrument's accumulated cost is a question about that instrument, not
+/// about VST3, so it is measured rather than assumed — `examples/soak.rs`
+/// applies one on an interval and prints what the cost curve does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ResetMode {
+    /// Stop and restart processing. The plugin is told the stream broke, which
+    /// is the cue to clear its own buffers, and nothing more.
+    Processing,
+    /// Deactivate and reactivate the component. Entitled to free and reallocate
+    /// everything the instrument holds, which is what makes it the candidate.
+    #[default]
+    Active,
+    /// As `Active`, re-stating the processing setup while it is inactive.
+    Setup,
+    /// Hand the plugin its own state back, which is what loading a preset does.
+    State,
 }
 
 /// A plugin instance wired up and ready to render.
@@ -87,6 +175,9 @@ pub struct Plugin {
     ///
     /// Absent only for a plugin that offers neither, which is rare but legal.
     controller: Option<ComPtr<IEditController>>,
+    /// The host objects the plugin's two halves talk through. Dropping one breaks
+    /// that connection, so they are held for as long as the plugin is.
+    _connections: Vec<ComWrapper<ConnectionProxy>>,
     event_list: ComWrapper<EventList>,
     param_changes: ComWrapper<ParameterChanges>,
 
@@ -100,11 +191,47 @@ pub struct Plugin {
 
     pub scheduler: Scheduler,
     pub param_scheduler: ParamScheduler,
+    /// The rate the plugin was set up for. Needed per block, because a
+    /// `ProcessContext` states it and the musical time is derived from it.
+    sample_rate: f64,
     max_block: usize,
     gain: f32,
     /// What the last `process` returned. Silence with a failing result is a
     /// host bug; silence with `kResultOk` is a plugin that had nothing to say.
     last_process: i32,
+    /// Set when a reset left the component deactivated and it would not come
+    /// back — the one way this type can reach a state VST3 has no name for.
+    ///
+    /// `process` on a deactivated component hands buffers to something that has
+    /// freed whatever it was using them for, so from here it is not processed at
+    /// all. The track goes silent, which is the honest outcome and vastly better
+    /// than the alternative, and it stays that way until the plugin is loaded
+    /// again.
+    dormant: bool,
+
+    /// Which engine slot this plugin was put in, so that a trace record — which
+    /// has to be copyable and fixed-size — can name the track it belongs to
+    /// without carrying the track's id.
+    trace_slot: u32,
+    /// The schedulers' overflow counters as the trace last reported them, so
+    /// that a count which has not moved is not written again every block.
+    traced_overflow: (u64, u64, u64, u64),
+    /// Points a block's parameter queues had no room for.
+    ///
+    /// The last place a change can be lost, and the one place that said nothing
+    /// about it: `ParameterChanges::add_point` answers with a bool and every
+    /// caller used to drop it. A full queue means one parameter moved more times
+    /// within a single block than `PARAM_POINT_CAPACITY` allows, which is a fault
+    /// upstream rather than a curve being drawn quickly.
+    queue_full: u64,
+    /// What `process` has cost since the last health line, and when that was.
+    ///
+    /// Measured only while the trace is on: a `process` call is the one place in
+    /// this file where two clock reads would be worth noticing.
+    process_blocks: u64,
+    process_total: Duration,
+    process_max: Duration,
+    health_at: Instant,
 
     /// The module must outlive every object created from it.
     _module: Module,
@@ -119,6 +246,11 @@ impl Plugin {
         sample_rate: f64,
         max_block: usize,
     ) -> Result<Plugin, String> {
+        // Here as well as in the engine, so that a plugin rendered without one
+        // — the `render` example, and the tests that drive `process_into`
+        // directly — is logged like any other.
+        trace::start(sample_rate);
+
         let cid = tuid_from_hex(class_id).ok_or_else(|| format!("bad class id {class_id}"))?;
         let module = Module::load(path)?;
 
@@ -142,8 +274,11 @@ impl Plugin {
                 .ok_or_else(|| format!("{class_id}: no IAudioProcessor"))?;
 
             let handler = ComWrapper::new(ComponentHandler);
-            let controller =
-                build_controller(&module, &component, &host_unknown, &handler);
+            let (controller, connections) =
+                match build_controller(&module, &component, &host_unknown, &handler) {
+                    Some(built) => (Some(built.controller), built.connections),
+                    None => (None, Vec::new()),
+                };
 
             let mut setup = ProcessSetup {
                 processMode: kRealtime as i32,
@@ -161,11 +296,18 @@ impl Plugin {
 
             // Exactly one audio output, and every other one off.
             //
-            // Orchestral libraries routinely present a dozen or more outputs
-            // `ProcessData` has to describe
-            // every *active* bus, so activating them all and then passing
-            // buffers for one is a contract violation, and the plugin's
-            // recourse is to render silence. Which is exactly what it does.
+            // Orchestral libraries routinely present a dozen or more outputs and
+            // only one of them is listened to here. `ProcessData` has to describe
+            // every *active* bus, so activating them all and then passing buffers
+            // for one is a contract violation, and the plugin's recourse is to
+            // render silence. Which is exactly what it does.
+            //
+            // Activating all of them and giving each a buffer is the other legal
+            // shape, and the one every DAW uses. It was tried here against the
+            // plugin whose note handling costs tens of milliseconds and made no
+            // measurable difference, so this keeps the cheaper arrangement: 31
+            // buses of silence to clear per block is real work on the audio
+            // thread, and it bought nothing.
             let main = main_output_bus(&component)
                 .ok_or_else(|| format!("{class_id}: no audio output bus"))?;
 
@@ -188,6 +330,7 @@ impl Plugin {
                 _host: host,
                 _handler: handler,
                 controller,
+                _connections: connections,
                 event_list: ComWrapper::new(EventList::new(EVENT_CAPACITY)),
                 param_changes: ComWrapper::new(ParameterChanges::new(
                     PARAM_QUEUE_CAPACITY,
@@ -198,9 +341,18 @@ impl Plugin {
                 channels,
                 scheduler: Scheduler::new(EVENT_CAPACITY),
                 param_scheduler: ParamScheduler::new(PARAM_CAPACITY, PARAM_QUEUE_CAPACITY),
+                sample_rate,
                 max_block,
                 gain: 1.0,
                 last_process: kResultOk,
+                dormant: false,
+                trace_slot: u32::MAX,
+                traced_overflow: (0, 0, 0, 0),
+                queue_full: 0,
+                process_blocks: 0,
+                process_total: Duration::ZERO,
+                process_max: Duration::ZERO,
+                health_at: Instant::now(),
                 _module: module,
             })
         }
@@ -208,6 +360,13 @@ impl Plugin {
 
     pub fn set_gain(&mut self, gain: f32) {
         self.gain = gain.clamp(0.0, 1.0);
+    }
+
+    /// Name the slot this plugin is about to be handed to the audio thread for.
+    ///
+    /// Only the trace reads it: see [`Plugin::trace_slot`].
+    pub fn set_trace_slot(&mut self, slot: u32) {
+        self.trace_slot = slot;
     }
 
     /// A second reference to the component, for the control thread.
@@ -241,17 +400,136 @@ impl Plugin {
         }
     }
 
+    /// Put the plugin back to how it was the moment it finished loading.
+    ///
+    /// A detailed sampled instrument can get slower the longer it plays: the
+    /// harp library this was written for climbs from 2.5 ms a block to 43 ms
+    /// over two and a half minutes, driven with nothing but notes and a
+    /// controller. Reloading it inside the plugin's own editor clears that.
+    /// This is the same thing asked for over VST3, without re-streaming the
+    /// gigabytes of samples a real reload would.
+    ///
+    /// # Safety of the caller, not of this function
+    ///
+    /// None of these calls may happen while a `process` call is in flight, and
+    /// this type has no way to know. The engine guarantees it by holding the
+    /// renderer's lock, which is the only thing that stops both the audio
+    /// callback and the render-ahead pump at once. Do not reach for a
+    /// component handle and call this from a Tauri thread.
+    pub fn reset(&mut self, mode: ResetMode) -> Result<(), String> {
+        // The order is `Drop`'s, which is `load`'s in reverse, and then
+        // `load`'s again. A plugin torn down out of order is entitled to
+        // crash, and several do.
+        //
+        // SAFETY: the component is live for as long as `self` is, and the
+        // caller has guaranteed that nothing is processing it.
+        unsafe {
+            match mode {
+                ResetMode::Processing => {
+                    self.processor.setProcessing(0);
+                    self.processor.setProcessing(1);
+                }
+                ResetMode::Active | ResetMode::Setup => {
+                    self.processor.setProcessing(0);
+                    if self.component.setActive(0) != kResultOk {
+                        return Err("the plugin would not deactivate".to_string());
+                    }
+
+                    // Re-stating the setup is only legal while inactive, which
+                    // is the one reason this mode exists separately: some
+                    // plugins treat it as the cue to rebuild their DSP, and
+                    // some ignore it.
+                    if mode == ResetMode::Setup {
+                        let mut setup = ProcessSetup {
+                            processMode: kRealtime as i32,
+                            symbolicSampleSize: kSample32 as i32,
+                            maxSamplesPerBlock: self.max_block as i32,
+                            sampleRate: self.sample_rate,
+                        };
+                        self.processor.setupProcessing(&mut setup);
+                    }
+
+                    if self.component.setActive(1) != kResultOk {
+                        self.dormant = true;
+                        return Err("the plugin would not come back".to_string());
+                    }
+                    self.processor.setProcessing(1);
+                }
+                ResetMode::State => {
+                    let saved = ComWrapper::new(MemoryStream::empty());
+                    let out = saved
+                        .to_com_ptr::<IBStream>()
+                        .ok_or("could not build a stream")?;
+                    if self.component.getState(out.as_ptr()) != kResultOk {
+                        return Err("the plugin would not give up its state".to_string());
+                    }
+
+                    let back = ComWrapper::new(MemoryStream::from_bytes(saved.take()));
+                    let into = back
+                        .to_com_ptr::<IBStream>()
+                        .ok_or("could not build a stream")?;
+                    let mut at = 0i64;
+                    into.seek(0, IBStream_::IStreamSeekMode_::kIBSeekSet as i32, &mut at);
+                    if self.component.setState(into.as_ptr()) != kResultOk {
+                        return Err("the plugin rejected its own state".to_string());
+                    }
+                }
+            }
+        }
+
+        // Whatever the plugin just forgot, the host has to forget with it. A
+        // note-off for a voice that no longer exists is the least of it: the
+        // sounding set is what a later Stop releases from, and it would go on
+        // naming pitches nothing is playing for the rest of the session.
+        self.scheduler.forget();
+        self.param_scheduler.clear();
+        for buffer in &mut self.buffers {
+            buffer.fill(0.0);
+        }
+        self.last_process = kResultOk;
+
+        // So the health line after a reset describes the instrument as it is
+        // now rather than averaging it with how it was before.
+        self.process_blocks = 0;
+        self.process_total = Duration::ZERO;
+        self.process_max = Duration::ZERO;
+
+        Ok(())
+    }
+
     /// Render `frames` frames and add them into `out`, which is interleaved
     /// stereo.
     ///
     /// Adds rather than overwrites, because several plugins share one output
     /// stream — the caller zeroes the buffer once per block and each plugin
     /// mixes itself in.
-    pub fn process_into(&mut self, out: &mut [f32], frames: usize, block_start: i64) {
+    pub fn process_into(
+        &mut self,
+        out: &mut [f32],
+        frames: usize,
+        block_start: i64,
+        transport: Transport,
+    ) {
+        // A component a failed reset left deactivated. Handing it buffers would
+        // be handing them to something that has freed what it was using them
+        // for; a silent track is the honest outcome. See `Plugin::dormant`.
+        if self.dormant {
+            return;
+        }
+
         let frames = frames.min(self.max_block);
         if frames == 0 {
             return;
         }
+
+        // Read once and held for the whole block, so that a trace switched on
+        // midway cannot produce events without the summary that counts them.
+        let tracing = trace::enabled();
+        let slot = self.trace_slot;
+        let block_end = block_start + frames as i64;
+        let mut events = 0usize;
+        let mut params = 0usize;
+        let mut queue_full = 0u64;
 
         // SAFETY: the event list and the parameter changes are only touched
         // here, on the audio thread, and the plugin has finished reading the
@@ -261,20 +539,54 @@ impl Plugin {
 
             let list = &self.event_list;
             self.scheduler
-                .take_due(block_start, block_start + frames as i64, |offset, event| {
-                    list.add(to_vst_event(offset, event));
+                .take_due(block_start, block_end, |offset, event| {
+                    let vst = to_vst_event(offset, event);
+
+                    if tracing {
+                        // Read back off the VST3 event rather than recomputed
+                        // from ours, so that the log says what the plugin was
+                        // handed and not what it ought to have been handed.
+                        trace::emit(match event.kind {
+                            EventKind::NoteOn { .. } => Record::NoteOn {
+                                slot,
+                                pitch: vst.__field0.noteOn.pitch,
+                                velocity: vst.__field0.noteOn.velocity,
+                                offset,
+                                frame: block_start + offset as i64,
+                            },
+                            EventKind::NoteOff => Record::NoteOff {
+                                slot,
+                                pitch: vst.__field0.noteOff.pitch,
+                                offset,
+                                frame: block_start + offset as i64,
+                            },
+                        });
+                    }
+                    events += 1;
+
+                    list.add(vst);
                 });
 
             self.param_changes.clear();
 
             let changes = &self.param_changes;
-            self.param_scheduler.take_due(
-                block_start,
-                block_start + frames as i64,
-                |offset, id, value| {
-                    changes.add_point(id, offset as i32, value);
-                },
-            );
+            self.param_scheduler
+                .take_due(block_start, block_end, |offset, id, value| {
+                    if tracing {
+                        trace::emit(Record::ParamPoint {
+                            slot,
+                            id,
+                            value,
+                            offset,
+                            frame: block_start + offset as i64,
+                        });
+                    }
+                    params += 1;
+
+                    if !changes.add_point(id, offset as i32, value) {
+                        queue_full += 1;
+                    }
+                });
         }
 
         for buffer in &mut self.buffers {
@@ -283,6 +595,10 @@ impl Plugin {
         for (i, buffer) in self.buffers.iter_mut().enumerate() {
             self.channel_ptrs[i] = buffer.as_mut_ptr();
         }
+
+        let previous_result = self.last_process;
+        // Filled in by the timed call below, and read by the trace after it.
+        let mut spent = Duration::ZERO;
 
         // SAFETY: `bus`, `data` and everything they point at live until the
         // `process` call returns.
@@ -307,6 +623,12 @@ impl Plugin {
                 .map(|p| p.as_ptr())
                 .unwrap_or(ptr::null_mut());
 
+            // Stated rather than left null. A plugin with no context cannot tell
+            // playing from idling, has no tempo to sync to, and has no timeline
+            // to place a parameter change on; every real host supplies one, and
+            // a plugin that works everywhere else is entitled to expect it.
+            let mut context = self.context(block_start, transport);
+
             let mut data = ProcessData {
                 processMode: kRealtime as i32,
                 symbolicSampleSize: kSample32 as i32,
@@ -319,10 +641,89 @@ impl Plugin {
                 outputParameterChanges: ptr::null_mut(),
                 inputEvents: event_list_ptr,
                 outputEvents: ptr::null_mut(),
-                processContext: ptr::null_mut(),
+                processContext: &mut context,
             };
 
+            // Read around the call rather than once per block, so a run with
+            // the trace off pays nothing for the measurement.
+            let started = tracing.then(Instant::now);
             self.last_process = self.processor.process(&mut data);
+            if let Some(started) = started {
+                spent = started.elapsed();
+                self.process_blocks += 1;
+                self.process_total += spent;
+                self.process_max = self.process_max.max(spent);
+            }
+        }
+
+        self.queue_full += queue_full;
+
+        if tracing {
+            // Every block would be a hundred lines a second saying nothing. A
+            // block that carried something is what the log is for, and so is a
+            // result that has just changed — a plugin that starts refusing to
+            // process is otherwise indistinguishable from one playing quietly.
+            //
+            // And so is a block that took too long, whether or not it carried
+            // anything: a dropout cannot be attributed without knowing which
+            // block overran, and the ones that carry nothing are exactly the ones
+            // a "blocks that carried something" rule would hide. A quarter of the
+            // deadline, so the blocks on the way to overrunning are in the log
+            // too rather than only the ones already past it.
+            let budget = frames as f64 / self.sample_rate;
+            let slow = spent.as_secs_f64() * 4.0 > budget;
+
+            if events > 0 || params > 0 || slow || self.last_process != previous_result {
+                trace::emit(Record::Process {
+                    slot,
+                    frames,
+                    block_start,
+                    events,
+                    params,
+                    result: self.last_process,
+                    spent_us: spent.as_micros() as u64,
+                });
+            }
+
+            // Refusals and reorderings are counters nothing else ever reads.
+            // Reported when they move, which is the only moment they mean
+            // anything.
+            let overflow = (
+                self.scheduler.dropped(),
+                self.param_scheduler.dropped(),
+                self.param_scheduler.reordered(),
+                self.queue_full,
+            );
+            if overflow != self.traced_overflow {
+                self.traced_overflow = overflow;
+                trace::emit(Record::Overflow {
+                    slot,
+                    notes: overflow.0,
+                    params: overflow.1,
+                    reordered: overflow.2,
+                    queue_full: overflow.3,
+                });
+            }
+
+            // What is being held, and what it cost. On an interval rather than
+            // on a change, because the thing being looked for is a slope: a
+            // queue or a voice count that only ever goes up, or a `process`
+            // call that takes longer every minute.
+            if self.health_at.elapsed() >= HEALTH_INTERVAL {
+                self.health_at = Instant::now();
+                trace::emit(Record::Health {
+                    slot,
+                    notes_pending: self.scheduler.pending_len() as u32,
+                    notes_sounding: self.scheduler.sounding_len() as u32,
+                    params_pending: self.param_scheduler.pending_len() as u32,
+                    blocks: self.process_blocks,
+                    process_total_us: self.process_total.as_micros() as u64,
+                    process_max_us: self.process_max.as_micros() as u64,
+                });
+                self.process_blocks = 0;
+                self.process_total = Duration::ZERO;
+                self.process_max = Duration::ZERO;
+            }
         }
 
         // Down to interleaved stereo. A mono bus feeds both sides rather than
@@ -335,6 +736,51 @@ impl Plugin {
             out[frame * 2 + 1] += self.buffers[right_channel][frame] * gain;
         }
     }
+
+    /// This block's `ProcessContext`. See [`process_context`].
+    fn context(&self, block_start: i64, transport: Transport) -> ProcessContext {
+        process_context(self.sample_rate, block_start, transport)
+    }
+}
+
+/// Where this block sits, in every frame of reference VST3 offers.
+///
+/// Zeroed and then filled, so the fields this host cannot speak for — the cycle
+/// markers, the chord, the SMPTE offset — read as nothing rather than as whatever
+/// the stack held. None of their validity flags is set either, which is how a
+/// plugin knows not to trust them.
+fn process_context(
+    sample_rate: f64,
+    block_start: i64,
+    transport: Transport,
+) -> ProcessContext {
+    // SAFETY: every field is a plain integer, float or POD struct.
+    let mut context: ProcessContext = unsafe { std::mem::zeroed() };
+
+    let mut state = ContextFlags::kSystemTimeValid as u32
+        | ContextFlags::kContTimeValid as u32
+        | ContextFlags::kProjectTimeMusicValid as u32
+        | ContextFlags::kTempoValid as u32
+        | ContextFlags::kTimeSigValid as u32;
+    if transport.playing {
+        state |= ContextFlags::kPlaying as u32;
+    }
+
+    context.state = state;
+    context.sampleRate = sample_rate;
+    // The stream's own counter for both: it is the only timeline this host has,
+    // it never goes backwards, and a plugin needs it continuous rather than
+    // anchored to anything in particular.
+    context.projectTimeSamples = block_start;
+    context.continousTimeSamples = block_start;
+    context.systemTime = transport.system_time;
+    // Quarter notes, which is what the musical fields are measured in.
+    context.projectTimeMusic = block_start as f64 / sample_rate * transport.tempo / 60.0;
+    context.tempo = transport.tempo;
+    context.timeSigNumerator = transport.time_sig.0;
+    context.timeSigDenominator = transport.time_sig.1;
+
+    context
 }
 
 impl Drop for Plugin {
@@ -370,6 +816,13 @@ unsafe fn create_instance<I: Interface>(
     ComPtr::from_raw(obj as *mut I)
 }
 
+/// A plugin's controller half, and what keeps it talking to the processing half.
+struct Controller {
+    controller: ComPtr<IEditController>,
+    /// The host objects the two were connected through, for the plugin to hold.
+    connections: Vec<ComWrapper<ConnectionProxy>>,
+}
+
 /// Create the plugin's edit controller and wire it to the component.
 ///
 /// VST3 splits a plugin in two: a component that processes audio and a
@@ -385,9 +838,10 @@ unsafe fn build_controller(
     component: &ComPtr<IComponent>,
     host: &ComPtr<FUnknown>,
     handler: &ComWrapper<ComponentHandler>,
-) -> Option<ComPtr<IEditController>> {
+) -> Option<Controller> {
     let mut cid: TUID = std::mem::zeroed();
     let separate = component.getControllerClassId(&mut cid) == kResultOk;
+    let mut connections = Vec::new();
 
     let controller = if separate {
         let created = create_instance::<IEditController>(module.factory(), &cid);
@@ -420,17 +874,44 @@ unsafe fn build_controller(
         }
 
         // The two-way connection carries the messages a plugin uses to keep its
-        // editor in step with its processing.
+        // editor in step with its processing — and it goes *through the host*
+        // rather than half to half. VST3 asks for that, because the host is the
+        // only party that knows which thread a message arrived on and a
+        // controller's handler does not belong inside `process`. See
+        // `ConnectionProxy`.
         if let (Some(a), Some(b)) = (
             component.cast::<IConnectionPoint>(),
             controller.cast::<IConnectionPoint>(),
         ) {
-            a.connect(b.as_ptr());
-            b.connect(a.as_ptr());
+            let to_controller = ComWrapper::new(ConnectionProxy::to(b.clone()));
+            let to_component = ComWrapper::new(ConnectionProxy::to(a.clone()));
+
+            match (
+                to_controller.to_com_ptr::<IConnectionPoint>(),
+                to_component.to_com_ptr::<IConnectionPoint>(),
+            ) {
+                (Some(for_component), Some(for_controller)) => {
+                    a.connect(for_component.as_ptr());
+                    b.connect(for_controller.as_ptr());
+                    connections.push(to_controller);
+                    connections.push(to_component);
+                }
+                // A proxy that will not give up a COM pointer is unusable, and a
+                // direct connection is much better than none. In practice
+                // `ComWrapper` always obliges for a declared interface, so this
+                // never fires.
+                _ => {
+                    a.connect(b.as_ptr());
+                    b.connect(a.as_ptr());
+                }
+            }
         }
     }
 
-    Some(controller)
+    Some(Controller {
+        controller,
+        connections,
+    })
 }
 
 /// One automatable parameter, as the webview needs to describe it.
@@ -700,5 +1181,98 @@ mod tests {
             // Matched by pitch, like the note-on it releases.
             assert_eq!(event.__field0.noteOff.noteId, -1);
         }
+    }
+
+    const SR: f64 = 48_000.0;
+
+    /// Whether a context has one of the validity flags set.
+    fn has(context: &ProcessContext, flag: u32) -> bool {
+        context.state & flag != 0
+    }
+
+    // The fields this host can actually speak for, and the flags that say so. A
+    // plugin reads the flags first; a value with no flag behind it is worse than
+    // no value at all.
+    #[test]
+    fn a_context_states_the_rate_the_frame_and_the_meter() {
+        let context = process_context(
+            SR,
+            96_000,
+            Transport {
+                playing: true,
+                tempo: 90.0,
+                time_sig: (7, 8),
+                system_time: 1_234,
+            },
+        );
+
+        assert_eq!(context.sampleRate, SR);
+        assert_eq!(context.projectTimeSamples, 96_000);
+        assert_eq!(context.continousTimeSamples, 96_000);
+        assert_eq!(context.systemTime, 1_234);
+        assert_eq!(context.tempo, 90.0);
+        assert_eq!(context.timeSigNumerator, 7);
+        assert_eq!(context.timeSigDenominator, 8);
+
+        assert!(has(&context, ContextFlags::kTempoValid as u32));
+        assert!(has(&context, ContextFlags::kTimeSigValid as u32));
+        assert!(has(&context, ContextFlags::kContTimeValid as u32));
+        assert!(has(&context, ContextFlags::kSystemTimeValid as u32));
+    }
+
+    // The stream runs whether or not anything is being played, so this flag is
+    // the only thing that tells a plugin which it is.
+    #[test]
+    fn only_a_rolling_transport_reads_as_playing() {
+        let rolling = process_context(SR, 0, Transport::rolling(120.0));
+        let idle = process_context(SR, 0, Transport::default());
+
+        assert!(has(&rolling, ContextFlags::kPlaying as u32));
+        assert!(!has(&idle, ContextFlags::kPlaying as u32));
+    }
+
+    // Quarter notes, which is the unit every musical field in a context uses. At
+    // 120 BPM a quarter note is half a second, so two seconds is four of them.
+    #[test]
+    fn musical_time_is_the_tempo_applied_to_the_frame_count() {
+        let context = process_context(SR, (SR * 2.0) as i64, Transport::rolling(120.0));
+
+        assert!(has(&context, ContextFlags::kProjectTimeMusicValid as u32));
+        assert!((context.projectTimeMusic - 4.0).abs() < 1e-9, "got {}", context.projectTimeMusic);
+    }
+
+    // Claiming a cycle, a chord or a SMPTE offset this host knows nothing about
+    // would have a plugin act on whatever the stack held.
+    #[test]
+    fn a_context_claims_nothing_it_cannot_answer_for() {
+        let context = process_context(SR, 4_096, Transport::rolling(120.0));
+
+        for unflagged in [
+            ContextFlags::kCycleValid as u32,
+            ContextFlags::kCycleActive as u32,
+            ContextFlags::kChordValid as u32,
+            ContextFlags::kSmpteValid as u32,
+            ContextFlags::kClockValid as u32,
+            ContextFlags::kBarPositionValid as u32,
+            ContextFlags::kRecording as u32,
+        ] {
+            assert!(!has(&context, unflagged), "flag {unflagged} should not be set");
+        }
+
+        assert_eq!(context.cycleStartMusic, 0.0);
+        assert_eq!(context.cycleEndMusic, 0.0);
+        assert_eq!(context.smpteOffsetSubframes, 0);
+        assert_eq!(context.samplesToNextClock, 0);
+    }
+
+    // A stream that has only just started is the one moment the musical clock is
+    // at zero, and a plugin must not read that as "no context".
+    #[test]
+    fn the_first_block_is_a_real_position_rather_than_an_absent_one() {
+        let context = process_context(SR, 0, Transport::rolling(100.0));
+
+        assert_eq!(context.projectTimeSamples, 0);
+        assert_eq!(context.projectTimeMusic, 0.0);
+        assert!(has(&context, ContextFlags::kProjectTimeMusicValid as u32));
     }
 }

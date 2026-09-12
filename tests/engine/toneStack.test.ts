@@ -102,7 +102,7 @@ function pitchesOf(segment: ChordSegment): number[] {
 
 describe('a stack in the project file', () => {
   it('states the current schema version', () => {
-    expect(SCHEMA_VERSION).toBe('1.21');
+    expect(SCHEMA_VERSION).toBe('1.22');
   });
 
   it('round-trips a stack that names its own tones', () => {

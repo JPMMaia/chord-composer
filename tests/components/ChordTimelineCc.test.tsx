@@ -304,6 +304,58 @@ describe('ChordTimeline MIDI CC lanes', () => {
     expect(lanes()![0].name).toBe('CC 20');
   });
 
+  /**
+   * The switch that decides how a jump in a controller curve is sent.
+   *
+   * On for every lane, because a controller is the one target where a jump is
+   * movement the instrument acts on rather than a value it reads — a harp plucks
+   * a string per step. Off is for the cases where the filling in buys nothing,
+   * which only the user knows. See `@/engine/controllerRamp`.
+   */
+  describe('the smoothing switch', () => {
+    const smoothButton = () => screen.getByLabelText('Smooth CC 20 jumps');
+
+    it('is on for a lane that has just been added', async () => {
+      usePlugin();
+      render(<ChordTimeline />);
+      await learn();
+
+      expect(smoothButton()).toHaveAttribute('aria-pressed', 'true');
+      expect(lanes()![0].smooth).toBeUndefined();
+    });
+
+    it('switches off, and says so on the lane', async () => {
+      usePlugin();
+      render(<ChordTimeline />);
+      await learn();
+
+      fireEvent.click(smoothButton());
+
+      expect(lanes()![0].smooth).toBe(false);
+      expect(smoothButton()).toHaveAttribute('aria-pressed', 'false');
+    });
+
+    it('switches back on, and stops saying anything', async () => {
+      usePlugin();
+      render(<ChordTimeline />);
+      await learn();
+
+      fireEvent.click(smoothButton());
+      fireEvent.click(smoothButton());
+
+      expect(lanes()![0].smooth).toBeUndefined();
+      expect(smoothButton()).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    // Volume is ramped by Web Audio itself, which draws the line between two
+    // values without being asked, so there is nothing here to offer.
+    it('is not offered on the volume lane', () => {
+      render(<ChordTimeline />);
+
+      expect(screen.queryByLabelText('Smooth Volume jumps')).toBeNull();
+    });
+  });
+
   // The volume lane has a fader behind it and is not the user's to name.
   it('does not offer to rename the volume lane', () => {
     render(<ChordTimeline />);

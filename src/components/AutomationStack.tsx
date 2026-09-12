@@ -6,7 +6,13 @@ import { AutomationLane, AUTOMATION_LANE_HEIGHT } from '@/components/AutomationL
 import { LaneLabel } from '@/components/LaneLabel';
 import { LearnCcPanel } from '@/components/LearnCcPanel';
 import { TouchpadPanel } from '@/components/TouchpadPanel';
-import { laneFor, laneKey, MAX_CC, VOLUME_LANE_KEY } from '@/engine/parameterAutomation';
+import {
+  isLaneSmooth,
+  laneFor,
+  laneKey,
+  MAX_CC,
+  VOLUME_LANE_KEY,
+} from '@/engine/parameterAutomation';
 import { freeController, nextFreeCc } from '@/engine/vst3Cc';
 import { useVst3Cc } from '@/hooks/useVst3Cc';
 
@@ -52,6 +58,16 @@ export interface AutomationLaneDef {
    * is cleared rather than removed, and is not the user's to rename.
    */
   removable?: boolean;
+  /**
+   * Whether jumps in this curve are walked through step by step, or null for a
+   * lane where the question does not arise.
+   *
+   * Null for volume, which is ramped by Web Audio itself, and for a plugin
+   * parameter, which has no controller step to walk in — so only a `cc:` lane
+   * shows the switch. See `@/engine/controllerRamp`.
+   */
+  smooth?: boolean | null;
+  onSmooth?: (smooth: boolean) => void;
 }
 
 /** The live copy of a phrase, for reading a curve back after a commit re-sorted it. */
@@ -76,6 +92,7 @@ export function useAutomationLanes(
   const addLanePoint = projectStore(s => s.addLanePoint);
   const moveLanePoint = projectStore(s => s.moveLanePoint);
   const removeLanePoint = projectStore(s => s.removeLanePoint);
+  const setLaneSmooth = projectStore(s => s.setLaneSmooth);
 
   if (!phrase || !track) return [];
 
@@ -110,6 +127,11 @@ export function useAutomationLanes(
           moveLanePoint(phrase.id, key, i, beat, value),
         onRemove: (i: number) => removeLanePoint(phrase.id, key, i),
         removable: true,
+        smooth: lane.target.kind === 'cc' ? isLaneSmooth(lane) : null,
+        onSmooth:
+          lane.target.kind === 'cc'
+            ? (smooth: boolean) => setLaneSmooth(phrase.id, key, smooth)
+            : undefined,
       };
     }),
   ];
@@ -141,6 +163,29 @@ export const AutomationGutter: React.FC<AutomationGutterProps> = ({ phrase, lane
             label={lane.label}
             onRename={lane.removable ? name => renameLane(phrase.id, lane.key, name) : undefined}
           />
+
+          {lane.onSmooth && (
+            // A controller lane's jumps are filled in by default, because that is
+            // what a MIDI timeline would have sent and what an instrument acting
+            // on controller movement needs. Off is for a target that merely reads
+            // the value, where the filling in is points for nothing.
+            <button
+              type="button"
+              aria-label={`Smooth ${lane.label} jumps`}
+              aria-pressed={lane.smooth === true}
+              title={
+                lane.smooth
+                  ? 'Sending every controller step across a jump. Click to send jumps as they are drawn.'
+                  : 'Sending jumps as they are drawn. Click to walk every controller step across them.'
+              }
+              onClick={() => lane.onSmooth?.(!lane.smooth)}
+              className={`shrink-0 px-1 rounded text-[11px] transition-colors hover:bg-gray-700 ${
+                lane.smooth ? 'text-emerald-400' : 'text-gray-600 hover:text-gray-300'
+              }`}
+            >
+              Smooth
+            </button>
+          )}
 
           {!lane.removable ? (
             // Volume. Only once there is a curve to clear: an always-present button

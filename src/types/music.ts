@@ -288,6 +288,17 @@ export interface ParameterAutomation {
    */
   name: string;
   points: AutomationPoint[];
+  /**
+   * Whether a jump in this curve is walked through rather than sent as a jump.
+   *
+   * Absent means yes, so a project written before this existed gets the
+   * behaviour too — and only a lane the user has switched it *off* on carries the
+   * key at all. Meaningful for a `cc:` target, whose values are the 7-bit steps a
+   * hand would have moved through one at a time; a `param:` target has no step
+   * size of its own to walk in and ignores it. See `@/engine/controllerRamp` for
+   * what the walking is for, and why off is worth offering.
+   */
+  smooth?: boolean;
 }
 
 /**
@@ -429,6 +440,31 @@ export interface Track {
    * playhead and the exported beat positions all stay put.
    */
   timeOffsetMs?: number;
+  /**
+   * Spread this instrument's simultaneous notes by this many milliseconds each.
+   *
+   * A performance allowance for a heavy plugin, not a musical decision — the
+   * musical one is `ChordSegment.timing`'s strum, which is authored per chord and
+   * measured in beats. A sampled instrument does most of its work at an attack, so
+   * a chord landing on one sample can cost a single audio block more than it has,
+   * and a block over its deadline is heard as a click. Rolling the chord by a few
+   * milliseconds spreads that cost across blocks without being heard as a roll.
+   *
+   * Absent or 0 means every note sounds together, which is what every instrument
+   * did before this existed. Clamped and applied by `trackVoiceStaggerSeconds`.
+   */
+  voiceStaggerMs?: number;
+  /**
+   * Stop this instrument's notes this many milliseconds before its next attack.
+   *
+   * The other half of `voiceStaggerMs`: a plugin asked to release a chord and
+   * attack the next one in the same block pays for both at once. Leaving a gap
+   * moves the release into a block of its own.
+   *
+   * Absent or 0 leaves notes abutting, as written. A note is never cut shorter
+   * than it takes to hear.
+   */
+  releaseGapMs?: number;
   /**
    * Temporarily silenced. Its notes still draw in the piano roll — muting is
    * about what you hear, `visible` is about what you see.

@@ -10,7 +10,11 @@
 //! - `cargo run --example render -- --path <file.vst3>` — a module that is not
 //!   installed, which is how the bundled test synth is exercised.
 
-use chord_composer_lib::vst3::{module::Module, plugin::Plugin, scan};
+use chord_composer_lib::vst3::{
+    module::Module,
+    plugin::{Plugin, Transport},
+    scan, trace,
+};
 
 const SAMPLE_RATE: f64 = 48_000.0;
 const BLOCK: usize = 512;
@@ -66,6 +70,10 @@ fn main() {
         .scheduler
         .schedule_note(60, 100, 0, (SAMPLE_RATE * 2.0) as i64);
 
+    // Rendering a performance, so the plugin is told the transport is rolling
+    // rather than left to guess from a process context it never gets.
+    let transport = Transport::rolling(120.0);
+
     let mut out = vec![0.0f32; BLOCK * 2];
     let mut peak = 0.0f32;
     let mut first_sound_at: Option<f64> = None;
@@ -74,7 +82,7 @@ fn main() {
     let blocks = (SAMPLE_RATE * 4.0 / BLOCK as f64) as usize;
     for block in 0..blocks {
         out.fill(0.0);
-        plugin.process_into(&mut out, BLOCK, (block * BLOCK) as i64);
+        plugin.process_into(&mut out, BLOCK, (block * BLOCK) as i64, transport);
 
         let block_peak = out.iter().fold(0.0f32, |a, s| a.max(s.abs()));
         peak = peak.max(block_peak);
@@ -83,6 +91,11 @@ fn main() {
             first_sound_at = Some((block * BLOCK) as f64 / SAMPLE_RATE);
         }
     }
+
+    // The trace is written by a thread this process is about to end, and a
+    // render is over in a second or two — without this, a run loses most of the
+    // log it just produced. Does nothing when the log is off.
+    trace::flush();
 
     println!("peak    : {peak:.6}");
     match first_sound_at {

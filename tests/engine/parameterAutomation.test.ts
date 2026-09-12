@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  isLaneSmooth,
   laneFor,
   laneKey,
   normalizeParameterAutomation,
+  sameLanes,
   withLane,
   withLaneName,
   withLanePoints,
+  withLaneSmooth,
   withoutLane,
 } from '@/engine/parameterAutomation';
 import type { ParameterAutomation } from '@/types/music';
@@ -216,5 +219,72 @@ describe('withLaneName', () => {
   it('is a no-op for a key with no lane', () => {
     const lanes = [cc(20)];
     expect(withLaneName(lanes, 'param:7', 'Cutoff')).toBe(lanes);
+  });
+});
+
+describe('the walking switch', () => {
+  // On unless a lane says otherwise, so a project written before the switch
+  // existed gets the behaviour rather than keeping the fault nobody chose.
+  it('is on for a lane that says nothing about it', () => {
+    expect(isLaneSmooth(cc(20, [[0, 0.5]]))).toBe(true);
+  });
+
+  it('is off only when the lane says false', () => {
+    expect(isLaneSmooth({ ...cc(20, [[0, 0.5]]), smooth: false })).toBe(false);
+    expect(isLaneSmooth({ ...cc(20, [[0, 0.5]]), smooth: true })).toBe(true);
+  });
+
+  // The key is only ever stored off. A lane nobody has touched has to serialise
+  // exactly as it did before the switch existed, or every project file in
+  // existence changes the first time it is opened and saved.
+  it('is not written on a lane that has it on', () => {
+    const [kept] = normalizeParameterAutomation([
+      { ...cc(20, [[0, 0.5]]), smooth: true },
+    ]);
+
+    expect('smooth' in kept).toBe(false);
+    expect(isLaneSmooth(kept)).toBe(true);
+  });
+
+  it('survives normalisation when it is off', () => {
+    const [kept] = normalizeParameterAutomation([
+      { ...cc(20, [[0, 0.5]]), smooth: false },
+    ]);
+
+    expect(kept.smooth).toBe(false);
+  });
+
+  // Anything but `false` off a hand-edited file is on, the same way every other
+  // optional key here reads nonsense as absent.
+  it('reads anything else off a file as on', () => {
+    const [kept] = normalizeParameterAutomation([
+      { ...cc(20, [[0, 0.5]]), smooth: 'no' } as never,
+    ]);
+
+    expect(isLaneSmooth(kept)).toBe(true);
+  });
+
+  it('switches one lane without touching its neighbours', () => {
+    const lanes = [cc(20, [[0, 0.5]]), cc(21, [[0, 0.5]])];
+    const result = withLaneSmooth(lanes, 'cc:20', false);
+
+    expect(isLaneSmooth(result[0])).toBe(false);
+    expect(isLaneSmooth(result[1])).toBe(true);
+    expect(result[1]).toBe(lanes[1]);
+  });
+
+  it('changes nothing for a key no lane has', () => {
+    const lanes = [cc(20, [[0, 0.5]])];
+    expect(withLaneSmooth(lanes, 'cc:99', false)).toBe(lanes);
+  });
+
+  // `sameLanes` is what keeps a no-op edit off the undo stack, so it has to
+  // notice this the way it notices a rename.
+  it('is part of what makes two lane lists the same', () => {
+    const on = [cc(20, [[0, 0.5]])];
+    const off = [{ ...cc(20, [[0, 0.5]]), smooth: false }];
+
+    expect(sameLanes(on, on)).toBe(true);
+    expect(sameLanes(on, off)).toBe(false);
   });
 });

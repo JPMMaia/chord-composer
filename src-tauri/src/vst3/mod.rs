@@ -13,12 +13,15 @@ pub mod host;
 pub mod module;
 pub mod params;
 pub mod plugin;
+pub mod render;
 pub mod scan;
 pub mod stream;
+pub mod trace;
 
 use std::sync::Mutex;
 
-use engine::Engine;
+use engine::{AudioHealth, Engine};
+use plugin::ResetMode;
 use module::PluginInfo;
 
 /// Everything native the app owns, behind Tauri's managed state.
@@ -37,6 +40,19 @@ pub struct Vst3State {
     /// exist yet: a device can be chosen in a session that never loads a
     /// plugin, and the choice has to survive until one is.
     output_device: Mutex<Option<String>>,
+    /// Frames per block to ask the output device for. `None` means the device's
+    /// own preference, which is what every session had before this was settable.
+    ///
+    /// Kept here for the same reason `output_device` is: a buffer size can be
+    /// chosen in a session that never loads a plugin, and the choice has to
+    /// survive until one is.
+    buffer_frames: Mutex<Option<u32>>,
+    /// Milliseconds of audio kept rendered in front of the device. 0 renders in
+    /// the audio callback, which is what every session did before this existed.
+    ///
+    /// Kept here for the same reason the two above are: it can be chosen in a
+    /// session that never loads a plugin.
+    headroom_ms: Mutex<u32>,
     /// Whether the quit teardown has already run, so that it runs once.
     shut_down: std::sync::atomic::AtomicBool,
 }
@@ -67,7 +83,10 @@ impl Vst3State {
         let mut guard = self.engine.lock().unwrap();
         if guard.is_none() {
             let preferred = self.output_device.lock().unwrap().clone();
-            *guard = Some(Engine::start(preferred)?);
+            let buffer = *self.buffer_frames.lock().unwrap();
+            let engine = Engine::start(preferred, buffer)?;
+            engine.set_headroom(*self.headroom_ms.lock().unwrap());
+            *guard = Some(engine);
         }
         f(guard.as_ref().expect("just started"))
     }
@@ -76,7 +95,7 @@ impl Vst3State {
     ///
     /// Remembered whether or not the engine is running, so a device chosen
     /// before the first plugin is loaded is the one that plugin comes up on.
-    pub fn set_output_device(&self, name: Option<String>) -> Result<(), String> {
+    pub fn set_output_device(&self, name: Option<String>) -> Result<Option<String>, String> {
         *self.output_device.lock().unwrap() = name.clone();
 
         // Deliberately does not go through `with_engine`: choosing where sound
@@ -84,7 +103,35 @@ impl Vst3State {
         let guard = self.engine.lock().unwrap();
         match guard.as_ref() {
             Some(engine) => engine.set_output_device(name.as_deref()),
-            None => Ok(()),
+            None => Ok(None),
+        }
+    }
+
+    /// Keep `ms` of already-rendered audio in front of the output device.
+    ///
+    /// Remembered whether or not the engine is running, on the same terms as the
+    /// output device — and equally, choosing it must not open an audio device.
+    pub fn set_headroom(&self, ms: u32) {
+        *self.headroom_ms.lock().unwrap() = ms;
+
+        let guard = self.engine.lock().unwrap();
+        if let Some(engine) = guard.as_ref() {
+            engine.set_headroom(ms);
+        }
+    }
+
+    /// Ask the output device for blocks of `frames`, or for whatever it prefers.
+    ///
+    /// Remembered whether or not the engine is running, on the same terms as the
+    /// output device above and for the same reason — and equally, choosing a
+    /// block size must not be what opens an audio device.
+    pub fn set_buffer_size(&self, frames: Option<u32>) -> Result<Option<String>, String> {
+        *self.buffer_frames.lock().unwrap() = frames;
+
+        let guard = self.engine.lock().unwrap();
+        match guard.as_ref() {
+            Some(engine) => engine.set_buffer_size(frames),
+            None => Ok(None),
         }
     }
 
@@ -119,6 +166,12 @@ impl Vst3State {
             engine.unload_all();
             drop(engine);
         }
+
+        // Last, and only once everything above has had its say: the log is
+        // written on an interval by a thread the process is about to take with
+        // it, and the end of it is where a quit that goes wrong shows up.
+        trace::log("shutdown", format_args!("every plugin torn down"));
+        trace::flush();
     }
 }
 
@@ -131,8 +184,71 @@ impl Vst3State {
 pub fn vst3_set_output_device(
     state: tauri::State<'_, Vst3State>,
     name: Option<String>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     state.set_output_device(name)
+}
+
+/// How big a block the plugins' output device is asked for.
+///
+/// The manual of more than one sample library says to raise this when the sound
+/// crackles, and it is right twice over: a block's deadline is the time it will
+/// play for, so a longer block has longer to be rendered, and the ring in front
+/// of the device grows with it so a render that overruns eats slack instead of
+/// leaving a gap.
+///
+/// `frames` of `None` restores the device's own preference. Answers a sentence
+/// when the device would not take the size asked for and its own was used
+/// instead, so the panel never shows a number that is not the one running.
+#[tauri::command]
+pub fn vst3_set_buffer_size(
+    state: tauri::State<'_, Vst3State>,
+    frames: Option<u32>,
+) -> Result<Option<String>, String> {
+    state.set_buffer_size(frames)
+}
+
+/// How much already-rendered audio is kept in front of the output device.
+///
+/// The other half of the block size, and the one that actually breaks the link
+/// between a slow block and a gap in the sound: with audio rendered ahead, a
+/// block that takes forty milliseconds spends slack rather than missing a
+/// deadline. What still has to hold is the average — the plugins must render a
+/// second of audio in less than a second — and the cost is that much delay
+/// between pressing a key and hearing it.
+///
+/// `ms` of 0 renders inside the audio callback, which is what every session did
+/// before this existed and is kept as a real path so the two can be compared.
+#[tauri::command]
+pub fn vst3_set_headroom(state: tauri::State<'_, Vst3State>, ms: u32) {
+    state.set_headroom(ms.min(render::MAX_HEADROOM_MS));
+}
+
+/// How much of an instrument to put back when it is reset.
+///
+/// Chosen by measurement rather than by argument — `examples/soak.rs` applies
+/// each mode on an interval against the library that misbehaves and prints what
+/// the cost curve does. Not a user setting: there is one right answer per
+/// plugin and the user has no way to find it.
+const RESET_MODE: ResetMode = ResetMode::Active;
+
+/// Put every hosted instrument back the way it was when it loaded.
+///
+/// A detailed sampled instrument can get slower the longer it plays, and no
+/// amount of buffer cures a cost that keeps climbing — it only puts off the
+/// moment it is heard. Reloading the instrument inside the plugin's own editor
+/// clears it; this asks for the same thing over VST3, without re-streaming the
+/// samples a real reload would.
+///
+/// Answers how many instruments were put back. Deliberately not `with_engine`,
+/// like `vst3_peak_level`: asking for an engine to be tidied must not be what
+/// starts one, and a session with nothing loaded has nothing to reset.
+#[tauri::command]
+pub fn vst3_reset_all(state: tauri::State<'_, Vst3State>) -> Result<usize, String> {
+    let guard = state.engine.lock().unwrap();
+    match guard.as_ref() {
+        Some(engine) => engine.reset_all(RESET_MODE),
+        None => Ok(0),
+    }
 }
 
 /// Every VST3 instrument installed on this machine.
@@ -318,11 +434,32 @@ pub fn vst3_automate(
     params: Vec<ScheduledTarget>,
 ) -> Result<(), String> {
     state.with_engine(|engine| {
+        // Where this batch leaves each target, for the plugin's controller half.
+        // One entry per target rather than one per point: the controller only has
+        // to end up in the right place, and a COM call per point would be fifty a
+        // second into a plugin's UI.
+        let mut settled: Vec<(u32, f64)> = Vec::new();
+
         for param in &params {
             let Some(id) = param.target.resolve(engine, &track_id) else {
                 continue;
             };
             engine.automate(&track_id, id, param.value, param.when)?;
+
+            match settled.iter_mut().find(|(found, _)| *found == id) {
+                Some(entry) => entry.1 = param.value,
+                None => settled.push((id, param.value)),
+            }
+        }
+
+        // After the points are queued, not before: the controller is being told
+        // where the curve is going, and the look-ahead means that is a fraction of
+        // a second ahead of what is being heard. A knob in a plugin's editor
+        // leading the sound by a look-ahead window is not something anyone can
+        // see; a controller that never hears about an automated parameter at all
+        // is a host failing an obligation VST3 places on it.
+        for (id, value) in settled {
+            engine.acknowledge_param(&track_id, id, value);
         }
         Ok(())
     })
@@ -345,6 +482,30 @@ pub fn vst3_set_target(
         };
         engine.set_param(&track_id, id, value)
     })
+}
+
+/// Say what the transport is doing, so plugins can be given a process context.
+///
+/// Called at Play, at Stop, and whenever the tempo or the bar's time signature
+/// under the playhead changes. Cheap enough to be called from a scheduling pass,
+/// which is what lets a tempo change mid-playback reach the plugins at all.
+///
+/// Deliberately *not* through `with_engine`: saying what the transport is doing
+/// must not be what opens an audio device, any more than choosing an output
+/// endpoint is. A session with no plugins has nothing to tell.
+#[tauri::command]
+pub fn vst3_set_transport(
+    state: tauri::State<'_, Vst3State>,
+    playing: bool,
+    tempo: f64,
+    numerator: i32,
+    denominator: i32,
+) -> Result<(), String> {
+    let guard = state.engine.lock().unwrap();
+    match guard.as_ref() {
+        Some(engine) => engine.set_transport(playing, tempo, numerator, denominator),
+        None => Ok(()),
+    }
 }
 
 /// Wiggle a MIDI controller so an armed plugin control binds to it.
@@ -542,6 +703,20 @@ pub fn vst3_set_state(
 pub fn vst3_peak_level(state: tauri::State<'_, Vst3State>) -> f32 {
     let guard = state.engine.lock().unwrap();
     guard.as_ref().map_or(0.0, |e| e.take_peak())
+}
+
+/// What the audio thread has cost since this was last asked.
+///
+/// Read on a timer by the settings dialog, which is where a user decides whether
+/// a buffer size is big enough. Answers `None` when no engine is running, so a
+/// session that has never loaded a plugin reports nothing rather than a row of
+/// confident zeroes — and, as with `vst3_peak_level`, deliberately does not go
+/// through `with_engine`: asking how the audio is doing must not be what starts
+/// an audio device.
+#[tauri::command]
+pub fn vst3_audio_health(state: tauri::State<'_, Vst3State>) -> Option<AudioHealth> {
+    let guard = state.engine.lock().unwrap();
+    guard.as_ref().map(|e| e.take_health())
 }
 
 /// Whether a track currently has a plugin loaded.

@@ -12,14 +12,20 @@ import {
   preRollSeconds,
   songTimeToBeat,
   toClockTime,
+  createEventShaper,
+  NO_SHAPING,
   trackOffsets,
 } from '@/engine/scheduler';
 import type { CycleWindow } from '@/engine/scheduler';
 import { firstPointAtOrAfter, valueAtBeat } from '@/engine/volumeAutomation';
-import { laneKey, VOLUME_LANE_KEY } from '@/engine/parameterAutomation';
+import { isLaneSmooth, laneKey, VOLUME_LANE_KEY } from '@/engine/parameterAutomation';
+import { rampPoints } from '@/engine/controllerRamp';
+import type { RampPoint } from '@/engine/controllerRamp';
 import { toControllerStep } from '@/engine/touchpadExpression';
-import { syncVst3Clock } from '@/engine/vst3Instrument';
+import { getBarIndexAtBeat, getBarTimeSignature } from '@/engine/timeline';
+import { resetVst3Plugins, setVst3Transport, syncVst3Clock } from '@/engine/vst3Instrument';
 import { registerAudioContext } from '@/engine/audioOutput';
+import { loadAudioPrefs } from '@/engine/audioPrefs';
 import {
   buildClickQueue,
   resetClickQueue,
@@ -111,6 +117,16 @@ const PARAM_GRID_SECONDS = 0.01;
  * pool's `Instrument`s; this hook is the part that has to care about React
  * lifecycles and the browser's autoplay rules.
  */
+/**
+ * How long the transport must be idle before instruments are put back, in ms.
+ *
+ * Long enough for a sampled release to finish, so a reset is not heard as the
+ * tail being cut; short enough that it has happened before the next Play. A
+ * Play inside this window cancels it, which is the trade that keeps Play
+ * instant — see `armIdleReset`.
+ */
+const IDLE_RESET_MS = 1500;
+
 export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -168,6 +184,10 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
 
   /** Memoised `calculateNoteTiming` for this run. Null while stopped. */
   const timingsRef = useRef<((bars: Bar[]) => NoteTiming[]) | null>(null);
+  /** Per-instrument note shaping, memoised across passes. See `createEventShaper`. */
+  const shapeRef = useRef(createEventShaper());
+  /** The pending idle reset, if the transport has stopped. See `armIdleReset`. */
+  const resetTimerRef = useRef<number | null>(null);
   /**
    * How far through each curve this run has got, keyed by `<trackId>|<laneKey>`.
    *
@@ -178,6 +198,20 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
   const automationRef = useRef(new Map<string, AutomationCursor>());
   /** Whether the click queue has been built for the current playback run. */
   const clickQueueBuiltRef = useRef(false);
+
+  /**
+   * Drop every curve cursor belonging to one track.
+   *
+   * What a track going out of earshot needs: left in place, its cursors would
+   * have the curve resume from wherever it had reached when the track comes back,
+   * rather than from where the playhead actually is.
+   */
+  const forgetTrackCurves = useCallback((trackId: string) => {
+    const prefix = `${trackId}|`;
+    for (const key of automationRef.current.keys()) {
+      if (key.startsWith(prefix)) automationRef.current.delete(key);
+    }
+  }, []);
 
   /**
    * Build the click queue from the current config and re-sync the queue index.
@@ -211,6 +245,18 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
    */
   const resetAutomation = useCallback(() => {
     automationRef.current.clear();
+
+    // The transport has stopped, as far as any plugin is concerned. Stated here
+    // because this is already the one place that means "the run has ended or is
+    // starting over", and a plugin whose context still says `playing` keeps its
+    // tempo-synced parts running against a playhead that has stopped moving. A
+    // Play corrects it on the first scheduling pass, a few milliseconds later.
+    setVst3Transport({
+      playing: false,
+      tempo: configRef.current.bpm,
+      numerator: configRef.current.timeSignature.beatsPerMeasure,
+      denominator: configRef.current.timeSignature.beatUnit,
+    });
 
     const pool = poolRef.current;
     if (!pool) return;
@@ -257,6 +303,13 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
    *   moment it crosses it, instead of `maxStep`'s worth of sub-step dither — so
    *   the two travel together rather than as a value filter and a rate filter that
    *   could disagree.
+   * @param walk - Expand a jump between two sent values into the run of values
+   *   between them, or null to send the jump. See `@/engine/controllerRamp`.
+   *
+   *   Only consulted on a sampled curve. A ramped backend needs nothing of the
+   *   sort — drawing the line between two values is what `rampVolume` is — and a
+   *   curve walked breakpoint by breakpoint has no sampling grid for the line to
+   *   be short relative to.
    */
   const advanceCurve = useCallback(
     (
@@ -269,7 +322,10 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
       pin: (value: number) => void,
       emit: ((value: number, when: number) => void) | null,
       maxStep: number | null,
-      snap: ((value: number) => number) | null = null
+      snap: ((value: number) => number) | null = null,
+      walk:
+        | ((from: number, to: number, fromWhen: number, when: number) => RampPoint[])
+        | null = null
     ) => {
       const base = slice.songStartClockTime;
       const horizon = slice.toSong;
@@ -287,6 +343,23 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
       const moved = (value: number, last: number) =>
         snap ? value !== last : Math.abs(value - last) > VOLUME_STEP_EPSILON;
 
+      /**
+       * Put one value on the instrument's timeline.
+       *
+       * The single place a sampled curve reaches the instrument, so the line drawn
+       * across a jump is drawn wherever a jump can happen: between two grid
+       * samples, and at the seam where a repetition opens somewhere other than
+       * where the last one ended.
+       */
+      const place = (from: number, fromWhen: number, value: number, when: number) => {
+        if (!emit) return;
+        if (!walk) {
+          emit(value, when);
+          return;
+        }
+        for (const step of walk(from, value, fromWhen, when)) emit(step.value, step.when);
+      };
+
       let cursor = automationRef.current.get(key);
 
       if (emit && cursor && cursor.points === points && cursor.cycleBase !== base) {
@@ -302,7 +375,10 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
           const hold = Math.max(seam - SEAM_STEP_SECONDS, cursor.lastEmitClock);
           if (hold < seam) emit(cursor.lastValue, hold);
         }
-        emit(value, seam);
+        // A loop seam is the widest jump a curve ever makes — the end of the
+        // curve to its opening, in no time at all — so it is the emission that
+        // most needs the line drawn across it.
+        place(cursor.lastValue, cursor.lastEmitClock, value, seam);
 
         cursor = {
           index: firstPointAtOrAfter(points, openBeat),
@@ -374,7 +450,7 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
         if (!moved(value, cursor.lastValue)) continue;
 
         const when = toClockTime(songTime, base);
-        emit(value, when);
+        place(cursor.lastValue, cursor.lastEmitClock, value, when);
         cursor.lastValue = value;
         cursor.lastEmitClock = when;
       }
@@ -392,12 +468,28 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
    * step with the notes, which are cut the same way.
    */
   const scheduleAutomation = useCallback(
-    (cfg: PlaybackConfig, pool: InstrumentPool, elapsed: number, slice: CycleWindow) => {
+    (
+      cfg: PlaybackConfig,
+      pool: InstrumentPool,
+      elapsed: number,
+      slice: CycleWindow,
+      audible: Set<string>
+    ) => {
       const elapsedBeat = songTimeToBeat(elapsed, cfg.bpm);
 
       for (const track of cfg.tracks) {
         const instrument = pool.get(track.id);
         if (!instrument) continue;
+
+        // A track nobody can hear is not automated either. Its notes are already
+        // filtered by this same set, and a curve is no different: driving a muted
+        // plugin is work for nothing, and on a sampler that modulates per voice
+        // it is work the tracks you *can* hear end up paying for, because every
+        // plugin is rendered on the one thread inside the one deadline.
+        if (!audible.has(track.id)) {
+          forgetTrackCurves(track.id);
+          continue;
+        }
 
         const volumeKey = `${track.id}|${VOLUME_LANE_KEY}`;
         const points = track.volumeAutomation ?? [];
@@ -451,12 +543,16 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
             // A controller is 7-bit and a plugin parameter is not, so only the
             // former is snapped. The grid still finds the crossings; snapping
             // only decides which of them are worth sending.
-            lane.target.kind === 'cc' ? toControllerStep : null
+            lane.target.kind === 'cc' ? toControllerStep : null,
+            // And only a controller is walked: a step is what the walking moves
+            // in, and a plugin parameter has no step of its own. Off only where
+            // the user has said so on the lane.
+            lane.target.kind === 'cc' && isLaneSmooth(lane) ? rampPoints : null
           );
         }
       }
     },
-    [advanceCurve]
+    [advanceCurve, forgetTrackCurves]
   );
 
   const clearTimer = useCallback(() => {
@@ -464,6 +560,39 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
+  }, []);
+
+  /**
+   * Arm the idle reset that puts every hosted instrument back as it loaded.
+   *
+   * Not on the Stop itself, deliberately. Stop sends note-offs and lets the
+   * instrument ring through them — a sampled library's release is long and that
+   * is what it should sound like — and a reset cuts every voice at once. Waiting
+   * lets the tail finish and does the expensive part while nothing is playing,
+   * which is the whole reason it hangs off Stop rather than Play.
+   *
+   * Re-arming replaces a pending one, so stopping twice does not reset twice.
+   */
+  const armIdleReset = useCallback(() => {
+    if (resetTimerRef.current !== null) {
+      window.clearTimeout(resetTimerRef.current);
+      resetTimerRef.current = null;
+    }
+    // Read at the moment it is armed rather than held: the setting can be
+    // changed mid-session, and the next Stop should honour it.
+    if (!loadAudioPrefs().resetOnStop) return;
+
+    resetTimerRef.current = window.setTimeout(() => {
+      resetTimerRef.current = null;
+      void resetVst3Plugins();
+    }, IDLE_RESET_MS);
+  }, []);
+
+  /** Called by Play, and by anything else that means "not idle after all". */
+  const cancelIdleReset = useCallback(() => {
+    if (resetTimerRef.current === null) return;
+    window.clearTimeout(resetTimerRef.current);
+    resetTimerRef.current = null;
   }, []);
 
   /**
@@ -544,6 +673,27 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
 
     // Each instrument's nudge off the beat, read here for the same reason.
     const offsets = trackOffsets(cfg.tracks);
+
+    // And how each spreads a chord, for the instruments whose plugin needs the
+    // room. Memoised, so a pass over an unchanged project costs a comparison.
+    const shaped = shapeRef.current(timings, cfg.tracks);
+
+    // Where the transport is, for every plugin's process context. Stated on each
+    // pass rather than only at Play, so a tempo or meter change mid-playback
+    // reaches the plugins; an unchanged transport sends nothing, which is what
+    // makes that affordable twenty times a second. The signature is the bar's
+    // own, because a project's says nothing about a bar that overrides it.
+    const playheadBeat = songTimeToBeat(elapsed, cfg.bpm);
+    const playheadBar = cfg.bars[getBarIndexAtBeat(cfg.bars, cfg.timeSignature, playheadBeat)];
+    const meter = playheadBar
+      ? getBarTimeSignature(playheadBar, cfg.timeSignature)
+      : cfg.timeSignature;
+    setVst3Transport({
+      playing: true,
+      tempo: cfg.bpm,
+      numerator: meter.beatsPerMeasure,
+      denominator: meter.beatUnit,
+    });
   
     for (const slice of slices) {
       const due = notesInWindow({
@@ -555,6 +705,10 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
       for (const note of due) {
         if (!audible.has(note.trackId)) continue;
 
+        // Both halves of the instrument's shaping, which are nothing at all on
+        // an instrument that asked for none.
+        const shape = shaped.get(note) ?? NO_SHAPING;
+
         pool.get(note.trackId)?.schedule({
           midiNote: note.midiNote,
           velocity: note.velocity,
@@ -563,15 +717,19 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
           // stay on the beat. Read per pass rather than baked into `timings`, like
           // mute and solo above, so dragging the control mid-run is heard on the
           // next tick. Room to be early was bought at Play by the pre-roll.
-          when: toClockTime(note.startTime, slice.songStartClockTime) + (offsets.get(note.trackId) ?? 0),
-          duration: note.duration,
+          when:
+            toClockTime(note.startTime, slice.songStartClockTime) +
+            (offsets.get(note.trackId) ?? 0) +
+            shape.delay,
+          duration: note.duration - shape.shorten,
         });
       }
 
       // Levels after notes, on the same slice: a fade is scheduled onto the gain
       // node rather than baked into the notes, so it is heard *through* a held
-      // chord instead of only at the next note boundary.
-      scheduleAutomation(cfg, pool, elapsed, slice);
+      // chord instead of only at the next note boundary. The same audible set as
+      // the notes above, so a muted track is silent in both.
+      scheduleAutomation(cfg, pool, elapsed, slice, audible);
     }
 
     scheduledUpToClockRef.current = Math.max(scheduledUpToClockRef.current, horizonClock);
@@ -610,11 +768,13 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
       // again repeats what was just heard.
       setCurrentTime(loopFrom);
       resumeFromRef.current = 0;
+      // Reaching the end is a stop, and this path does not go through `stop`.
+      armIdleReset();
       return;
     }
 
     setCurrentTime(Math.max(0, Math.min(elapsed, endSong)));
-  }, [clearTimer, buildClicks, scheduleAutomation, resetAutomation]);
+  }, [clearTimer, buildClicks, scheduleAutomation, resetAutomation, armIdleReset]);
 
   /**
    * Bring the audio graph up: context, instrument pool, samples loaded.
@@ -683,6 +843,10 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
   const play = useCallback(async () => {
     if (startingRef.current) return;
     startingRef.current = true;
+    // Whatever was about to be reset is about to be played instead. A quick
+    // restart therefore keeps the instrument as it is, which is the trade the
+    // delay buys: Play is never held up by a reset.
+    cancelIdleReset();
 
     try {
       const pool = await ensureAudio();
@@ -737,7 +901,7 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
     } finally {
       startingRef.current = false;
     }
-  }, [clearTimer, tick, buildClicks, ensureAudio]);
+  }, [clearTimer, tick, buildClicks, ensureAudio, cancelIdleReset]);
 
   const pause = useCallback(() => {
     clearTimer();
@@ -753,7 +917,11 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
 
     setIsPaused(true);
     setIsPlaying(false);
-  }, [clearTimer, resetAutomation]);
+
+    // Paused is idle too, and a reset takes nothing away that Play would want
+    // back: it resumes from a song position, not from a sounding note.
+    armIdleReset();
+  }, [clearTimer, resetAutomation, armIdleReset]);
 
   const stop = useCallback(() => {
     clearTimer();
@@ -767,7 +935,9 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
     setIsPlaying(false);
     setIsPaused(false);
     setCurrentTime(0);
-  }, [clearTimer, resetAutomation]);
+
+    armIdleReset();
+  }, [clearTimer, resetAutomation, armIdleReset]);
 
   /**
    * The live song position in seconds, read straight off the audio clock.
@@ -797,12 +967,13 @@ export function usePlayback(config: PlaybackConfig, metronomeEnabled = false) {
   useEffect(() => {
     return () => {
       clearTimer();
+      cancelIdleReset();
       poolRef.current?.dispose();
       poolRef.current = null;
       ctxRef.current?.close();
       ctxRef.current = null;
     };
-  }, [clearTimer]);
+  }, [clearTimer, cancelIdleReset]);
 
   return {
     isPlaying,

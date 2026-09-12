@@ -34,6 +34,7 @@ import {
   withLane,
   withLaneName,
   withLanePoints,
+  withLaneSmooth,
   withoutLane,
 } from '@/engine/parameterAutomation';
 import { selectionStore } from '@/store/selectionStore';
@@ -120,7 +121,11 @@ import {
   trackColorAt,
 } from '@/utils/constants';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
-import { MAX_TIME_OFFSET_MS } from '@/engine/scheduler';
+import {
+  MAX_RELEASE_GAP_MS,
+  MAX_TIME_OFFSET_MS,
+  MAX_VOICE_STAGGER_MS,
+} from '@/engine/scheduler';
 import type { TemplateInstrument } from '@/engine/instrumentTemplate';
 
 /** Gate set by App.tsx to silence middleware pushState during recording takes. */
@@ -226,6 +231,14 @@ interface ProjectState {
   addLane: (phraseId: string, target: AutomationTarget, name: string) => void;
   removeLane: (phraseId: string, key: string) => void;
   renameLane: (phraseId: string, key: string, name: string) => void;
+  /**
+   * Whether a jump in one lane's curve is walked through step by step.
+   *
+   * On for every lane that has never been switched off it, so this is only ever
+   * called to turn the walking *off* — for a target where a value is read rather
+   * than acted on and the extra points buy nothing. See `@/engine/controllerRamp`.
+   */
+  setLaneSmooth: (phraseId: string, key: string, smooth: boolean) => void;
   addLanePoint: (phraseId: string, key: string, beat: number, value: number) => void;
   moveLanePoint: (
     phraseId: string,
@@ -257,6 +270,15 @@ interface ProjectState {
    * slider, where running into the end is the gesture and not a bad argument.
    */
   setTrackTimeOffset: (trackId: string, timeOffsetMs: number) => void;
+  /**
+   * Spread an instrument's simultaneous notes, in milliseconds per voice.
+   *
+   * Clamped to 0..`MAX_VOICE_STAGGER_MS` on the same terms as the nudge above:
+   * this is a slider, and its ends are a gesture rather than a bad argument.
+   */
+  setTrackVoiceStagger: (trackId: string, voiceStaggerMs: number) => void;
+  /** Stop an instrument's notes this long before its next attack, in milliseconds. */
+  setTrackReleaseGap: (trackId: string, releaseGapMs: number) => void;
   toggleTrackMute: (trackId: string) => void;
   toggleTrackSolo: (trackId: string) => void;
   toggleTrackVisible: (trackId: string) => void;
@@ -1880,6 +1902,18 @@ export const projectStore = create<ProjectState>((set, get) => ({
     updateTrack(get, set, trackId, () => ({ timeOffsetMs: clamped }));
   },
 
+  setTrackVoiceStagger: (trackId: string, voiceStaggerMs: number) => {
+    if (!Number.isFinite(voiceStaggerMs)) return;
+    const clamped = Math.max(0, Math.min(MAX_VOICE_STAGGER_MS, Math.round(voiceStaggerMs)));
+    updateTrack(get, set, trackId, () => ({ voiceStaggerMs: clamped }));
+  },
+
+  setTrackReleaseGap: (trackId: string, releaseGapMs: number) => {
+    if (!Number.isFinite(releaseGapMs)) return;
+    const clamped = Math.max(0, Math.min(MAX_RELEASE_GAP_MS, Math.round(releaseGapMs)));
+    updateTrack(get, set, trackId, () => ({ releaseGapMs: clamped }));
+  },
+
   addVolumePoint: (phraseId: string, beat: number, value: number) => {
     updateVolumeAutomation(get, set, phraseId, points =>
       withPoint(points, { beat, value })
@@ -1912,6 +1946,12 @@ export const projectStore = create<ProjectState>((set, get) => ({
 
   renameLane: (phraseId: string, key: string, name: string) => {
     updateParameterAutomation(get, set, phraseId, lanes => withLaneName(lanes, key, name));
+  },
+
+  setLaneSmooth: (phraseId: string, key: string, smooth: boolean) => {
+    updateParameterAutomation(get, set, phraseId, lanes =>
+      withLaneSmooth(lanes, key, smooth)
+    );
   },
 
   addLanePoint: (phraseId: string, key: string, beat: number, value: number) => {

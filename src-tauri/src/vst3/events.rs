@@ -101,6 +101,15 @@ impl Scheduler {
         self.pending.len()
     }
 
+    /// How many pitches this plugin is currently holding down.
+    ///
+    /// A count that climbs and never comes back down is a note-off that was
+    /// never sent, which is the one scheduling fault a plugin turns into rising
+    /// CPU rather than a wrong note.
+    pub fn sounding_len(&self) -> usize {
+        self.sounding.len()
+    }
+
     /// Schedule a note as its on/off pair.
     ///
     /// Returns false when the buffer is full — both events are refused together,
@@ -266,6 +275,21 @@ impl Scheduler {
         }
         // Cleared above; restore the capacity `take` moved out.
         self.sounding.reserve(128);
+    }
+
+    /// Forget everything, including what is sounding.
+    ///
+    /// The difference from `stop_all` is the whole point: that one *releases*
+    /// what is sounding, by queueing a note-off for each held pitch. This one
+    /// drops the record instead, and is for the case where the plugin has
+    /// already forgotten — a reset, which takes its voices with it. Queueing
+    /// offs there would send a release for a note that is not held, which at
+    /// best does nothing and at worst re-triggers a patch that treats an
+    /// unmatched off as a gesture.
+    pub fn forget(&mut self) {
+        self.pending.clear();
+        self.immediate.clear();
+        self.sounding.clear();
     }
 
     /// Hand every event due before `block_end` to `emit`, as an offset into the

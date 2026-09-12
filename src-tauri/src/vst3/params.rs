@@ -78,22 +78,44 @@ impl ParamScheduler {
     /// A change landing *before* one already queued for the same parameter is
     /// pulled forward onto that frame rather than inserted ahead of it. The
     /// host emits a curve in increasing time, so an inversion here can only mean
-    /// the two were converted against different clock anchors — and playing them
+    /// the two were converted against different clock readings — and playing them
     /// in the order they arrived would walk the parameter backwards a step
     /// before going on. On a level that is a click; on a controller a plugin
     /// retriggers from, such as a harp's glissando, it is an audible pop. Losing
     /// a few frames of placement is much the cheaper error.
+    ///
+    /// One point per frame per parameter, though, and this is the part that
+    /// matters: a change pulled onto a frame *replaces* whatever was already
+    /// there rather than joining it. Piling them up would turn one bad clock
+    /// reading into dozens of controller steps applied at a single sample, which
+    /// is a louder click than the backwards step being avoided, and would hand
+    /// the plugin a queue long enough to make the block carrying it late. The
+    /// value kept is the last one pushed, which is the one the curve has actually
+    /// reached.
     pub fn schedule(&mut self, id: ParamID, value: ParamValue, frame: i64) -> bool {
+        let frame = self.hold_monotonic(id, frame);
+
+        // The frame this parameter already has a point on is the only one a
+        // clamped change can land on, so this search finds it or there is none.
+        // From the back, because a clamp always targets the latest.
+        if let Some(existing) = self
+            .pending
+            .iter_mut()
+            .rev()
+            .find(|p| p.id == id && p.frame == frame)
+        {
+            existing.value = value;
+            return true;
+        }
+
         if self.pending.len() == self.pending.capacity() {
             self.dropped += 1;
             return false;
         }
 
-        let frame = self.hold_monotonic(id, frame);
-
-        // Sorted insert, keeping equal frames in push order: two changes to one
-        // parameter on the same frame must resolve to the later one, and a queue
-        // reports the last point it was given.
+        // Sorted insert, keeping equal frames in push order: changes to two
+        // different parameters may share a frame, and a queue reports the last
+        // point it was given.
         let at = self.pending.partition_point(|p| p.frame <= frame);
         self.pending.insert(at, ParamPoint { frame, id, value });
         true
@@ -217,8 +239,45 @@ mod tests {
         s.schedule(1, 0.5, 400);
         s.schedule(1, 0.6, 320);
 
-        assert_eq!(due(&mut s, 0, 512), vec![(400, 1, 0.5), (400, 1, 0.6)]);
+        // Pulled onto 400 and *replacing* what was there: one point per frame.
+        assert_eq!(due(&mut s, 0, 512), vec![(400, 1, 0.6)]);
         assert_eq!(s.reordered(), 1);
+    }
+
+    // The fault this exists to stop. A clock reading that moved backwards sends a
+    // whole pass's worth of points onto one frame, and piling them up hands the
+    // plugin dozens of controller steps at a single sample — a louder click than
+    // the backwards step being avoided, in a block long enough to make the stream
+    // late. One point per frame, whatever arrives.
+    #[test]
+    fn a_whole_batch_arriving_late_collapses_to_one_point_not_a_pile() {
+        let mut s = ParamScheduler::new(256, 4);
+        s.schedule(1, 0.1, 10_000);
+
+        // Forty points that all map behind it, as one bad reading produces.
+        for i in 0..40 {
+            s.schedule(1, 0.2 + i as f64 / 1_000.0, 9_000 + i);
+        }
+
+        assert_eq!(s.pending_len(), 1);
+        let emitted = due(&mut s, 9_800, 10_300);
+        assert_eq!(emitted.len(), 1);
+        // The curve's latest value, not its first: the parameter ends up where it
+        // should, it simply gets there in one step instead of forty.
+        assert_eq!(emitted[0].0, 200);
+        assert!((emitted[0].2 - 0.239).abs() < 1e-9, "got {}", emitted[0].2);
+        assert_eq!(s.reordered(), 40);
+    }
+
+    // Coalescing is per parameter: two curves may legitimately share a frame.
+    #[test]
+    fn two_parameters_may_share_a_frame_without_replacing_each_other() {
+        let mut s = ParamScheduler::new(16, 4);
+        s.schedule(1, 0.5, 400);
+        s.schedule(2, 0.6, 400);
+
+        assert_eq!(due(&mut s, 0, 512), vec![(400, 1, 0.5), (400, 2, 0.6)]);
+        assert_eq!(s.reordered(), 0);
     }
 
     // The clamp is per parameter: one curve running ahead of another must not
@@ -305,15 +364,16 @@ mod tests {
         assert_eq!(due(&mut s, 0, 512), vec![(100, 2, 0.2), (300, 1, 0.1)]);
     }
 
-    // Same frame, same parameter: the later push must come out last, so that a
-    // queue's final point is the one that wins.
+    // Same frame, same parameter: the later push wins outright. Two values at one
+    // sample can only resolve to one of them, and sending both is a step the
+    // plugin has to smooth rather than a ramp it can follow.
     #[test]
-    fn changes_on_one_frame_keep_the_order_they_were_pushed_in() {
+    fn a_second_change_on_one_frame_replaces_the_first() {
         let mut s = ParamScheduler::new(16, 4);
         s.schedule(1, 0.1, 256);
         s.schedule(1, 0.2, 256);
 
-        assert_eq!(due(&mut s, 0, 512), vec![(256, 1, 0.1), (256, 1, 0.2)]);
+        assert_eq!(due(&mut s, 0, 512), vec![(256, 1, 0.2)]);
     }
 
     // Half-open, for the same reason the note scheduler's window is: consecutive
@@ -349,11 +409,24 @@ mod tests {
     fn a_full_scheduler_refuses_rather_than_growing() {
         let mut s = ParamScheduler::new(2, 4);
         assert!(s.schedule(1, 0.1, 0));
-        assert!(s.schedule(1, 0.2, 1));
-        assert!(!s.schedule(1, 0.3, 2));
+        assert!(s.schedule(2, 0.2, 1));
+        assert!(!s.schedule(3, 0.3, 2));
 
         assert_eq!(s.pending_len(), 2);
         assert_eq!(s.dropped(), 1);
+    }
+
+    // A full buffer must still accept a change that needs no room — replacing a
+    // point already queued is the one case that cannot overflow anything.
+    #[test]
+    fn a_full_scheduler_still_takes_a_change_that_replaces_a_point() {
+        let mut s = ParamScheduler::new(2, 4);
+        s.schedule(1, 0.1, 100);
+        s.schedule(2, 0.2, 200);
+
+        assert!(s.schedule(1, 0.9, 100));
+        assert_eq!(s.dropped(), 0);
+        assert_eq!(due(&mut s, 0, 512), vec![(100, 1, 0.9), (200, 2, 0.2)]);
     }
 
     // A stop abandons the curve and queues nothing in return — the parameter

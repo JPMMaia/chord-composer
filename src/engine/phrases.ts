@@ -726,7 +726,17 @@ export function compileAutomation(
         }));
         const existing = lanes.get(key);
         if (existing) existing.points.push(...shifted);
-        else lanes.set(key, { target: lane.target, name: lane.name, points: shifted });
+        else
+          lanes.set(key, {
+            target: lane.target,
+            name: lane.name,
+            points: shifted,
+            // The first placement's setting stands for the whole track lane, as
+            // its name does: the lane the scheduler drives is one lane, and two
+            // placements disagreeing about how its jumps are sent cannot both be
+            // honoured. Switched off in the phrase, off everywhere it is placed.
+            smooth: lane.smooth,
+          });
       }
     }
 

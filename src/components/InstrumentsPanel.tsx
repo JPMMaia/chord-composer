@@ -7,7 +7,11 @@ import { gmInstrumentsByFamily } from '@/engine/instrumentCatalog';
 import { vst3Option } from '@/engine/vst3Catalog';
 import { sfzNameFor, sfzOption } from '@/engine/sfzCatalog';
 import { isSfzRef, isVst3Ref, parseInstrumentRef } from '@/engine/instrumentRef';
-import { MAX_TIME_OFFSET_MS } from '@/engine/scheduler';
+import {
+  MAX_RELEASE_GAP_MS,
+  MAX_TIME_OFFSET_MS,
+  MAX_VOICE_STAGGER_MS,
+} from '@/engine/scheduler';
 import { vst3Latency } from '@/engine/vst3Editor';
 import { openVst3Editor } from '@/engine/vst3Editor';
 import { isTauri } from '@/engine/platform';
@@ -495,6 +499,8 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
   const setTrackInstrument = projectStore(s => s.setTrackInstrument);
   const setTrackVolume = projectStore(s => s.setTrackVolume);
   const setTrackTimeOffset = projectStore(s => s.setTrackTimeOffset);
+  const setTrackVoiceStagger = projectStore(s => s.setTrackVoiceStagger);
+  const setTrackReleaseGap = projectStore(s => s.setTrackReleaseGap);
   const toggleTrackMute = projectStore(s => s.toggleTrackMute);
   const toggleTrackVisible = projectStore(s => s.toggleTrackVisible);
 
@@ -567,6 +573,8 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
   }, [isPlugin, track.id, track.instrument]);
 
   const offsetMs = track.timeOffsetMs ?? 0;
+  const staggerMs = track.voiceStaggerMs ?? 0;
+  const gapMs = track.releaseGapMs ?? 0;
 
   const vst3Options = vst3.plugins.map(vst3Option);
   const sfzOptions = sfz.instruments.map(sfzOption);
@@ -941,6 +949,73 @@ Plugin reports ${Math.round(reportedLatency)} ms of latency` +
           {offsetMs === 0 ? '0' : `${offsetMs > 0 ? '+' : ''}${offsetMs}`}
         </span>
       </div>
+
+      {/* Room for the plugin to keep up, and only for a plugin: a sampled
+          instrument does most of its work at an attack, so a chord landing on one
+          sample can cost a single audio block more time than it has — which is
+          heard as a click, not as a loud note. Both of these move the sound by a
+          few milliseconds and neither touches what is written. Offered only on a
+          VST3 track because it is that plugin's cost they exist to spread; the
+          built-in instruments have no such block to miss. */}
+      {isPlugin && (
+        <>
+          <div className="mt-1 flex items-center gap-1.5">
+            <span className="text-[10px] text-gray-500 w-6 shrink-0">Roll</span>
+            <input
+              type="range"
+              min={0}
+              max={MAX_VOICE_STAGGER_MS}
+              step={1}
+              value={staggerMs}
+              aria-label={`Voice stagger ${track.name}`}
+              title={
+                'Spreads the notes of a chord by this many milliseconds each, so the ' +
+                'plugin does not pay for every attack in one audio block. Inaudible ' +
+                'as a roll below about 15 ms. Double-click to reset.'
+              }
+              onPointerDown={e => e.stopPropagation()}
+              onDoubleClick={() => setTrackVoiceStagger(track.id, 0)}
+              onChange={e => setTrackVoiceStagger(track.id, Number(e.target.value))}
+              className="flex-1 h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed"
+            />
+            <span
+              className={`text-[10px] w-7 text-right shrink-0 tabular-nums ${
+                staggerMs === 0 ? 'text-gray-500' : 'text-indigo-400'
+              }`}
+            >
+              {staggerMs}
+            </span>
+          </div>
+
+          <div className="mt-1 flex items-center gap-1.5">
+            <span className="text-[10px] text-gray-500 w-6 shrink-0">Gap</span>
+            <input
+              type="range"
+              min={0}
+              max={MAX_RELEASE_GAP_MS}
+              step={5}
+              value={gapMs}
+              aria-label={`Release gap ${track.name}`}
+              title={
+                'Stops this instrument this many milliseconds before its next attack, ' +
+                'so a release and an attack are not paid for in the same audio block. ' +
+                'Double-click to reset.'
+              }
+              onPointerDown={e => e.stopPropagation()}
+              onDoubleClick={() => setTrackReleaseGap(track.id, 0)}
+              onChange={e => setTrackReleaseGap(track.id, Number(e.target.value))}
+              className="flex-1 h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed"
+            />
+            <span
+              className={`text-[10px] w-7 text-right shrink-0 tabular-nums ${
+                gapMs === 0 ? 'text-gray-500' : 'text-indigo-400'
+              }`}
+            >
+              {gapMs}
+            </span>
+          </div>
+        </>
+      )}
     </div>
   );
 };

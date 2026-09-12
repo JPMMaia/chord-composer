@@ -103,12 +103,28 @@ export function normalizeParameterAutomation(
           : { kind: 'cc', controller: lane.target.controller },
       name: typeof lane.name === 'string' ? lane.name : '',
       points: normalizePoints(lane.points ?? []),
+      // Written only when the walking is off, which is what keeps a lane nobody
+      // has touched serialising exactly as it did before the option existed.
+      // Anything other than `false` — absent, a string off a hand-edited file — is
+      // read as on, the same way every other optional key here treats nonsense.
+      ...(lane.smooth === false ? { smooth: false } : {}),
     });
   }
 
   return [...byKey.values()]
     .filter(lane => !dropEmpty || lane.points.length > 0)
     .sort((a, b) => laneKey(a.target).localeCompare(laneKey(b.target)));
+}
+
+/**
+ * Whether a lane's jumps are walked through step by step.
+ *
+ * Absent means they are: the walking is what a controller lane in a MIDI timeline
+ * would have delivered, and a project written before the option existed gets it
+ * rather than keeping a fault nobody chose. See `@/engine/controllerRamp`.
+ */
+export function isLaneSmooth(lane: ParameterAutomation): boolean {
+  return lane.smooth !== false;
 }
 
 /** The lane with that key, or null when nothing has one. */
@@ -178,6 +194,26 @@ export function withLaneName(
 }
 
 /**
+ * `lanes` with one lane's jumps walked through, or not.
+ *
+ * Separate from `withLaneName` rather than a general field setter, for the reason
+ * every edit here is its own function: a lane arrives from a file as well as from
+ * the UI, and a setter taking a partial lane would be a way for either to write a
+ * key the normalizer has never heard of.
+ */
+export function withLaneSmooth(
+  lanes: ParameterAutomation[],
+  key: string,
+  smooth: boolean
+): ParameterAutomation[] {
+  if (!laneFor(lanes, key)) return lanes;
+
+  return lanes.map(lane =>
+    laneKey(lane.target) === key ? { ...lane, smooth } : lane
+  );
+}
+
+/**
  * Whether two lane lists say the same thing, down to every breakpoint.
  *
  * The lane-level counterpart to `samePoints`, and used for the same two things: a
@@ -192,6 +228,7 @@ export function sameLanes(a: ParameterAutomation[], b: ParameterAutomation[]): b
       return (
         laneKey(lane.target) === laneKey(other.target) &&
         lane.name === other.name &&
+        isLaneSmooth(lane) === isLaneSmooth(other) &&
         samePoints(lane.points, other.points)
       );
     })

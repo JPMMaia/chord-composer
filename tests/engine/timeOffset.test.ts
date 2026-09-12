@@ -141,7 +141,7 @@ function fileWithOffset(value: unknown): string {
 
 describe('a nudge in the project file', () => {
   it('states the current schema version', () => {
-    expect(SCHEMA_VERSION).toBe('1.21');
+    expect(SCHEMA_VERSION).toBe('1.22');
   });
 
   it('round-trips a nudge in either direction', () => {

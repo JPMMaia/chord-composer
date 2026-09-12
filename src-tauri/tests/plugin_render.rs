@@ -9,7 +9,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use chord_composer_lib::vst3::{module::Module, plugin::Plugin};
+use chord_composer_lib::vst3::{
+    module::Module,
+    plugin::{Plugin, Transport},
+};
 
 /// The fixture's automatable parameter. Kept in step with `test-synth`'s
 /// `GAIN_PARAM` by hand: the fixture is loaded as a library at runtime, not
@@ -29,6 +32,16 @@ const UNMAPPED_CC: u16 = 74;
 
 const SAMPLE_RATE: f64 = 48_000.0;
 const BLOCK: usize = 512;
+
+/// The transport every render here runs against: rolling, because these tests
+/// are playing something. A plugin is entitled to a process context and the
+/// fixture synth is handed the same one the engine hands a real plugin.
+const TRANSPORT: Transport = Transport {
+    playing: true,
+    tempo: 120.0,
+    time_sig: (4, 4),
+    system_time: 0,
+};
 
 /// `target/<profile>/`, worked out from the test binary's own location
 /// (`target/<profile>/deps/<test>.exe`).
@@ -95,7 +108,7 @@ fn render(plugin: &mut Plugin, from: i64, blocks: usize) -> Vec<f32> {
     (0..blocks)
         .map(|i| {
             out.fill(0.0);
-            plugin.process_into(&mut out, BLOCK, from + (i * BLOCK) as i64);
+            plugin.process_into(&mut out, BLOCK, from + (i * BLOCK) as i64, TRANSPORT);
             peak(&out)
         })
         .collect()
@@ -248,9 +261,9 @@ fn a_parameter_change_takes_effect_at_the_sample_it_was_placed_on() {
     plugin.param_scheduler.schedule(GAIN_PARAM, 0.0, at);
 
     let mut out = vec![0.0f32; BLOCK * 2];
-    plugin.process_into(&mut out, BLOCK, 0);
+    plugin.process_into(&mut out, BLOCK, 0, TRANSPORT);
     out.fill(0.0);
-    plugin.process_into(&mut out, BLOCK, BLOCK as i64);
+    plugin.process_into(&mut out, BLOCK, BLOCK as i64, TRANSPORT);
 
     // Interleaved stereo, so frame N is samples 2N and 2N+1.
     let before = peak(&out[..BLOCK]);
@@ -281,7 +294,7 @@ fn two_parameter_changes_in_one_block_both_land() {
     plugin.param_scheduler.schedule(GAIN_PARAM, 1.0, (BLOCK * 3 / 4) as i64);
 
     let mut out = vec![0.0f32; BLOCK * 2];
-    plugin.process_into(&mut out, BLOCK, 0);
+    plugin.process_into(&mut out, BLOCK, 0, TRANSPORT);
 
     let middle = peak(&out[BLOCK / 2..BLOCK * 3 / 2]);
     let end = peak(&out[BLOCK * 3 / 2..]);
@@ -313,7 +326,7 @@ fn rendering_adds_into_the_buffer_rather_than_replacing_it() {
     plugin.scheduler.schedule_note(60, 100, 0, 48_000);
 
     let mut out = vec![0.5f32; BLOCK * 2];
-    plugin.process_into(&mut out, BLOCK, 0);
+    plugin.process_into(&mut out, BLOCK, 0, TRANSPORT);
 
     // The synth starts at phase zero, so its first sample is zero; the 0.5
     // already in the buffer has to still be there.
@@ -378,9 +391,9 @@ fn a_change_sent_as_a_controller_takes_effect_at_its_own_sample() {
     plugin.param_scheduler.schedule(id, 0.0, at);
 
     let mut out = vec![0.0f32; BLOCK * 2];
-    plugin.process_into(&mut out, BLOCK, 0);
+    plugin.process_into(&mut out, BLOCK, 0, TRANSPORT);
     out.fill(0.0);
-    plugin.process_into(&mut out, BLOCK, BLOCK as i64);
+    plugin.process_into(&mut out, BLOCK, BLOCK as i64, TRANSPORT);
 
     assert!(peak(&out[..BLOCK]) > 0.0, "should still sound before the change");
     assert_eq!(peak(&out[BLOCK..]), 0.0, "should be silent from the change onward");

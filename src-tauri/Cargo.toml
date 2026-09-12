@@ -48,6 +48,9 @@ features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader",
+    # `AvSetMmThreadCharacteristicsW`, so the thread that renders the sound is
+    # scheduled as audio rather than as ordinary work. See `vst3/render.rs`.
+    "Win32_System_Threading",
 ]
 
 # A plugin that panics mid-render must not take the audio thread's stack with it.

@@ -18,6 +18,16 @@ import {
   readAudioHealth,
   type AudioHealth,
 } from '@/engine/audioPrefs';
+import {
+  MIN_VELOCITY_MAX,
+  TOUCH_MAX,
+  TOUCH_MIN,
+  applyMidiPrefs,
+  getMidiPrefs,
+  shapeVelocity,
+  subscribeLastVelocity,
+  type MidiPrefs,
+} from '@/engine/midiPrefs';
 import { isTauri } from '@/engine/platform';
 
 const BUTTON_CLASS =
@@ -35,7 +45,7 @@ const DEVICE_DEFAULT = 'device';
 /** How often the diagnostics tab re-reads the counters, in milliseconds. */
 const HEALTH_INTERVAL_MS = 1000;
 
-const TABS = ['Audio', 'Performance', 'Diagnostics'] as const;
+const TABS = ['Audio', 'Performance', 'MIDI', 'Diagnostics'] as const;
 type Tab = (typeof TABS)[number];
 
 /**
@@ -93,6 +103,7 @@ export const SettingsDialog: React.FC<{ onClose: () => void }> = ({ onClose }) =
         <div role="tabpanel" aria-label={tab} className="space-y-3">
           {tab === 'Audio' && <AudioTab />}
           {tab === 'Performance' && <PerformanceTab />}
+          {tab === 'MIDI' && <MidiTab />}
           {tab === 'Diagnostics' && <DiagnosticsTab />}
         </div>
       </div>
@@ -364,6 +375,119 @@ const PerformanceTab: React.FC = () => {
         </p>
       </div>
     </>
+  );
+};
+
+/**
+ * How the keyboard's touch is read.
+ *
+ * The readout is the point of the tab: a curve is chosen by feel, so pressing a
+ * key and seeing what it arrived at and what it became is what makes the slider
+ * something other than a guess.
+ */
+const MidiTab: React.FC = () => {
+  const [prefs, setPrefs] = useState<MidiPrefs>(() => getMidiPrefs());
+  const [lastIn, setLastIn] = useState<number | null>(null);
+
+  useEffect(() => subscribeLastVelocity(setLastIn), []);
+
+  const change = (next: Partial<MidiPrefs>) => setPrefs(applyMidiPrefs(next));
+
+  return (
+    <>
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <label htmlFor="midi-touch" className="block text-xs text-gray-400">
+            Touch sensitivity
+          </label>
+          <button
+            type="button"
+            className={BUTTON_CLASS}
+            disabled={prefs.touch === 0}
+            onClick={() => change({ touch: 0 })}
+          >
+            Reset
+          </button>
+        </div>
+        <div className="flex items-center gap-2 text-xs text-gray-400">
+          <span>Hard</span>
+          <input
+            id="midi-touch"
+            type="range"
+            min={TOUCH_MIN}
+            max={TOUCH_MAX}
+            step={5}
+            value={prefs.touch}
+            onChange={event => change({ touch: Number(event.target.value) })}
+            className="flex-1 accent-indigo-500"
+          />
+          <span>Light</span>
+        </div>
+      </div>
+
+      <div>
+        <label htmlFor="midi-min-velocity" className="block text-xs text-gray-400 mb-1">
+          Minimum velocity
+        </label>
+        <input
+          id="midi-min-velocity"
+          type="number"
+          min={0}
+          max={MIN_VELOCITY_MAX}
+          value={prefs.minVelocity}
+          onChange={event => change({ minVelocity: Number(event.target.value) })}
+          className={FIELD_CLASS}
+        />
+      </div>
+
+      <div className="flex items-center gap-3">
+        <VelocityCurve prefs={prefs} lastIn={lastIn} />
+        <p className="text-xs text-gray-300 tabular-nums" role="status" aria-label="Last key">
+          {lastIn === null
+            ? 'Press a key to see its velocity.'
+            : `Last key: in ${lastIn} → out ${shapeVelocity(lastIn, prefs)}`}
+        </p>
+      </div>
+
+      <p className="text-xs text-gray-500">
+        A lighter touch makes soft presses sound louder, so a keyboard that needs a heavy
+        hand reaches the loud end sooner. A full-force press is still 127. It shapes what
+        you hear and what gets recorded alike.
+      </p>
+    </>
+  );
+};
+
+/** Size of the curve drawing, in pixels. */
+const CURVE_SIZE = 96;
+
+/** The curve against the straight line it bends, with the last key marked on it. */
+const VelocityCurve: React.FC<{ prefs: MidiPrefs; lastIn: number | null }> = ({ prefs, lastIn }) => {
+  const at = (velocity: number) => CURVE_SIZE - (velocity / 127) * CURVE_SIZE;
+  const points = Array.from({ length: 33 }, (_, i) => {
+    const velocity = (i / 32) * 127;
+    return `${(velocity / 127) * CURVE_SIZE},${at(shapeVelocity(velocity, prefs))}`;
+  }).join(' ');
+
+  return (
+    <svg
+      width={CURVE_SIZE}
+      height={CURVE_SIZE}
+      viewBox={`0 0 ${CURVE_SIZE} ${CURVE_SIZE}`}
+      className="shrink-0 bg-gray-900 border border-gray-700 rounded"
+      aria-hidden="true"
+    >
+      <line x1={0} y1={CURVE_SIZE} x2={CURVE_SIZE} y2={0} className="stroke-gray-600" strokeDasharray="3 3" />
+      <polyline points={points} fill="none" className="stroke-indigo-400" strokeWidth={2} />
+      {lastIn !== null && (
+        <circle
+          cx={(lastIn / 127) * CURVE_SIZE}
+          cy={at(shapeVelocity(lastIn, prefs))}
+          r={3}
+          className="fill-amber-400"
+        />
+      )}
+    </svg>
   );
 };
 

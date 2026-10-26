@@ -4,6 +4,7 @@ import { selectionStore } from '@/store/selectionStore';
 import { editorStore } from '@/store/editorStore';
 import { sustainPitch } from '@/engine/audition';
 import { openMidiInputs } from '@/engine/midiInput';
+import { getMidiPrefs, reportVelocity, shapeVelocity } from '@/engine/midiPrefs';
 import type { MidiInputStatus, MidiNoteEvent } from '@/engine/midiInput';
 import { recordBeat, recordFloor } from '@/engine/recording';
 import type { InstrumentPool } from '@/engine/instrumentPool';
@@ -163,7 +164,10 @@ export function useMidiInput({
         });
       }
 
-      const release = sustainPitch(pool?.get(trackId), event.note, event.velocity);
+      // Shaped once, here, so what is heard and what is written are the same note.
+      reportVelocity(event.velocity);
+      const velocity = shapeVelocity(event.velocity, getMidiPrefs());
+      const release = sustainPitch(pool?.get(trackId), event.note, velocity);
 
       let take: OpenNote | null = null;
       const { recordArmed } = editorStore.getState();
@@ -174,7 +178,7 @@ export function useMidiInput({
             id: generateId(),
             kind: 'note',
             pitch: event.note,
-            velocity: event.velocity,
+            velocity,
             lane,
             // Grown by the note-off. Committed at the floor meanwhile, so the block
             // is visible during the very gesture that is filling it rather than

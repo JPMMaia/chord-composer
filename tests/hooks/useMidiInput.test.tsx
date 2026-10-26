@@ -7,6 +7,12 @@ import { editorStore } from '@/store/editorStore';
 import { editableBars, editedChords, openTestPhrase } from '../helpers/phrases';
 import { PHRASE_TRACK_KEY } from '@/engine/phrases';
 import { barChords } from '@/engine/timeline';
+import {
+  MIDI_PREFS_STORAGE_KEY,
+  applyMidiPrefs,
+  resetMidiPrefsCache,
+  shapeVelocity,
+} from '@/engine/midiPrefs';
 import type { InstrumentPool } from '@/engine/instrumentPool';
 import type { ChordSegment } from '@/types/music';
 
@@ -155,6 +161,9 @@ describe('useMidiInput', () => {
     started.length = 0;
     stopped.length = 0;
     ensureAudio.mockClear();
+
+    localStorage.removeItem(MIDI_PREFS_STORAGE_KEY);
+    resetMidiPrefsCache();
   });
 
   afterEach(() => {
@@ -249,6 +258,19 @@ describe('useMidiInput', () => {
       noteOff(64);
 
       expect(blocks().map(b => b.velocity)).toEqual([90, 41]);
+    });
+
+    it('shapes the velocity by the touch setting, for what is heard and what is written alike', async () => {
+      const prefs = applyMidiPrefs({ touch: 50 });
+      const shaped = shapeVelocity(54, prefs);
+      expect(shaped).toBeGreaterThan(54);
+
+      await mountReady();
+      noteOn(60, 54);
+      noteOff(60);
+
+      expect(started).toEqual([{ pitch: 60, velocity: shaped }]);
+      expect(blocks().map(b => b.velocity)).toEqual([shaped]);
     });
 
     it('reuses the lowest lane once the key holding it is up', async () => {

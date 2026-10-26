@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
-import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, cleanup, act } from '@testing-library/react';
 import { SettingsDialog } from '@/components/SettingsDialog';
 import {
   applyOutputDevice,
@@ -15,6 +15,11 @@ import {
   loadAudioPrefs,
   readAudioHealth,
 } from '@/engine/audioPrefs';
+import {
+  MIDI_PREFS_STORAGE_KEY,
+  reportVelocity,
+  resetMidiPrefsCache,
+} from '@/engine/midiPrefs';
 import { isTauri } from '@/engine/platform';
 
 vi.mock('@/engine/audioOutput', () => ({
@@ -82,9 +87,44 @@ describe('SettingsDialog', () => {
     vi.mocked(loadAudioPrefs).mockReturnValue({ bufferFrames: null, headroomMs: 0, resetOnStop: true });
     vi.mocked(readAudioHealth).mockResolvedValue(HEALTH);
     vi.mocked(isTauri).mockReturnValue(true);
+    localStorage.removeItem(MIDI_PREFS_STORAGE_KEY);
+    resetMidiPrefsCache();
   });
 
   afterEach(cleanup);
+
+  describe('the MIDI tab', () => {
+    it('starts with velocity passed through untouched', () => {
+      open();
+      openTab('MIDI');
+
+      expect(screen.getByLabelText<HTMLInputElement>('Touch sensitivity').value).toBe('0');
+      expect(screen.getByLabelText<HTMLInputElement>('Minimum velocity').value).toBe('0');
+    });
+
+    it('remembers a lighter touch', () => {
+      open();
+      openTab('MIDI');
+      fireEvent.change(screen.getByLabelText('Touch sensitivity'), { target: { value: '50' } });
+
+      expect(JSON.parse(localStorage.getItem(MIDI_PREFS_STORAGE_KEY)!)).toEqual({
+        touch: 50,
+        minVelocity: 0,
+      });
+    });
+
+    it('shows what the last key arrived at and what it became', () => {
+      open();
+      openTab('MIDI');
+      fireEvent.change(screen.getByLabelText('Touch sensitivity'), { target: { value: '50' } });
+      act(() => reportVelocity(54));
+
+      // γ = 0.5: 127 * sqrt(54 / 127) ≈ 82.8.
+      expect(screen.getByRole('status', { name: 'Last key' })).toHaveTextContent(
+        'Last key: in 54 → out 83'
+      );
+    });
+  });
 
   it('opens on the audio tab', async () => {
     open();

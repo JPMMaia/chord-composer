@@ -119,6 +119,7 @@ import {
   DEFAULT_KEY,
   DEFAULT_KEY_MODE,
   trackColorAt,
+  MAX_TRACK_VOLUME,
 } from '@/utils/constants';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
 import {
@@ -1880,8 +1881,8 @@ export const projectStore = create<ProjectState>((set, get) => ({
   },
 
   setTrackVolume: (trackId: string, volume: number) => {
-    if (volume < 0 || volume > 1) {
-      throw new Error('Volume must be between 0 and 1');
+    if (volume < 0 || volume > MAX_TRACK_VOLUME) {
+      throw new Error(`Volume must be between 0 and ${MAX_TRACK_VOLUME}`);
     }
     updateTrack(get, set, trackId, () => ({ volume }));
   },

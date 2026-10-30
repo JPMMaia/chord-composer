@@ -115,3 +115,11 @@ export const DEFAULT_KEY: NoteName = 'C';
 
 /** Default key mode */
 export const DEFAULT_KEY_MODE: 'major' | 'minor' = 'major';
+
+/**
+ * The loudest an instrument's fader goes: 4 is +12 dB, room to lift a quiet sample
+ * library or plugin up to the others. A phrase's volume curve stays 0-1 — it is a
+ * shape scaled by the fader — so only the fader and the curve compiled from it reach
+ * past 1.
+ */
+export const MAX_TRACK_VOLUME = 4;

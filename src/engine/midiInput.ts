@@ -2,7 +2,8 @@
  * The seam between a MIDI keyboard and the rest of the app.
  *
  * Deliberately narrow: this module turns a stream of bytes from the Web MIDI API
- * into note-ons and note-offs and says nothing about what should happen to them.
+ * into note-ons, note-offs and the sustain pedal, and says nothing about what
+ * should happen to them.
  * No React, no stores, no project types — which is what lets the parsing half be
  * tested exhaustively without a keyboard, and what would let a native MIDI backend
  * replace `openMidiInputs` without anything downstream noticing.
@@ -16,6 +17,15 @@ export interface MidiNoteEvent {
   /** MIDI velocity, 0-127. On a note-off this is the release velocity. */
   velocity: number;
 }
+
+/** The sustain pedal (CC64) going down or coming up. */
+export interface MidiPedalEvent {
+  type: 'sustain';
+  down: boolean;
+}
+
+/** Everything a MIDI keyboard says that the app acts on. */
+export type MidiInputEvent = MidiNoteEvent | MidiPedalEvent;
 
 /** Whether MIDI input is available at all, and what is plugged in. */
 export interface MidiInputStatus {
@@ -32,24 +42,35 @@ export interface MidiInputStatus {
 /** Channel voice message types, from the MIDI spec. The low nibble is the channel. */
 const NOTE_OFF = 0x80;
 const NOTE_ON = 0x90;
+const CONTROL_CHANGE = 0xb0;
+
+/** The damper pedal's controller number. */
+const SUSTAIN_CC = 64;
 
 /**
- * The note event a MIDI message describes, or null if it describes something else.
+ * The event a MIDI message describes, or null if it describes something else.
  *
  * Channel is deliberately ignored: a keyboard split across channels, or one whose
  * channel the player has changed, should still play. Everything that is not a note
- * — clock, control changes, aftertouch, pitch bend, system messages — is dropped
- * rather than approximated, because there is nothing here that could act on it.
+ * or the sustain pedal — clock, other control changes, aftertouch, pitch bend,
+ * system messages — is dropped rather than approximated, because there is nothing
+ * here that could act on it.
  *
  * Running status is not handled, and does not need to be: the Web MIDI API is
  * specified to deliver complete messages, with the status byte always present.
  */
-export function parseMidiMessage(data: Uint8Array | number[]): MidiNoteEvent | null {
+export function parseMidiMessage(data: Uint8Array | number[]): MidiInputEvent | null {
   if (data.length < 3) return null;
 
   const status = data[0] & 0xf0;
   const note = data[1] & 0x7f;
   const velocity = data[2] & 0x7f;
+
+  // The spec reads 0-63 as up and 64-127 as down, which is also what makes a
+  // continuous pedal, or one played half-down, behave as a switch here.
+  if (status === CONTROL_CHANGE) {
+    return note === SUSTAIN_CC ? { type: 'sustain', down: velocity >= 64 } : null;
+  }
 
   // A note-on with zero velocity is a note-off. Many keyboards send only this
   // form — they hold running status open by never emitting 0x80 — so treating it
@@ -68,7 +89,7 @@ export function parseMidiMessage(data: Uint8Array | number[]): MidiNoteEvent | n
 }
 
 interface OpenMidiInputsOptions {
-  onEvent: (event: MidiNoteEvent) => void;
+  onEvent: (event: MidiInputEvent) => void;
   /** Called once access is settled, and again whenever a device comes or goes. */
   onStatus?: (status: MidiInputStatus) => void;
 }

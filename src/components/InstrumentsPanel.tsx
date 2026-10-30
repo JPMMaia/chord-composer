@@ -17,7 +17,7 @@ import { openVst3Editor } from '@/engine/vst3Editor';
 import { isTauri } from '@/engine/platform';
 import { useVst3Plugins, type Vst3PluginsState } from '@/hooks/useVst3Plugins';
 import { useSfzInstruments, type SfzInstrumentsState } from '@/hooks/useSfzInstruments';
-import { trackColorAt } from '@/utils/constants';
+import { MAX_TRACK_VOLUME, trackColorAt } from '@/utils/constants';
 
 /**
  * The picker value that means "open the file dialog" rather than "play this".
@@ -891,7 +891,7 @@ const InstrumentRow: React.FC<InstrumentRowProps> = ({
         <input
           type="range"
           min={0}
-          max={1}
+          max={MAX_TRACK_VOLUME}
           step={0.01}
           value={track.volume}
           aria-label={`Volume ${track.name}`}

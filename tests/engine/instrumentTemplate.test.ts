@@ -120,7 +120,7 @@ describe('instrument templates', () => {
       })
     );
 
-    expect(read.instruments[0]).toMatchObject({ volume: 1, pan: -1 });
+    expect(read.instruments[0]).toMatchObject({ volume: 4, pan: -1 });
     expect(read.instruments[1]).toMatchObject({ volume: 1, pan: 0 });
   });
 

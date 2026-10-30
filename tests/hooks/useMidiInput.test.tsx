@@ -101,6 +101,11 @@ const noteOff = (pitch: number) =>
   act(() => {
     port.onmidimessage?.({ data: new Uint8Array([0x80, pitch, 0]) });
   });
+/** Press or lift the sustain pedal (CC64). */
+const pedal = (down: boolean) =>
+  act(() => {
+    port.onmidimessage?.({ data: new Uint8Array([0xb0, 64, down ? 127 : 0]) });
+  });
 
 /** Song position in seconds, driven by the test. 120 BPM, so a beat is half a second. */
 let songTime = 0;
@@ -444,6 +449,127 @@ describe('useMidiInput', () => {
 
       expect(stopped).toEqual([60]);
       expect(layout()).toEqual(before);
+    });
+  });
+
+  describe('the sustain pedal', () => {
+    it('keeps a released key sounding until the pedal comes up', async () => {
+      await mountReady();
+      pedal(true);
+      noteOn(60);
+      noteOff(60);
+      expect(stopped).toEqual([]);
+
+      pedal(false);
+      expect(stopped).toEqual([60]);
+    });
+
+    it('leaves a release alone once the pedal is up', async () => {
+      await mountReady();
+      pedal(true);
+      pedal(false);
+      noteOn(60);
+      noteOff(60);
+
+      expect(stopped).toEqual([60]);
+    });
+
+    it('does not cut a key still held when the pedal comes up', async () => {
+      await mountReady();
+      pedal(true);
+      noteOn(60);
+      pedal(false);
+
+      expect(stopped).toEqual([]);
+      noteOff(60);
+      expect(stopped).toEqual([60]);
+    });
+
+    it('ends the ringing note when the same key is struck again', async () => {
+      await mountReady();
+      beatsIn(0);
+      pedal(true);
+      noteOn(60);
+      beatsIn(1);
+      noteOff(60);
+      beatsIn(2);
+      noteOn(60);
+
+      expect(stopped).toEqual([60]);
+      expect(started).toHaveLength(2);
+      expect(played()).toEqual(['60@0+2/0', '60@2+1/0']);
+    });
+
+    it('writes a pedalled note as long as it was heard', async () => {
+      await mountReady();
+      beatsIn(0);
+      pedal(true);
+      noteOn(60);
+      beatsIn(1);
+      noteOff(60);
+      beatsIn(4);
+      pedal(false);
+
+      expect(played()).toEqual(['60@0+4/0']);
+    });
+
+    it('keeps a pedalled note in its lane, so the next key stacks above it', async () => {
+      await mountReady();
+      beatsIn(0);
+      pedal(true);
+      noteOn(60);
+      beatsIn(1);
+      noteOff(60);
+      noteOn(64);
+      beatsIn(3);
+      pedal(false);
+      noteOff(64);
+
+      expect(played()).toEqual(['60@0+3/0', '64@1+2/1']);
+    });
+
+    it('lets go of pedalled notes when the window loses focus', async () => {
+      await mountReady();
+      pedal(true);
+      noteOn(60);
+      noteOff(60);
+      act(() => {
+        fireEvent.blur(window);
+      });
+      expect(stopped).toEqual([60]);
+
+      // The pedal-up may have been lost with the focus, so the pedal reads as up.
+      noteOn(62);
+      noteOff(62);
+      expect(stopped).toEqual([60, 62]);
+    });
+
+    it('lets go of pedalled notes when playback stops, but stays down', async () => {
+      const { rerender } = await mountReady(true);
+      pedal(true);
+      noteOn(60);
+      noteOff(60);
+
+      act(() => rerender({ playing: false }));
+      expect(stopped).toEqual([60]);
+
+      // The foot is still on it: a key let go after Stop still rings.
+      noteOn(62);
+      noteOff(62);
+      expect(stopped).toEqual([60]);
+      pedal(false);
+      expect(stopped).toEqual([60, 62]);
+    });
+
+    it('sustains while stopped without writing anything', async () => {
+      await mountReady(false);
+      pedal(true);
+      noteOn(60);
+      noteOff(60);
+      pedal(false);
+
+      expect(stopped).toEqual([60]);
+      expect(blocks()).toHaveLength(0);
     });
   });
 

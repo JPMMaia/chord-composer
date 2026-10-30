@@ -30,6 +30,7 @@ const storage = { id: 'sample-storage' };
 vi.mock('@/engine/sampleCache', () => ({ sampleStorage: () => storage }));
 
 import { SmplrPianoInstrument, MASTER_GAIN } from '@/engine/smplrPiano';
+import { MAX_TRACK_VOLUME } from '@/utils/constants';
 
 interface MockNode {
   connect: ReturnType<typeof vi.fn>;
@@ -218,8 +219,8 @@ describe('SmplrPianoInstrument', () => {
     });
 
     it('clamps out-of-range values', () => {
-      piano.setVolume(1.5);
-      expect(mock.gainNodes[0].gain.value).toBe(MASTER_GAIN);
+      piano.setVolume(9);
+      expect(mock.gainNodes[0].gain.value).toBe(MAX_TRACK_VOLUME * MASTER_GAIN);
 
       piano.setVolume(-1);
       expect(mock.gainNodes[0].gain.value).toBe(0);

@@ -263,6 +263,16 @@ export class Vst3Instrument implements Instrument {
    */
   private pendingVolume: number | null = null;
 
+  /**
+   * The last hold or release sent for each pitch, so the next one waits for it.
+   *
+   * Per pitch because that is the only order a plugin can hear: a note-off names
+   * just the pitch, so a release overtaking the next hold of the same key cuts
+   * the new note off as it starts. Different pitches go out side by side, or a
+   * chord's keys would be spread a round trip apart.
+   */
+  private keyChains = new Map<number, Promise<unknown>>();
+
   constructor(
     audioContext: AudioContext,
     trackId: string,
@@ -415,32 +425,45 @@ export class Vst3Instrument implements Instrument {
    * leaves a slow-releasing library — an orchestral one, typically — sounding
    * long after the key came up.
    *
-   * The release is chained onto the hold rather than fired alongside it. Two
+   * Holds and releases of one pitch go out strictly in turn (`keyChains`). Two
    * `invoke`s are two independent round trips and nothing promises they arrive
-   * in order; an off overtaking its on would hang the note until the next Stop.
+   * in order: an off overtaking its own on would hang the note until the next
+   * Stop, and one overtaking the *next* on — a key struck again under the pedal,
+   * whose old note is released just before the new one sounds — reaches the
+   * plugin as on-then-off and muffles the new note at birth.
    */
   sustain(note: { midiNote: number; velocity: number }): () => void {
     if (this.disposed || !this.loaded) return () => {};
 
-    const held = invoke('vst3_hold', {
-      trackId: this.trackId,
-      midiNote: note.midiNote,
-      velocity: note.velocity,
-    }).catch(err => {
-      console.error('vst3: could not hold note', err);
-    });
+    this.sendKey(note.midiNote, () =>
+      invoke('vst3_hold', {
+        trackId: this.trackId,
+        midiNote: note.midiNote,
+        velocity: note.velocity,
+      }).catch(err => {
+        console.error('vst3: could not hold note', err);
+      })
+    );
 
     return () => {
-      void held.then(() => {
-        if (this.disposed) return;
+      this.sendKey(note.midiNote, () =>
         invoke('vst3_release', {
           trackId: this.trackId,
           midiNote: note.midiNote,
         }).catch(err => {
           console.error('vst3: could not release note', err);
-        });
-      });
+        })
+      );
     };
+  }
+
+  /** Send a hold or release once everything already sent for this pitch has landed. */
+  private sendKey(midiNote: number, send: () => Promise<unknown>): void {
+    const previous = this.keyChains.get(midiNote) ?? Promise.resolve();
+    this.keyChains.set(
+      midiNote,
+      previous.then(() => (this.disposed ? undefined : send()))
+    );
   }
 
   stopAll(): void {

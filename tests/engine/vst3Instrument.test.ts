@@ -201,6 +201,46 @@ describe('Vst3Instrument', () => {
       expect(callsTo('vst3_release')).toHaveLength(1);
     });
 
+    // A key struck again under the pedal: the old note is released and the new
+    // one held in the same breath. A note-off names only the pitch, so the
+    // release reaching the plugin second would silence the new note at birth.
+    it('releases a re-struck key before holding it again', async () => {
+      const instrument = makeLoaded();
+      await instrument.load();
+
+      const releaseOld = instrument.sustain({ midiNote: 64, velocity: 90 });
+      await flushed();
+      invoke.mockClear();
+
+      releaseOld();
+      instrument.sustain({ midiNote: 64, velocity: 80 });
+      await flushed();
+      await flushed();
+
+      expect(invoke.mock.calls.map(c => c[0])).toEqual(['vst3_release', 'vst3_hold']);
+    });
+
+    // Only one pitch's own events are ordered against each other; a chord's keys
+    // waiting on one another's round trips would smear it into an arpeggio.
+    it('does not hold one pitch back behind another', async () => {
+      invoke.mockImplementation((command: string, args: { midiNote?: number }) =>
+        command === 'vst3_hold' && args.midiNote === 60
+          ? new Promise<void>(() => {})
+          : Promise.resolve()
+      );
+
+      const instrument = makeLoaded();
+      await instrument.load();
+
+      instrument.sustain({ midiNote: 60, velocity: 90 });
+      instrument.sustain({ midiNote: 64, velocity: 90 });
+      await flushed();
+
+      expect(callsTo('vst3_hold').map(c => (c[0] as { midiNote: number }).midiNote)).toEqual([
+        60, 64,
+      ]);
+    });
+
     it('sends nothing before the plugin has loaded', async () => {
       const instrument = makeLoaded();
 

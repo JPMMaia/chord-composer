@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MASTER_GAIN, createInstrumentBus } from '@/engine/instrumentBus';
+import { MAX_TRACK_VOLUME } from '@/utils/constants';
 
 /** A GainNode stub recording the automation calls made against its gain param. */
 function makeGain() {
@@ -64,10 +65,16 @@ describe('setVolume', () => {
     );
   });
 
+  it('boosts past 100% up to the fader ceiling', () => {
+    const bus = createInstrumentBus(ctx, {} as AudioNode);
+    bus.setVolume(2.5);
+    expect(gain.gain.setValueAtTime).toHaveBeenLastCalledWith(2.5 * MASTER_GAIN, 10);
+  });
+
   it('clamps out-of-range levels', () => {
     const bus = createInstrumentBus(ctx, {} as AudioNode);
-    bus.setVolume(3);
-    expect(gain.gain.setValueAtTime).toHaveBeenLastCalledWith(MASTER_GAIN, 10);
+    bus.setVolume(9);
+    expect(gain.gain.setValueAtTime).toHaveBeenLastCalledWith(MAX_TRACK_VOLUME * MASTER_GAIN, 10);
     bus.setVolume(-1);
     expect(gain.gain.setValueAtTime).toHaveBeenLastCalledWith(0, 10);
   });
@@ -96,8 +103,11 @@ describe('rampVolume', () => {
 
   it('clamps the level and ignores a non-finite time', () => {
     const bus = createInstrumentBus(ctx, {} as AudioNode);
-    bus.rampVolume(2, 12);
-    expect(gain.gain.linearRampToValueAtTime).toHaveBeenCalledWith(MASTER_GAIN, 12);
+    bus.rampVolume(9, 12);
+    expect(gain.gain.linearRampToValueAtTime).toHaveBeenCalledWith(
+      MAX_TRACK_VOLUME * MASTER_GAIN,
+      12
+    );
 
     bus.rampVolume(0.5, Number.NaN);
     expect(gain.gain.linearRampToValueAtTime).toHaveBeenCalledTimes(1);

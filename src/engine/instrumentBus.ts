@@ -9,6 +9,8 @@
  * exactly when the arrangement got busy.
  */
 
+import { MAX_TRACK_VOLUME } from '@/utils/constants';
+
 /**
  * Headroom. A chord segment sounds every note of the chord at once, and several
  * segments can overlap, so summing voices at full scale clips. 0.7 leaves room
@@ -30,7 +32,7 @@ export interface InstrumentBus {
   /** Node an instrument should render into. */
   readonly input: GainNode;
   /**
-   * Set this instrument's level, 0-1, within the shared headroom, *now*.
+   * Set this instrument's level, 0-`MAX_TRACK_VOLUME`, within the shared headroom, *now*.
    *
    * Cancels anything previously scheduled, which is what makes it the reset used
    * at Play and Stop: a run must not inherit the level a fade in the last one
@@ -75,7 +77,7 @@ export function createInstrumentBus(
 
   /** A level as a gain figure, or null when it is not a number at all. */
   const gainFor = (volume: number): number | null =>
-    Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) * MASTER_GAIN : null;
+    Number.isFinite(volume) ? Math.max(0, Math.min(MAX_TRACK_VOLUME, volume)) * MASTER_GAIN : null;
 
   return {
     input,

@@ -18,8 +18,8 @@ function clampValue(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
 
-/** Whether a value off a file or a pointer is a usable point. */
-function isPoint(point: unknown): point is AutomationPoint {
+/** Whether a value off a file or a pointer is a usable point, at most `max`. */
+function isPoint(point: unknown, max: number): point is AutomationPoint {
   if (typeof point !== 'object' || point === null) return false;
   const { beat, value } = point as AutomationPoint;
   return (
@@ -29,7 +29,7 @@ function isPoint(point: unknown): point is AutomationPoint {
     Number.isFinite(value) &&
     beat >= 0 &&
     value >= 0 &&
-    value <= 1
+    value <= max
   );
 }
 
@@ -38,12 +38,15 @@ function isPoint(point: unknown): point is AutomationPoint {
  *
  * A duplicated beat resolves to the *later* entry, so an edit that lands a point on
  * top of another reads as replacing it rather than as being silently refused.
+ *
+ * @param max - The highest usable value. 1 for every curve that is drawn; the curve
+ *   compiled onto a track is that times the fader, so it reaches `MAX_TRACK_VOLUME`.
  */
-export function normalizePoints(points: AutomationPoint[]): AutomationPoint[] {
+export function normalizePoints(points: AutomationPoint[], max = 1): AutomationPoint[] {
   if (!Array.isArray(points)) return [];
 
   const sorted = points
-    .filter(isPoint)
+    .filter((p): p is AutomationPoint => isPoint(p, max))
     .map(p => ({ beat: p.beat, value: p.value }))
     .sort((a, b) => a.beat - b.beat);
 

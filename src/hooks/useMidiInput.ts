@@ -64,6 +64,10 @@ interface UseMidiInputProps {
  * by degree, retuned by a change of key, or moved on its own — none of which was
  * true of the single opaque block that held keys used to be grouped into.
  *
+ * **The sustain pedal holds what is let go.** A key released with the pedal down
+ * keeps sounding, and its block keeps growing, until the pedal comes up — so a
+ * recorded take plays back as it was heard, on every backend, without a CC lane.
+ *
  * The position comes from `getSongTime` rather than from the playhead React renders,
  * which is up to a scheduling pass (50 ms) stale.
  */
@@ -79,6 +83,8 @@ export function useMidiInput({
 
   /** Keys held down, by MIDI note number. Outlives renders, so a re-render cannot drop one. */
   const heldRef = useRef(new Map<number, HeldKey>());
+  /** Keys already up but kept sounding by the pedal, by MIDI note number. */
+  const sustainedRef = useRef(new Map<number, HeldKey>());
   const isPlayingRef = useRef(isPlaying);
   isPlayingRef.current = isPlaying;
 
@@ -95,6 +101,8 @@ export function useMidiInput({
 
   useEffect(() => {
     const held = heldRef.current;
+    const sustained = sustainedRef.current;
+    let pedalDown = false;
 
     /** Where the playhead is now, in the edited surface's own beats, snapped as asked. */
     const beatNow = (): number => {
@@ -118,12 +126,12 @@ export function useMidiInput({
      *
      * Lowest rather than next-highest, so a melody played one note at a time never
      * leaves lane 0 and the instrument stays one row tall. Only *held* keys are
-     * counted: once a key is released its lane is free again, because a block that
-     * has stopped is no longer in anything's way.
+     * counted, along with keys the pedal is holding: once a note stops its lane is
+     * free again, because a block that has stopped is no longer in anything's way.
      */
     const freeLane = (): number => {
       const taken = new Set<number>();
-      for (const key of held.values()) {
+      for (const key of [...held.values(), ...sustained.values()]) {
         if (key.take) taken.add(key.take.lane);
       }
       let lane = 0;
@@ -144,11 +152,34 @@ export function useMidiInput({
       propsRef.current.record(take.trackId, take.startBeat, segment);
     };
 
+    /** Silence a note and write the length it reached. */
+    const finish = (key: HeldKey) => {
+      key.release();
+      if (!key.take) return;
+      const duration = Math.max(floorNow(), beatNow() - key.take.startBeat);
+      commit(key.take, duration);
+    };
+
+    /** Let go of everything the pedal is holding. */
+    const finishSustained = () => {
+      const open = [...sustained.values()];
+      sustained.clear();
+      for (const key of open) finish(key);
+    };
+
     const handleNoteOn = (event: MidiNoteEvent) => {
       // A key already down repeating is not a second press. Some controllers do
       // send a second note-on for a held key; starting a fresh voice for it would
       // leave the first one sounding with nothing left to stop it.
       if (held.has(event.note)) return;
+
+      // Struck again under the pedal: the old note ends where the new one begins,
+      // as a piano's would, rather than being orphaned beneath it.
+      const ringing = sustained.get(event.note);
+      if (ringing) {
+        sustained.delete(event.note);
+        finish(ringing);
+      }
 
       const trackId = selectionStore.getState().selectedTrackId;
       if (!trackId) return;
@@ -199,39 +230,47 @@ export function useMidiInput({
       const key = held.get(event.note);
       if (!key) return;
       held.delete(event.note);
-      key.release();
 
-      if (!key.take) return;
-      const duration = Math.max(floorNow(), beatNow() - key.take.startBeat);
-      commit(key.take, duration);
+      if (pedalDown) {
+        sustained.set(event.note, key);
+        return;
+      }
+      finish(key);
+    };
+
+    const handlePedal = (down: boolean) => {
+      pedalDown = down;
+      if (!down) finishSustained();
     };
 
     const close = openMidiInputs({
       onEvent: event => {
-        if (event.type === 'noteOn') handleNoteOn(event);
+        if (event.type === 'sustain') handlePedal(event.down);
+        else if (event.type === 'noteOn') handleNoteOn(event);
         else handleNoteOff(event);
       },
       onStatus: setStatus,
     });
 
-    /** Losing the window loses the note-offs, so everything held is let go. */
+    /**
+     * Losing the window loses the note-offs, so everything held is let go — and the
+     * pedal-up may be lost with them, so the pedal is taken to be up.
+     */
     const handleBlur = () => {
-      const open = [...held.values()];
+      pedalDown = false;
+      const open = [...held.values(), ...sustained.values()];
       held.clear();
-      for (const key of open) key.release();
-      for (const key of open) {
-        if (!key.take) continue;
-        const duration = Math.max(floorNow(), beatNow() - key.take.startBeat);
-        commit(key.take, duration);
-      }
+      sustained.clear();
+      for (const key of open) finish(key);
     };
     window.addEventListener('blur', handleBlur);
 
     return () => {
       close();
       window.removeEventListener('blur', handleBlur);
-      for (const key of held.values()) key.release();
+      for (const key of [...held.values(), ...sustained.values()]) key.release();
       held.clear();
+      sustained.clear();
       // Unmounting is not a musical event: silence what is held, but do not write a
       // block measured against a playhead that is going away.
     };
@@ -240,11 +279,15 @@ export function useMidiInput({
 
   // Playback ending ends the take with it. Each block keeps the length it had
   // reached rather than being re-committed: Stop rewinds the playhead, so there is
-  // no longer a position to measure a release against.
+  // no longer a position to measure a release against. The pedal itself is left as
+  // it is: it is still physically down, and keys let go after Stop should ring.
   useEffect(() => {
     if (isPlaying) return;
-    for (const key of heldRef.current.values()) key.release();
+    for (const key of [...heldRef.current.values(), ...sustainedRef.current.values()]) {
+      key.release();
+    }
     heldRef.current.clear();
+    sustainedRef.current.clear();
   }, [isPlaying]);
 
   return status;

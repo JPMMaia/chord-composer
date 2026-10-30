@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { parseMidiMessage, openMidiInputs } from '@/engine/midiInput';
-import type { MidiInputStatus, MidiNoteEvent } from '@/engine/midiInput';
+import type { MidiInputStatus, MidiInputEvent } from '@/engine/midiInput';
 
 /** A channel-voice message: status nibble, channel, and two data bytes. */
 const message = (status: number, channel: number, a: number, b: number) =>
@@ -78,9 +78,26 @@ describe('parseMidiMessage', () => {
     }
   });
 
-  it('drops everything that is not a note', () => {
-    // Control change, program change, pitch bend, aftertouch, clock, active sensing.
-    expect(parseMidiMessage(message(0xb0, 0, 64, 127))).toBeNull();
+  it('reads the sustain pedal, down from 64 and up below it', () => {
+    expect(parseMidiMessage(message(0xb0, 0, 64, 127))).toEqual({ type: 'sustain', down: true });
+    expect(parseMidiMessage(message(0xb0, 0, 64, 0))).toEqual({ type: 'sustain', down: false });
+    expect(parseMidiMessage(message(0xb0, 0, 64, 64))).toEqual({ type: 'sustain', down: true });
+    expect(parseMidiMessage(message(0xb0, 0, 64, 63))).toEqual({ type: 'sustain', down: false });
+  });
+
+  it('reads the sustain pedal on any channel', () => {
+    for (const channel of [0, 3, 9, 15]) {
+      expect(parseMidiMessage(message(0xb0, channel, 64, 127))).toEqual({
+        type: 'sustain',
+        down: true,
+      });
+    }
+  });
+
+  it('drops everything that is not a note or the sustain pedal', () => {
+    // Other control changes, program change, pitch bend, aftertouch, clock, active sensing.
+    expect(parseMidiMessage(message(0xb0, 0, 1, 127))).toBeNull();
+    expect(parseMidiMessage(message(0xb0, 0, 66, 127))).toBeNull();
     expect(parseMidiMessage(message(0xc0, 0, 5, 0))).toBeNull();
     expect(parseMidiMessage(message(0xe0, 0, 0, 64))).toBeNull();
     expect(parseMidiMessage(message(0xa0, 0, 60, 80))).toBeNull();
@@ -100,7 +117,7 @@ describe('openMidiInputs', () => {
 
   it('delivers note events from every attached input', async () => {
     const { ports } = fakeMidiAccess(['Keyboard A', 'Keyboard B']);
-    const events: MidiNoteEvent[] = [];
+    const events: MidiInputEvent[] = [];
 
     openMidiInputs({ onEvent: e => events.push(e) });
     await settle();
@@ -129,7 +146,7 @@ describe('openMidiInputs', () => {
 
   it('picks up a keyboard plugged in later', async () => {
     const { access } = fakeMidiAccess([]);
-    const events: MidiNoteEvent[] = [];
+    const events: MidiInputEvent[] = [];
     const statuses: MidiInputStatus[] = [];
 
     openMidiInputs({ onEvent: e => events.push(e), onStatus: s => statuses.push(s) });
@@ -147,7 +164,7 @@ describe('openMidiInputs', () => {
 
   it('stops listening when disposed', async () => {
     const { ports } = fakeMidiAccess();
-    const events: MidiNoteEvent[] = [];
+    const events: MidiInputEvent[] = [];
 
     const close = openMidiInputs({ onEvent: e => events.push(e) });
     await settle();
@@ -159,7 +176,7 @@ describe('openMidiInputs', () => {
 
   it('attaches nothing when disposed before access is granted', async () => {
     const { ports } = fakeMidiAccess();
-    const events: MidiNoteEvent[] = [];
+    const events: MidiInputEvent[] = [];
 
     // Disposed while the permission prompt is still up — the case a component
     // unmounting mid-request produces, and the one that leaks a live port.

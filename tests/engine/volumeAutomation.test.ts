@@ -57,6 +57,15 @@ describe('valueAtBeat', () => {
 });
 
 describe('normalizePoints', () => {
+  it('drops values past 1 unless given a higher ceiling', () => {
+    const points = [
+      { beat: 0, value: 0.5 },
+      { beat: 4, value: 3 },
+    ];
+    expect(normalizePoints(points)).toEqual([{ beat: 0, value: 0.5 }]);
+    expect(normalizePoints(points, 4)).toEqual(points);
+  });
+
   it('sorts by beat', () => {
     const sorted = normalizePoints([
       { beat: 8, value: 0 },

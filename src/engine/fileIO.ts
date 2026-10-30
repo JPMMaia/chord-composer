@@ -42,7 +42,7 @@ import {
 import { normalizeSections } from '@/engine/sections';
 import { normalizeTrackOrder } from '@/engine/trackGroups';
 import { DEFAULT_INSTRUMENT_ID } from '@/engine/instrumentCatalog';
-import { trackColorAt } from '@/utils/constants';
+import { MAX_TRACK_VOLUME, trackColorAt } from '@/utils/constants';
 import {
   MAX_RELEASE_GAP_MS,
   MAX_TIME_OFFSET_MS,
@@ -1315,8 +1315,8 @@ export function validateProject(project: Project): ValidationResult {
     if (t.groupId !== undefined && !groupIds.has(t.groupId)) {
       errors.push(`Track ${i}: group "${t.groupId}" does not exist.`);
     }
-    if (typeof t.volume !== 'number' || t.volume < 0 || t.volume > 1) {
-      errors.push(`Track ${i}: volume must be between 0 and 1.`);
+    if (typeof t.volume !== 'number' || t.volume < 0 || t.volume > MAX_TRACK_VOLUME) {
+      errors.push(`Track ${i}: volume must be between 0 and ${MAX_TRACK_VOLUME}.`);
     }
     if (typeof t.pan !== 'number' || t.pan < -1 || t.pan > 1) {
       errors.push(`Track ${i}: pan must be between -1 and 1.`);

@@ -359,7 +359,8 @@ impl Plugin {
     }
 
     pub fn set_gain(&mut self, gain: f32) {
-        self.gain = gain.clamp(0.0, 1.0);
+        // 4 is the app's `MAX_TRACK_VOLUME`: +12 dB of make-up for a quiet plugin.
+        self.gain = gain.clamp(0.0, 4.0);
     }
 
     /// Name the slot this plugin is about to be handed to the audio thread for.

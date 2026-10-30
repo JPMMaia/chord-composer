@@ -24,7 +24,7 @@ import {
   sameLanes,
 } from '@/engine/parameterAutomation';
 import { generateId } from '@/utils/id';
-import { TRACK_COLORS } from '@/utils/constants';
+import { MAX_TRACK_VOLUME, TRACK_COLORS } from '@/utils/constants';
 
 /**
  * Phrases — named, reusable blocks of one instrument's material — and the placements
@@ -740,7 +740,7 @@ export function compileAutomation(
       }
     }
 
-    const nextVolume = automated ? normalizePoints(volume) : undefined;
+    const nextVolume = automated ? normalizePoints(volume, MAX_TRACK_VOLUME) : undefined;
     const nextLanes = lanes.size
       ? normalizeParameterAutomation([...lanes.values()], { dropEmpty: true })
       : [];

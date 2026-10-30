@@ -103,7 +103,8 @@ export function useAutomationLanes(
       points: phrase.volumeAutomation ?? [],
       // The fader's value: what the placement plays at with no curve drawn, and what
       // every point drawn here is a fraction of.
-      flatLevel: track.volume,
+      // Pinned to the top past 100%, where the lane has no room to draw it.
+      flatLevel: Math.min(1, track.volume),
       readPoints: () => phraseInStore(phrase.id)?.volumeAutomation ?? [],
       onAdd: (beat, value) => addVolumePoint(phrase.id, beat, value),
       onMove: (i, beat, value) => moveVolumePoint(phrase.id, i, beat, value),

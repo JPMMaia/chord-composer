@@ -9,7 +9,7 @@ import {
 } from '@/engine/timeline';
 import { gmInstrumentId, gmProgramNumber } from '@/engine/instrumentCatalog';
 import { normalizePoints } from '@/engine/volumeAutomation';
-import { trackColorAt } from '@/utils/constants';
+import { MAX_TRACK_VOLUME, trackColorAt } from '@/utils/constants';
 import { trackOffsetSeconds } from '@/engine/scheduler';
 
 // ---------------------------------------------------------------------------
@@ -281,7 +281,7 @@ function timeSignatureEvents(
  * last, exactly as `valueAtBeat` does, so the file sounds like the app.
  */
 function volumeEvents(track: Track, ppq: number, channel: number): AbsoluteEvent[] {
-  const points = normalizePoints(track.volumeAutomation ?? []);
+  const points = normalizePoints(track.volumeAutomation ?? [], MAX_TRACK_VOLUME);
   const level = (value: number) => Math.min(127, Math.max(0, Math.round(value * 127)));
   const event = (tick: number, value: number): AbsoluteEvent => ({
     tick,

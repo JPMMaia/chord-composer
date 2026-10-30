@@ -21,6 +21,7 @@
  * project would be a worse answer than a message.
  */
 import type { Project } from '@/types/music';
+import { MAX_TRACK_VOLUME } from '@/utils/constants';
 
 /**
  * Version 1.0 — the first. Every field is written, so there is nothing yet for a
@@ -119,7 +120,7 @@ export function deserializeTemplate(json: string): InstrumentTemplate {
     .map((entry, i) => ({
       name: typeof entry.name === 'string' && entry.name ? entry.name : `Instrument ${i + 1}`,
       instrument: entry.instrument as string,
-      volume: clamp(entry.volume, 0, 1, 1),
+      volume: clamp(entry.volume, 0, MAX_TRACK_VOLUME, 1),
       pan: clamp(entry.pan, -1, 1, 0),
       color: typeof entry.color === 'string' ? entry.color : undefined,
       // Opaque base64. Anything that is not a string is dropped rather than handed to
